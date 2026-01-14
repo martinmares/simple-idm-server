@@ -4,6 +4,7 @@ mod config;
 mod db;
 mod jwks;
 mod oauth2;
+mod oidc;
 
 use axum::{
     middleware,
@@ -104,10 +105,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .with_state(db_pool.clone());
 
-    // JWKS routes (needs jwt_service state)
+    // OIDC state
+    let oidc_state = Arc::new(oidc::OidcState::new(&config));
+
+    // JWKS route
     let jwks_routes = Router::new()
         .route("/.well-known/jwks.json", get(jwks::jwks_handler))
         .with_state(jwt_service.clone());
+
+    // OIDC Discovery route
+    let discovery_routes = Router::new()
+        .route(
+            "/.well-known/openid-configuration",
+            get(oidc::discovery_handler),
+        )
+        .with_state(oidc_state);
 
     // Vytvoř routes
     let app = Router::new()
@@ -129,8 +141,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(oauth2::handle_client_credentials),
         )
         .with_state(oauth_state)
-        // Merge JWKS routes
+        // Merge well-known routes
         .merge(jwks_routes)
+        .merge(discovery_routes)
         // Merge admin routes
         .merge(admin_routes)
         .layer(TraceLayer::new_for_http());
