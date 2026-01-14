@@ -6,6 +6,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub jwt: JwtConfig,
+    pub admin: AdminConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -26,6 +27,11 @@ pub struct JwtConfig {
     pub refresh_token_expiry_seconds: i64,
     pub private_key_path: String,
     pub public_key_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AdminConfig {
+    pub root_token: Option<String>,
 }
 
 impl Config {
@@ -54,6 +60,8 @@ impl Config {
         let public_key_path = env::var("JWT_PUBLIC_KEY_PATH")
             .unwrap_or_else(|_| "./keys/public.pem".to_string());
 
+        let admin_root_token = env::var("ADMIN_ROOT_TOKEN").ok();
+
         Ok(Config {
             server: ServerConfig {
                 host: server_host,
@@ -66,6 +74,9 @@ impl Config {
                 refresh_token_expiry_seconds: refresh_token_expiry,
                 private_key_path,
                 public_key_path,
+            },
+            admin: AdminConfig {
+                root_token: admin_root_token,
             },
         })
     }
