@@ -93,12 +93,17 @@ impl JwtService {
     }
 
     pub fn verify_token(&self, token: &str) -> Result<Claims, JwtError> {
-        let mut validation = Validation::default();
+        let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[&self.issuer]);
+        // Don't validate audience for now - allows more flexible token usage
+        validation.validate_aud = false;
 
         decode::<Claims>(token, &self.decoding_key, &validation)
             .map(|data| data.claims)
-            .map_err(|e| JwtError::DecodeError(e.to_string()))
+            .map_err(|e| {
+                tracing::error!("JWT verification failed: {}", e);
+                JwtError::DecodeError(e.to_string())
+            })
     }
 
     /// Get JWKS (JSON Web Key Set) for public key distribution

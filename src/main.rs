@@ -140,6 +140,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/oauth2/client_credentials/token",
             post(oauth2::handle_client_credentials),
         )
+        // Userinfo endpoint (needs jwt_service)
+        .route("/oauth2/userinfo", get(oauth2::handle_userinfo).with_state(jwt_service.clone()))
         .with_state(oauth_state)
         // Merge well-known routes
         .merge(jwks_routes)

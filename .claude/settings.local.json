@@ -16,7 +16,8 @@
       "Bash(xargs:*)",
       "Bash(git add:*)",
       "Bash(git restore:*)",
-      "Bash(git commit:*)"
+      "Bash(git commit:*)",
+      "Bash(/tmp/test_authcode_flow.sh)"
     ]
   }
 }
