@@ -11,12 +11,12 @@
 ┌─────────────────────────────────────────────────┐
 │  https://sso.cloud-app.cz                       │
 │  (nginx → simple-idm-server:8080)               │
-│                                                  │
+│                                                 │
 │  - /.well-known/openid-configuration            │
 │  - /.well-known/jwks.json                       │
 │  - /oauth2/authorize   ← Login zde!             │
 │  - /oauth2/token                                │
-│  - /admin/*            ← Admin API               │
+│  - /admin/*            ← Admin API              │
 └─────────────────────────────────────────────────┘
 ```
 

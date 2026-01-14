@@ -127,7 +127,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/health", get(health_check))
         // OAuth2 endpoints
         .route("/oauth2/token", post(oauth2::handle_token))
-        .route("/oauth2/authorize", post(oauth2::handle_authorize))
+        .route("/oauth2/authorize", get(oauth2::handle_authorize))
         .route("/oauth2/login", post(oauth2::handle_login))
         .route(
             "/oauth2/device/authorize",
