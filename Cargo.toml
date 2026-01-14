@@ -25,6 +25,7 @@ uuid = { version = "1.19", features = ["v4", "serde"] }
 rand = "0.9"
 sha2 = "0.10"
 base64 = "0.22"
+rsa = { version = "0.9", features = ["pem"] }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }

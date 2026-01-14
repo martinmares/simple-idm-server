@@ -2,6 +2,7 @@ mod admin;
 mod auth;
 mod config;
 mod db;
+mod jwks;
 mod oauth2;
 
 use axum::{
@@ -103,6 +104,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ))
         .with_state(db_pool.clone());
 
+    // JWKS routes (needs jwt_service state)
+    let jwks_routes = Router::new()
+        .route("/.well-known/jwks.json", get(jwks::jwks_handler))
+        .with_state(jwt_service.clone());
+
     // Vytvoř routes
     let app = Router::new()
         // Health check
@@ -123,6 +129,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(oauth2::handle_client_credentials),
         )
         .with_state(oauth_state)
+        // Merge JWKS routes
+        .merge(jwks_routes)
         // Merge admin routes
         .merge(admin_routes)
         .layer(TraceLayer::new_for_http());
