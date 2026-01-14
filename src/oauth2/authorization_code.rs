@@ -1,14 +1,21 @@
 use crate::auth::{build_custom_claims, get_user_group_names, get_user_groups, verify_password, JwtService};
 use crate::db::{models::{AuthorizationCode, OAuthClient, RefreshToken, User}, DbPool};
-use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
+use axum::{
+    extract::{Query, State},
+    http::{header, StatusCode},
+    response::{Html, IntoResponse, Redirect, Response},
+    Form, Json,
+};
 use chrono::{Duration, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
 use super::client_credentials::{ErrorResponse, OAuth2State, TokenResponse};
+use super::templates;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -69,67 +76,89 @@ pub struct TokenResponseWithRefresh {
 }
 
 /// Endpoint pro inicializaci authorization code flow
-/// V praxi by toto bylo HTML stránka s login formulářem
+/// Zobrazí HTML login formulář
 pub async fn handle_authorize(
     State(state): State<Arc<OAuth2State>>,
-    Json(req): Json<AuthorizeRequest>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
-    if req.response_type != "code" {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "unsupported_response_type".to_string(),
-                error_description: "Only 'code' response type is supported".to_string(),
-            }),
-        )
-            .into_response();
+    // Získej response_type
+    let response_type = params.get("response_type").map(|s| s.as_str()).unwrap_or("");
+    if response_type != "code" {
+        let html = templates::error_page(
+            "unsupported_response_type",
+            "Pouze 'code' response type je podporován",
+        );
+        return Html(html).into_response();
     }
+
+    // Získej client_id
+    let client_id = match params.get("client_id") {
+        Some(id) => id,
+        None => {
+            let html = templates::error_page(
+                "invalid_request",
+                "Chybí povinný parametr client_id",
+            );
+            return Html(html).into_response();
+        }
+    };
+
+    // Získej redirect_uri
+    let redirect_uri = match params.get("redirect_uri") {
+        Some(uri) => uri,
+        None => {
+            let html = templates::error_page(
+                "invalid_request",
+                "Chybí povinný parametr redirect_uri",
+            );
+            return Html(html).into_response();
+        }
+    };
 
     // Ověř, že klient existuje
     let client = match sqlx::query_as::<_, OAuthClient>(
         "SELECT * FROM oauth_clients WHERE client_id = $1 AND is_active = true",
     )
-    .bind(&req.client_id)
+    .bind(client_id)
     .fetch_optional(&state.db_pool)
     .await
     {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_client".to_string(),
-                error_description: "Client not found".to_string(),
-            })
-            .into_response()
+            let html = templates::error_page(
+                "invalid_client",
+                "OAuth klient nebyl nalezen nebo není aktivní",
+            );
+            return Html(html).into_response();
         }
         Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
+            let html = templates::error_page(
+                "server_error",
+                "Chyba databáze při ověřování klienta",
+            );
+            return Html(html).into_response();
         }
     };
 
     // Ověř redirect_uri
-    if !client.redirect_uris.contains(&req.redirect_uri) {
-        return Json(ErrorResponse {
-            error: "invalid_request".to_string(),
-            error_description: "Invalid redirect_uri".to_string(),
-        })
-        .into_response();
+    if !client.redirect_uris.contains(redirect_uri) {
+        let html = templates::error_page(
+            "invalid_request",
+            "Neplatná redirect_uri pro tohoto klienta",
+        );
+        return Html(html).into_response();
     }
 
-    // V produkci by zde byl redirect na login stránku
-    Json(AuthorizeResponse {
-        authorization_url: format!("/login?client_id={}&redirect_uri={}", req.client_id, req.redirect_uri),
-    })
-    .into_response()
+    // Zobraz login formulář
+    let html = templates::login_page(&params, None);
+    Html(html).into_response()
 }
 
 /// Endpoint pro login a vygenerování authorization code
+/// Přijímá HTML form data a redirectuje zpět na aplikaci
 pub async fn handle_login(
     State(state): State<Arc<OAuth2State>>,
-    Json(req): Json<LoginRequest>,
+    Form(req): Form<LoginRequest>,
 ) -> impl IntoResponse {
     // Ověř uživatele
     let user = match sqlx::query_as::<_, User>(
@@ -141,28 +170,56 @@ pub async fn handle_login(
     {
         Ok(Some(user)) => user,
         Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_grant".to_string(),
-                error_description: "Invalid credentials".to_string(),
-            })
-            .into_response()
+            // Zobraz login formulář s chybou
+            let mut params = HashMap::new();
+            params.insert("client_id".to_string(), req.client_id.clone());
+            params.insert("redirect_uri".to_string(), req.redirect_uri.clone());
+            if let Some(state) = &req.state {
+                params.insert("state".to_string(), state.clone());
+            }
+            if let Some(scope) = &req.scope {
+                params.insert("scope".to_string(), scope.clone());
+            }
+            if let Some(challenge) = &req.code_challenge {
+                params.insert("code_challenge".to_string(), challenge.clone());
+            }
+            if let Some(method) = &req.code_challenge_method {
+                params.insert("code_challenge_method".to_string(), method.clone());
+            }
+
+            let html = templates::login_page(&params, Some("Neplatné přihlašovací údaje"));
+            return Html(html).into_response();
         }
         Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
+            let html = templates::error_page(
+                "server_error",
+                "Chyba databáze při ověřování uživatele",
+            );
+            return Html(html).into_response();
         }
     };
 
     // Ověř heslo
     if !verify_password(&req.password, &user.password_hash).unwrap_or(false) {
-        return Json(ErrorResponse {
-            error: "invalid_grant".to_string(),
-            error_description: "Invalid credentials".to_string(),
-        })
-        .into_response();
+        // Zobraz login formulář s chybou
+        let mut params = HashMap::new();
+        params.insert("client_id".to_string(), req.client_id.clone());
+        params.insert("redirect_uri".to_string(), req.redirect_uri.clone());
+        if let Some(state) = &req.state {
+            params.insert("state".to_string(), state.clone());
+        }
+        if let Some(scope) = &req.scope {
+            params.insert("scope".to_string(), scope.clone());
+        }
+        if let Some(challenge) = &req.code_challenge {
+            params.insert("code_challenge".to_string(), challenge.clone());
+        }
+        if let Some(method) = &req.code_challenge_method {
+            params.insert("code_challenge_method".to_string(), method.clone());
+        }
+
+        let html = templates::login_page(&params, Some("Neplatné přihlašovací údaje"));
+        return Html(html).into_response();
     }
 
     // Ověř klienta
@@ -175,18 +232,18 @@ pub async fn handle_login(
     {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_client".to_string(),
-                error_description: "Client not found".to_string(),
-            })
-            .into_response()
+            let html = templates::error_page(
+                "invalid_client",
+                "OAuth klient nebyl nalezen",
+            );
+            return Html(html).into_response();
         }
         Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
+            let html = templates::error_page(
+                "server_error",
+                "Chyba databáze při ověřování klienta",
+            );
+            return Html(html).into_response();
         }
     };
 
@@ -219,18 +276,21 @@ pub async fn handle_login(
     .execute(&state.db_pool)
     .await
     {
-        return Json(ErrorResponse {
-            error: "server_error".to_string(),
-            error_description: "Failed to create authorization code".to_string(),
-        })
-        .into_response();
+        let html = templates::error_page(
+            "server_error",
+            "Nepodařilo se vytvořit autorizační kód",
+        );
+        return Html(html).into_response();
     }
 
-    Json(LoginResponse {
-        code,
-        state: req.state,
-    })
-    .into_response()
+    // Redirect zpět na aplikaci s authorization code
+    let mut redirect_url = req.redirect_uri.clone();
+    redirect_url.push_str(&format!("?code={}", code));
+    if let Some(state) = req.state {
+        redirect_url.push_str(&format!("&state={}", state));
+    }
+
+    Redirect::to(&redirect_url).into_response()
 }
 
 /// Endpoint pro výměnu authorization code za access token
