@@ -14,7 +14,9 @@
       "Bash(tee:*)",
       "Bash(docker-compose up:*)",
       "Bash(xargs:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git restore:*)",
+      "Bash(git commit:*)"
     ]
   }
 }

@@ -1,5 +1,8 @@
 use chrono::{Duration, Utc};
 use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use rsa::pkcs8::DecodePublicKey;
+use rsa::traits::PublicKeyParts;
+use rsa::RsaPublicKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -34,6 +37,7 @@ pub struct JwtService {
     encoding_key: EncodingKey,
     decoding_key: DecodingKey,
     pub issuer: String,
+    public_key_path: String,
 }
 
 impl JwtService {
@@ -56,6 +60,7 @@ impl JwtService {
             encoding_key,
             decoding_key,
             issuer,
+            public_key_path: public_key_path.to_string(),
         })
     }
 
@@ -94,5 +99,27 @@ impl JwtService {
         decode::<Claims>(token, &self.decoding_key, &validation)
             .map(|data| data.claims)
             .map_err(|e| JwtError::DecodeError(e.to_string()))
+    }
+
+    /// Get JWKS (JSON Web Key Set) for public key distribution
+    ///
+    /// Reads the public key from PEM file and converts it to JWK format
+    pub fn get_jwks(&self) -> Result<crate::jwks::JsonWebKeySet, JwtError> {
+        // Read public key PEM file
+        let pem_data = fs::read_to_string(&self.public_key_path)
+            .map_err(|e| JwtError::KeyFileError(format!("Failed to read public key: {}", e)))?;
+
+        // Parse RSA public key from PEM
+        let public_key = RsaPublicKey::from_public_key_pem(&pem_data)
+            .map_err(|e| JwtError::KeyFileError(format!("Failed to parse public key: {}", e)))?;
+
+        // Extract RSA components (n and e)
+        let n = public_key.n().to_bytes_be();
+        let e = public_key.e().to_bytes_be();
+
+        // Convert to JWK
+        let jwk = crate::jwks::rsa_components_to_jwk(&n, &e, Some("default-key".to_string()));
+
+        Ok(crate::jwks::JsonWebKeySet { keys: vec![jwk] })
     }
 }
