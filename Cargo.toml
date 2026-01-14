@@ -1,0 +1,53 @@
+[package]
+name = "simple-idm-server"
+version = "0.1.0"
+edition = "2021"
+authors = ["Your Name <your.email@example.com>"]
+
+[dependencies]
+# Web framework
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# JWT & Crypto
+jsonwebtoken = { version = "10.2", features = ["aws_lc_rs"] }
+argon2 = "0.5"
+uuid = { version = "1.19", features = ["v4", "serde"] }
+rand = "0.9"
+sha2 = "0.10"
+base64 = "0.22"
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Config & Env
+dotenvy = "0.15"
+config = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Validation
+validator = { version = "0.20", features = ["derive"] }
+
+# HTTP client (for OIDC discovery)
+reqwest = { version = "0.13", features = ["json"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+reqwest = { version = "0.13", features = ["json"] }
+chrono = { version = "0.4", features = ["serde"] }
