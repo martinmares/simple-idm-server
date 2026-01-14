@@ -52,3 +52,5 @@ reqwest = { version = "0.13", features = ["json"] }
 tokio-test = "0.4"
 reqwest = { version = "0.13", features = ["json"] }
 chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.22"
