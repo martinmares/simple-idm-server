@@ -1,10 +1,12 @@
+mod admin;
 mod auth;
 mod config;
 mod db;
 mod oauth2;
 
 use axum::{
-    routing::{get, post},
+    middleware,
+    routing::{delete, get, post, put},
     Router,
 };
 use std::sync::Arc;
@@ -52,6 +54,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         access_token_expiry: config.jwt.access_token_expiry_seconds,
     });
 
+    // Vytvoř Admin auth state
+    let admin_auth = admin::AdminAuth::new(&config, jwt_service.clone());
+
+    // Admin API routes (protected by middleware)
+    let admin_routes = Router::new()
+        // User management
+        .route("/admin/users", post(admin::handlers::create_user))
+        .route("/admin/users", get(admin::handlers::list_users))
+        .route("/admin/users/{id}", put(admin::handlers::update_user))
+        .route("/admin/users/{id}", delete(admin::handlers::delete_user))
+        // Group management
+        .route("/admin/groups", post(admin::handlers::create_group))
+        .route("/admin/groups", get(admin::handlers::list_groups))
+        .route("/admin/groups/{id}", delete(admin::handlers::delete_group))
+        // User-Group assignments
+        .route(
+            "/admin/users/{id}/groups",
+            post(admin::handlers::assign_user_to_group),
+        )
+        .route(
+            "/admin/users/{user_id}/groups/{group_id}",
+            delete(admin::handlers::remove_user_from_group),
+        )
+        // OAuth client management
+        .route(
+            "/admin/oauth-clients",
+            post(admin::handlers::create_oauth_client),
+        )
+        .route(
+            "/admin/oauth-clients",
+            get(admin::handlers::list_oauth_clients),
+        )
+        .route(
+            "/admin/oauth-clients/{id}",
+            delete(admin::handlers::delete_oauth_client),
+        )
+        // Claim map management
+        .route("/admin/claim-maps", post(admin::handlers::create_claim_map))
+        .route("/admin/claim-maps", get(admin::handlers::list_claim_maps))
+        .route(
+            "/admin/claim-maps/{id}",
+            delete(admin::handlers::delete_claim_map),
+        )
+        .layer(middleware::from_fn_with_state(
+            admin_auth.clone(),
+            admin::middleware::admin_auth_middleware,
+        ))
+        .with_state(db_pool.clone());
+
     // Vytvoř routes
     let app = Router::new()
         // Health check
@@ -72,6 +123,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(oauth2::handle_client_credentials),
         )
         .with_state(oauth_state)
+        // Merge admin routes
+        .merge(admin_routes)
         .layer(TraceLayer::new_for_http());
 
     // Spusť server
