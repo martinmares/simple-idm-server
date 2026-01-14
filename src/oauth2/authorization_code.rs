@@ -1,6 +1,6 @@
 use crate::auth::{build_custom_claims, get_user_group_names, get_user_groups, verify_password, JwtService};
 use crate::db::{models::{AuthorizationCode, OAuthClient, RefreshToken, User}, DbPool};
-use axum::{extract::State, response::{IntoResponse, Response}, Json};
+use axum::{extract::State, http::StatusCode, response::{IntoResponse, Response}, Json};
 use chrono::{Duration, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -75,11 +75,14 @@ pub async fn handle_authorize(
     Json(req): Json<AuthorizeRequest>,
 ) -> impl IntoResponse {
     if req.response_type != "code" {
-        return Json(ErrorResponse {
-            error: "unsupported_response_type".to_string(),
-            error_description: "Only 'code' response type is supported".to_string(),
-        })
-        .into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "unsupported_response_type".to_string(),
+                error_description: "Only 'code' response type is supported".to_string(),
+            }),
+        )
+            .into_response();
     }
 
     // Ověř, že klient existuje

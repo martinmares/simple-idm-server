@@ -107,7 +107,7 @@ impl OidcState {
                 "email".to_string(),
                 "groups".to_string(),
             ]),
-            userinfo_endpoint: None, // Not implemented yet
+            userinfo_endpoint: Some(format!("{}/oauth2/userinfo", self.issuer)),
             code_challenge_methods_supported: Some(vec![
                 "S256".to_string(), // PKCE with SHA-256
                 "plain".to_string(),
