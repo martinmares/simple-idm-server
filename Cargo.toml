@@ -17,6 +17,7 @@ sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid"
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_urlencoded = "0.7"
 
 # JWT & Crypto
 jsonwebtoken = { version = "10.2", features = ["aws_lc_rs"] }

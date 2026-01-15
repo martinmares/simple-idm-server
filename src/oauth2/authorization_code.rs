@@ -1,8 +1,9 @@
 use crate::auth::{build_custom_claims, get_user_group_names, get_user_groups, verify_password, JwtService};
 use crate::db::{models::{AuthorizationCode, OAuthClient, RefreshToken, User}, DbPool};
 use axum::{
+    body::Bytes,
     extract::{Query, State},
-    http::{header, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     Form, Json,
 };
@@ -296,8 +297,14 @@ pub async fn handle_login(
 /// Endpoint pro výměnu authorization code za access token
 pub async fn handle_token(
     State(state): State<Arc<OAuth2State>>,
-    Json(req): Json<TokenRequest>,
+    headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
+    let req = match parse_token_request(&headers, &body) {
+        Ok(req) => req,
+        Err(resp) => return resp,
+    };
+
     match req.grant_type.as_str() {
         "authorization_code" => handle_authorization_code_token(state, req).await,
         "refresh_token" => handle_refresh_token(state, req).await,
@@ -307,6 +314,45 @@ pub async fn handle_token(
         })
         .into_response(),
     }
+}
+
+fn parse_token_request(headers: &HeaderMap, body: &[u8]) -> Result<TokenRequest, Response> {
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+
+    let try_json = || serde_json::from_slice::<TokenRequest>(body);
+    let try_form = || serde_urlencoded::from_bytes::<TokenRequest>(body);
+
+    let parsed = if content_type.starts_with("application/json") {
+        try_json()
+    } else if content_type.starts_with("application/x-www-form-urlencoded") {
+        try_form()
+    } else if content_type.is_empty() {
+        try_json().or_else(|_| try_form())
+    } else {
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            Json(ErrorResponse {
+                error: "unsupported_media_type".to_string(),
+                error_description: "Expected Content-Type application/json or application/x-www-form-urlencoded".to_string(),
+            }),
+        )
+            .into_response());
+    };
+
+    parsed.map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_request".to_string(),
+                error_description: "Failed to parse token request".to_string(),
+            }),
+        )
+            .into_response()
+    })
 }
 
 async fn handle_authorization_code_token(
