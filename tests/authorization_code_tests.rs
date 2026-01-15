@@ -64,24 +64,40 @@ impl TestEnvironment {
     async fn wait_for_postgres(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Waiting for PostgreSQL to be ready...");
 
-        let max_attempts = 60;
+        let max_attempts = 90;
         let mut attempts = 0;
 
         loop {
-            let output = Command::new("docker-compose")
+            let health = Command::new("docker")
+                .arg("inspect")
                 .arg("-f")
-                .arg(DOCKER_COMPOSE_FILE)
-                .arg("exec")
-                .arg("-T")
-                .arg("postgres")
-                .arg("pg_isready")
-                .arg("-U")
+                .arg("{{.State.Health.Status}}")
+                .arg("simple-idm-postgres")
                 .output();
 
-            if let Ok(output) = output {
+            if let Ok(output) = health {
                 if output.status.success() {
-                    println!("PostgreSQL is ready!");
-                    return Ok(());
+                    let status = String::from_utf8_lossy(&output.stdout);
+                    if status.trim() == "healthy" {
+                        println!("PostgreSQL is ready!");
+                        return Ok(());
+                    }
+                }
+            }
+
+            let state = Command::new("docker")
+                .arg("inspect")
+                .arg("-f")
+                .arg("{{.State.Status}}")
+                .arg("simple-idm-postgres")
+                .output();
+
+            if let Ok(output) = state {
+                if output.status.success() {
+                    let status = String::from_utf8_lossy(&output.stdout);
+                    if status.trim() == "running" {
+                        // Healthcheck might not be available yet; keep polling.
+                    }
                 }
             }
 
