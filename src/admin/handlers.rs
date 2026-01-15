@@ -58,6 +58,11 @@ pub struct CreateGroupRequest {
     pub description: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UpdateGroupRequest {
+    pub description: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct GroupResponse {
     pub id: Uuid,
@@ -69,6 +74,15 @@ pub struct GroupResponse {
 #[derive(Debug, Deserialize)]
 pub struct AssignGroupRequest {
     pub group_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserGroupListRow {
+    pub user_id: Uuid,
+    pub username: String,
+    pub email: String,
+    pub group_id: Uuid,
+    pub group_name: String,
 }
 
 // OAuth Client types
@@ -502,6 +516,67 @@ pub async fn create_group(
     }
 }
 
+pub async fn update_group(
+    State(db_pool): State<DbPool>,
+    Path(group_id): Path<Uuid>,
+    Json(req): Json<UpdateGroupRequest>,
+) -> impl IntoResponse {
+    let Some(description) = req.description else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".to_string(),
+                error_description: "No fields to update".to_string(),
+            }),
+        )
+            .into_response();
+    };
+
+    let result = sqlx::query!(
+        r#"
+        UPDATE groups
+        SET description = $1
+        WHERE id = $2
+        RETURNING id, name, description
+        "#,
+        description,
+        group_id
+    )
+    .fetch_optional(&db_pool)
+    .await;
+
+    match result {
+        Ok(Some(group)) => (
+            StatusCode::OK,
+            Json(GroupResponse {
+                id: group.id,
+                name: group.name,
+                description: group.description,
+            }),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".to_string(),
+                error_description: "Group not found".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update group: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to update group".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
 pub async fn list_groups(State(db_pool): State<DbPool>) -> impl IntoResponse {
     let result = sqlx::query!(
         r#"
@@ -532,6 +607,52 @@ pub async fn list_groups(State(db_pool): State<DbPool>) -> impl IntoResponse {
                 Json(ErrorResponse {
                     error: "server_error".to_string(),
                     error_description: "Failed to list groups".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn list_user_groups(State(db_pool): State<DbPool>) -> impl IntoResponse {
+    let result = sqlx::query!(
+        r#"
+        SELECT
+            ug.user_id,
+            u.username,
+            u.email,
+            ug.group_id,
+            g.name as group_name
+        FROM user_groups ug
+        JOIN users u ON u.id = ug.user_id
+        JOIN groups g ON g.id = ug.group_id
+        ORDER BY u.username, g.name
+        "#
+    )
+    .fetch_all(&db_pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let rows: Vec<UserGroupListRow> = rows
+                .into_iter()
+                .map(|row| UserGroupListRow {
+                    user_id: row.user_id,
+                    username: row.username,
+                    email: row.email,
+                    group_id: row.group_id,
+                    group_name: row.group_name,
+                })
+                .collect();
+            (StatusCode::OK, Json(rows)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to list user groups: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to list user groups".to_string(),
                 }),
             )
                 .into_response()
