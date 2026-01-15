@@ -403,6 +403,14 @@ fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
     Some((client_id, client_secret))
 }
 
+fn generate_refresh_token() -> String {
+    rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect()
+}
+
 async fn handle_authorization_code_token(
     state: Arc<OAuth2State>,
     req: TokenRequest,
@@ -659,13 +667,8 @@ async fn handle_authorization_code_token(
     };
 
     // Vytvoř refresh token
-    let refresh_token: String = rand::rng()
-        .sample_iter(rand::distr::Alphanumeric)
-        .take(64)
-        .map(char::from)
-        .collect();
-
-    let refresh_expires_at = Utc::now() + Duration::seconds(2592000); // 30 days
+    let refresh_token = generate_refresh_token();
+    let refresh_expires_at = Utc::now() + Duration::seconds(state.refresh_token_expiry);
 
     if let Err(_) = sqlx::query(
         r#"
@@ -867,11 +870,71 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         }
     };
 
+    // Rotate refresh token
+    let new_refresh_token = generate_refresh_token();
+    let new_refresh_expires_at = Utc::now() + Duration::seconds(state.refresh_token_expiry);
+
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => {
+            return Json(ErrorResponse {
+                error: "server_error".to_string(),
+                error_description: "Failed to start transaction".to_string(),
+            })
+            .into_response()
+        }
+    };
+
+    if sqlx::query(
+        r#"
+        INSERT INTO refresh_tokens (token, client_id, user_id, scope, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(&new_refresh_token)
+    .bind(refresh_token.client_id)
+    .bind(refresh_token.user_id)
+    .bind(&refresh_token.scope)
+    .bind(new_refresh_expires_at)
+    .execute(&mut *tx)
+    .await
+    .is_err()
+    {
+        let _ = tx.rollback().await;
+        return Json(ErrorResponse {
+            error: "server_error".to_string(),
+            error_description: "Failed to create refresh token".to_string(),
+        })
+        .into_response();
+    }
+
+    if sqlx::query("DELETE FROM refresh_tokens WHERE token = $1")
+        .bind(&refresh_token_str)
+        .execute(&mut *tx)
+        .await
+        .is_err()
+    {
+        let _ = tx.rollback().await;
+        return Json(ErrorResponse {
+            error: "server_error".to_string(),
+            error_description: "Failed to rotate refresh token".to_string(),
+        })
+        .into_response();
+    }
+
+    if tx.commit().await.is_err() {
+        return Json(ErrorResponse {
+            error: "server_error".to_string(),
+            error_description: "Failed to commit refresh token rotation".to_string(),
+        })
+        .into_response();
+    }
+
     Json(TokenResponseWithRefresh {
         access_token,
         token_type: "Bearer".to_string(),
         expires_in: state.access_token_expiry,
-        refresh_token: Some(refresh_token_str), // vrátíme stejný refresh token
+        refresh_token: Some(new_refresh_token),
         scope: Some(refresh_token.scope),
     })
     .into_response()

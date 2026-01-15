@@ -33,6 +33,7 @@ pub struct OAuth2State {
     pub db_pool: DbPool,
     pub jwt_service: Arc<JwtService>,
     pub access_token_expiry: i64,
+    pub refresh_token_expiry: i64,
 }
 
 pub async fn handle_client_credentials(
