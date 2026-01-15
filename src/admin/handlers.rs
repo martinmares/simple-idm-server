@@ -2,7 +2,7 @@ use crate::auth::password::hash_password;
 use crate::password_reset::{create_reset_token_for_user, PasswordResetTokenInfo};
 use crate::db::{models::OAuthClient, DbPool};
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     Json,
@@ -25,6 +25,37 @@ pub struct ErrorResponse {
 #[derive(Debug, Serialize)]
 pub struct SuccessResponse {
     pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PaginationParams {
+    pub page: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+const DEFAULT_PAGE_LIMIT: i64 = 50;
+
+fn pagination_limit_offset(params: &PaginationParams) -> Result<(i64, i64), ErrorResponse> {
+    let page = params.page.unwrap_or(1);
+    let limit = match (params.page, params.limit) {
+        (None, None) => i64::MAX,
+        (_, Some(limit)) => limit,
+        (Some(_), None) => DEFAULT_PAGE_LIMIT,
+    };
+
+    if page < 1 || limit < 1 {
+        return Err(ErrorResponse {
+            error: "invalid_request".to_string(),
+            error_description: "page and limit must be positive integers".to_string(),
+        });
+    }
+
+    let offset = if limit == i64::MAX {
+        0
+    } else {
+        limit.saturating_mul(page.saturating_sub(1))
+    };
+    Ok((limit, offset))
 }
 
 // User types
@@ -318,13 +349,24 @@ pub async fn create_password_reset(
         .into_response()
 }
 
-pub async fn list_users(State(db_pool): State<DbPool>) -> impl IntoResponse {
+pub async fn list_users(
+    State(db_pool): State<DbPool>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let (limit, offset) = match pagination_limit_offset(&pagination) {
+        Ok(pagination) => pagination,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
+    };
+
     let result = sqlx::query!(
         r#"
         SELECT id, username, email, is_active
         FROM users
         ORDER BY username
-        "#
+        LIMIT $1 OFFSET $2
+        "#,
+        limit,
+        offset
     )
     .fetch_all(&db_pool)
     .await;
@@ -641,13 +683,24 @@ pub async fn update_group(
     }
 }
 
-pub async fn list_groups(State(db_pool): State<DbPool>) -> impl IntoResponse {
+pub async fn list_groups(
+    State(db_pool): State<DbPool>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let (limit, offset) = match pagination_limit_offset(&pagination) {
+        Ok(pagination) => pagination,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
+    };
+
     let result = sqlx::query!(
         r#"
         SELECT id, name, description
         FROM groups
         ORDER BY name
-        "#
+        LIMIT $1 OFFSET $2
+        "#,
+        limit,
+        offset
     )
     .fetch_all(&db_pool)
     .await;
@@ -678,7 +731,15 @@ pub async fn list_groups(State(db_pool): State<DbPool>) -> impl IntoResponse {
     }
 }
 
-pub async fn list_user_groups(State(db_pool): State<DbPool>) -> impl IntoResponse {
+pub async fn list_user_groups(
+    State(db_pool): State<DbPool>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let (limit, offset) = match pagination_limit_offset(&pagination) {
+        Ok(pagination) => pagination,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
+    };
+
     let result = sqlx::query!(
         r#"
         SELECT
@@ -691,7 +752,10 @@ pub async fn list_user_groups(State(db_pool): State<DbPool>) -> impl IntoRespons
         JOIN users u ON u.id = ug.user_id
         JOIN groups g ON g.id = ug.group_id
         ORDER BY u.username, g.name
-        "#
+        LIMIT $1 OFFSET $2
+        "#,
+        limit,
+        offset
     )
     .fetch_all(&db_pool)
     .await;
@@ -921,10 +985,20 @@ pub async fn create_oauth_client(
     }
 }
 
-pub async fn list_oauth_clients(State(db_pool): State<DbPool>) -> impl IntoResponse {
+pub async fn list_oauth_clients(
+    State(db_pool): State<DbPool>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let (limit, offset) = match pagination_limit_offset(&pagination) {
+        Ok(pagination) => pagination,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
+    };
+
     let result = sqlx::query_as::<_, OAuthClient>(
-        "SELECT * FROM oauth_clients ORDER BY name"
+        "SELECT * FROM oauth_clients ORDER BY name LIMIT $1 OFFSET $2",
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&db_pool)
     .await;
 
@@ -1152,14 +1226,25 @@ pub async fn create_claim_map(
     }
 }
 
-pub async fn list_claim_maps(State(db_pool): State<DbPool>) -> impl IntoResponse {
+pub async fn list_claim_maps(
+    State(db_pool): State<DbPool>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let (limit, offset) = match pagination_limit_offset(&pagination) {
+        Ok(pagination) => pagination,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
+    };
+
     let result = sqlx::query_as::<_, crate::db::models::ClaimMap>(
         r#"
         SELECT id, client_id, group_id, claim_name, claim_value
         FROM claim_maps
         ORDER BY claim_name
+        LIMIT $1 OFFSET $2
         "#,
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&db_pool)
     .await;
 

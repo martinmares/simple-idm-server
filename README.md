@@ -193,6 +193,11 @@ Paging & style:
   --style sharp users ls --page 1 --limit 10
 ```
 
+Insecure TLS (self-signed):
+```bash
+./target/debug/simple-idm-ctl --base-url https://localhost:8443 --token <ADMIN_TOKEN> --insecure users ls
+```
+
 Health check:
 ```bash
 ./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> ping
@@ -201,6 +206,19 @@ Health check:
 Output format:
 ```bash
 ./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> -o json users list
+```
+
+OAuth helpers:
+```bash
+./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> \
+  oauth authorize-url --client-id webapp --redirect-uri http://localhost:3000/callback
+
+./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> \
+  oauth token --client-id webapp --client-secret <SECRET> \
+  --code <AUTH_CODE> --redirect-uri http://localhost:3000/callback
+
+./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> \
+  oauth userinfo --access-token <ACCESS_TOKEN>
 ```
 
 #### 3. Token Exchange (exchange code for token)
