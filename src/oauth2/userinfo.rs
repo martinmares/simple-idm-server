@@ -1,4 +1,4 @@
-use crate::auth::JwtService;
+use crate::db::DbPool;
 use axum::{
     extract::State,
     http::{HeaderMap, StatusCode},
@@ -31,7 +31,7 @@ pub struct ErrorResponse {
 ///
 /// Returns claims about the authenticated user
 pub async fn handle_userinfo(
-    State(jwt_service): State<Arc<JwtService>>,
+    State(state): State<Arc<super::client_credentials::OAuth2State>>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
     // Get Authorization header
@@ -64,8 +64,35 @@ pub async fn handle_userinfo(
     let token = &auth_header[7..]; // Skip "Bearer "
 
     // Verify and decode token
-    match jwt_service.verify_token(token) {
+    match state.jwt_service.verify_token(token) {
         Ok(claims) => {
+            if claims.aud.is_empty() {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "invalid_token".to_string(),
+                        error_description: "Missing token audience".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+
+            let aud_valid = match has_valid_audience(&state.db_pool, &claims.aud).await {
+                Ok(valid) => valid,
+                Err(_) => false,
+            };
+
+            if !aud_valid {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "invalid_token".to_string(),
+                        error_description: "Invalid token audience".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+
             let userinfo = UserinfoResponse {
                 sub: claims.sub,
                 email: claims.email,
@@ -85,4 +112,15 @@ pub async fn handle_userinfo(
         )
             .into_response(),
     }
+}
+
+async fn has_valid_audience(pool: &DbPool, audiences: &[String]) -> Result<bool, sqlx::Error> {
+    let count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM oauth_clients WHERE client_id = ANY($1) AND is_active = true",
+    )
+    .bind(audiences)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count > 0)
 }
