@@ -411,6 +411,7 @@ pub async fn handle_device_token(
         client.client_id.clone(),
         Some(user.email.clone()),
         Some(user.username.clone()),
+        Some(device_code.scope.clone()),
         user_group_names,
         custom_claims,
         state.access_token_expiry,

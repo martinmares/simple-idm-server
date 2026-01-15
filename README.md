@@ -278,8 +278,8 @@ cargo build --release
 - [ ] Expand integration documentation
 
 ### Critical
-- [ ] Enforce `openid` (and optional `email`/`profile`) scopes on `/oauth2/userinfo`
-- [ ] Validate `aud` in all access-token protected endpoints (not just userinfo)
+- [x] Enforce `openid` (and optional `email`/`profile`) scopes on `/oauth2/userinfo`
+- [x] Validate `aud` in all access-token protected endpoints (not just userinfo)
 
 ### Important
 - [ ] Add per-endpoint rate limit tuning (stricter for `/oauth2/token`)

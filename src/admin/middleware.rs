@@ -1,5 +1,7 @@
 use crate::auth::JwtService;
 use crate::config::Config;
+use crate::db::DbPool;
+use sqlx;
 use axum::{
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
@@ -21,13 +23,15 @@ struct ErrorResponse {
 pub struct AdminAuth {
     pub admin_root_token: Option<String>,
     pub jwt_service: Arc<JwtService>,
+    pub db_pool: DbPool,
 }
 
 impl AdminAuth {
-    pub fn new(config: &Config, jwt_service: Arc<JwtService>) -> Self {
+    pub fn new(config: &Config, jwt_service: Arc<JwtService>, db_pool: DbPool) -> Self {
         Self {
             admin_root_token: config.admin.root_token.clone(),
             jwt_service,
+            db_pool,
         }
     }
 }
@@ -83,6 +87,39 @@ pub async fn admin_auth_middleware(
     // Strategy 2: Verify JWT token and check for admin permissions
     match admin_auth.jwt_service.verify_token(token) {
         Ok(claims) => {
+            if claims.aud.is_empty() {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "unauthorized".to_string(),
+                        error_description: "Missing token audience".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+
+            let aud_valid = match sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM oauth_clients WHERE client_id = ANY($1) AND is_active = true",
+            )
+            .bind(&claims.aud)
+            .fetch_one(&admin_auth.db_pool)
+            .await
+            {
+                Ok(count) => count > 0,
+                Err(_) => false,
+            };
+
+            if !aud_valid {
+                return Err((
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "unauthorized".to_string(),
+                        error_description: "Invalid token audience".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+
             // Check if token has admin permissions
             // 1. Check groups for "admin" group
             if claims.groups.contains(&"admin".to_string()) {
