@@ -66,7 +66,7 @@ impl JwtService {
 
     pub fn create_access_token(
         &self,
-        user_id: Uuid,
+        subject: String,
         client_id: String,
         email: Option<String>,
         groups: Vec<String>,
@@ -77,7 +77,7 @@ impl JwtService {
         let exp = now + Duration::seconds(expiry_seconds);
 
         let claims = Claims {
-            sub: user_id.to_string(),
+            sub: subject,
             iss: self.issuer.clone(),
             aud: vec![client_id],
             exp: exp.timestamp(),

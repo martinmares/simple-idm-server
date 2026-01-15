@@ -407,7 +407,7 @@ pub async fn handle_device_token(
 
     // Vytvoř access token
     let access_token = match state.jwt_service.create_access_token(
-        user.id,
+        user.username.clone(),
         client.client_id.clone(),
         Some(user.email.clone()),
         user_group_names,
