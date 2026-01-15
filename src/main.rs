@@ -33,7 +33,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting simple-idm-server");
     tracing::info!("Server: {}:{}", config.server.host, config.server.port);
-    tracing::info!("Database: {}", config.database.url);
+    tracing::info!(
+        "Database: {}",
+        redact_database_url(&config.database.url)
+    );
 
     // Připoj se k databázi
     let db_pool = db::create_pool(&config.database.url).await?;
@@ -178,4 +181,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn health_check() -> &'static str {
     "OK"
+}
+
+fn redact_database_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let Some(at_pos) = url.rfind('@') else {
+        return url.to_string();
+    };
+
+    let (prefix, rest) = url.split_at(scheme_end + 3);
+    let credentials = &rest[..at_pos - (scheme_end + 3)];
+    let suffix = &rest[at_pos - (scheme_end + 3)..];
+
+    if let Some((user, _password)) = credentials.split_once(':') {
+        format!("{prefix}{user}:***{suffix}")
+    } else {
+        url.to_string()
+    }
 }
