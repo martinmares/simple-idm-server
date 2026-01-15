@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use tabled::{settings::Style, Table, Tabled};
 
 #[derive(Parser, Debug)]
-#[command(name = "simple-idm-cli", version, about = "Admin CLI for simple-idm-server")]
+#[command(name = "simple-idm-ctl", version, about = "Admin CLI for simple-idm-server")]
 struct Cli {
     #[arg(long)]
     base_url: String,
