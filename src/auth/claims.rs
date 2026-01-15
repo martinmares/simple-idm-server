@@ -24,7 +24,7 @@ pub async fn build_custom_claims(
     // Načti claim mapy pro tohoto klienta a skupiny uživatele
     let claim_maps = sqlx::query_as::<_, ClaimMap>(
         r#"
-        SELECT id, client_id, group_id, claim_name
+        SELECT id, client_id, group_id, claim_name, claim_value
         FROM claim_maps
         WHERE client_id = $1 AND group_id = ANY($2)
         "#,
