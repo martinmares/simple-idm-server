@@ -173,9 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         // Userinfo endpoint
         .route("/oauth2/userinfo", get(oauth2::handle_userinfo))
-        .layer(GovernorLayer {
-            config: Arc::new(governor),
-        })
+        .layer(GovernorLayer::new(governor))
         .with_state(oauth_state)
         // Merge well-known routes
         .merge(jwks_routes)
