@@ -135,7 +135,7 @@ Content-Type: application/json
 GET /oauth2/authorize?response_type=code&client_id=your_client_id&redirect_uri=https://your-app.com/callback&scope=openid%20profile%20email&state=random_state&code_challenge=challenge&code_challenge_method=S256
 ```
 
-This returns an **HTML login form** where users enter their username and password.
+This returns an **HTML login form** where users enter their email or username and password.
 
 #### 2. Login (submitted via HTML form)
 ```

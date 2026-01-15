@@ -97,7 +97,7 @@ Expected response:
 curl "http://localhost:8080/oauth2/authorize?response_type=code&client_id=webapp_dashboard&redirect_uri=http://localhost:3000/callback&scope=openid%20profile%20email"
 ```
 
-This returns an HTML login page.
+This returns an HTML login page. Use your email or username to sign in.
 
 #### 2.2 User login
 
