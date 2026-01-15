@@ -173,6 +173,25 @@ Content-Type: application/x-www-form-urlencoded
 token=RESET_TOKEN&password=NewPass123&password_confirm=NewPass123
 ```
 
+## Admin CLI
+
+Build:
+```bash
+cargo build --bin simple-idm-cli
+```
+
+Usage (flags are required):
+```bash
+./target/debug/simple-idm-cli --base-url http://localhost:8080 --token <ADMIN_TOKEN> users list
+./target/debug/simple-idm-cli --base-url http://localhost:8080 --token <ADMIN_TOKEN> users create \
+  --username admin --email admin@example.com --password 'Secret123!'
+```
+
+Output format:
+```bash
+./target/debug/simple-idm-cli --base-url http://localhost:8080 --token <ADMIN_TOKEN> -o json users list
+```
+
 #### 3. Token Exchange (exchange code for token)
 ```
 POST /oauth2/token
