@@ -1,4 +1,5 @@
 use crate::auth::password::hash_password;
+use crate::password_reset::{create_reset_token_for_user, PasswordResetTokenInfo};
 use crate::db::{models::OAuthClient, DbPool};
 use axum::{
     extract::{Path, State},
@@ -8,6 +9,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use sqlx;
+use std::env;
 use uuid::Uuid;
 
 // ============================================================================
@@ -110,6 +112,14 @@ pub struct ClaimMapResponse {
     pub claim_value: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct PasswordResetResponse {
+    pub user_id: Uuid,
+    pub reset_token: String,
+    pub reset_url: String,
+    pub expires_at: String,
+}
+
 // ============================================================================
 // User Handlers
 // ============================================================================
@@ -193,6 +203,65 @@ pub async fn create_user(
                 .into_response()
         }
     }
+}
+
+pub async fn create_password_reset(
+    State(db_pool): State<DbPool>,
+    Path(user_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let user_exists = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM users WHERE id = $1 LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(&db_pool)
+    .await;
+
+    if let Ok(None) = user_exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".to_string(),
+                error_description: "User not found".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let expiry_seconds = env::var("PASSWORD_RESET_TOKEN_EXPIRY_SECONDS")
+        .unwrap_or_else(|_| "3600".to_string())
+        .parse()
+        .unwrap_or(3600);
+    let issuer = env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+
+    let PasswordResetTokenInfo {
+        token,
+        reset_url,
+        expires_at,
+    } = match create_reset_token_for_user(&db_pool, user_id, &issuer, expiry_seconds).await {
+        Ok(info) => info,
+        Err(e) => {
+            tracing::error!("Failed to create password reset token: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to create password reset token".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(PasswordResetResponse {
+            user_id,
+            reset_token: token,
+            reset_url,
+            expires_at: expires_at.to_rfc3339(),
+        }),
+    )
+        .into_response()
 }
 
 pub async fn list_users(State(db_pool): State<DbPool>) -> impl IntoResponse {

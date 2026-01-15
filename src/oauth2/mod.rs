@@ -6,7 +6,7 @@ pub mod introspection;
 pub mod revocation;
 pub mod userinfo;
 mod utils;
-mod templates;
+pub mod templates;
 
 pub use authorization_code::{handle_authorize, handle_login, handle_token};
 pub use client_credentials::{handle_client_credentials, OAuth2State};

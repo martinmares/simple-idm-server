@@ -5,6 +5,7 @@ mod db;
 mod jwks;
 mod oauth2;
 mod oidc;
+mod password_reset;
 
 use axum::{
     middleware,
@@ -94,6 +95,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/admin/users", get(admin::handlers::list_users))
         .route("/admin/users/{id}", put(admin::handlers::update_user))
         .route("/admin/users/{id}", delete(admin::handlers::delete_user))
+        .route(
+            "/admin/users/{id}/password-reset",
+            post(admin::handlers::create_password_reset),
+        )
         // Group management
         .route("/admin/groups", post(admin::handlers::create_group))
         .route("/admin/groups", get(admin::handlers::list_groups))
@@ -177,6 +182,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/oauth2/device/token", post(oauth2::handle_device_token))
         .route("/oauth2/device/verify", post(oauth2::handle_device_verify))
+        .route(
+            "/password/reset",
+            get(password_reset::show_password_reset_form),
+        )
+        .route(
+            "/password/reset",
+            post(password_reset::submit_password_reset_form),
+        )
         // Client credentials endpoint
         .route(
             "/oauth2/client_credentials/token",

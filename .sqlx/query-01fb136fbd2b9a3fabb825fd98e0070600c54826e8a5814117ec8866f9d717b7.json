@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM password_reset_tokens\n        WHERE user_id = $1 AND token_hash <> $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "01fb136fbd2b9a3fabb825fd98e0070600c54826e8a5814117ec8866f9d717b7"
+}
