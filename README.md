@@ -187,6 +187,11 @@ Usage (flags are required):
   --username admin --email admin@example.com --password 'Secret123!'
 ```
 
+Health check:
+```bash
+./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> ping
+```
+
 Output format:
 ```bash
 ./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> -o json users list

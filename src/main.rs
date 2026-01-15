@@ -102,6 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Group management
         .route("/admin/groups", post(admin::handlers::create_group))
         .route("/admin/groups", get(admin::handlers::list_groups))
+        .route("/admin/groups/{id}", put(admin::handlers::update_group))
         .route("/admin/groups/{id}", delete(admin::handlers::delete_group))
         // User-Group assignments
         .route(
@@ -112,6 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/admin/users/{user_id}/groups/{group_id}",
             delete(admin::handlers::remove_user_from_group),
         )
+        .route("/admin/user-groups", get(admin::handlers::list_user_groups))
         // OAuth client management
         .route(
             "/admin/oauth-clients",
