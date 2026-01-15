@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use tabled::{settings::Style, Table, Tabled};
 use std::process::Command;
 
+#[path = "../cli/tui.rs"]
+mod tui;
+
 #[derive(Parser, Debug)]
 #[command(name = "simple-idm-ctl", version, about = "Admin CLI for simple-idm-server")]
 struct Cli {
@@ -60,6 +63,8 @@ enum Commands {
         #[command(subcommand)]
         command: UserGroupsCommand,
     },
+    #[command(alias = "ui")]
+    Tui,
     #[command(name = "oauth")]
     OAuth {
         #[command(subcommand)]
@@ -300,13 +305,13 @@ enum OAuthCommand {
 }
 
 #[derive(Debug, Deserialize)]
-struct ErrorResponse {
+pub(crate) struct ErrorResponse {
     error: String,
     error_description: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
-struct UserRow {
+pub(crate) struct UserRow {
     id: String,
     username: String,
     email: String,
@@ -314,7 +319,7 @@ struct UserRow {
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
-struct GroupRow {
+pub(crate) struct GroupRow {
     id: String,
     name: String,
     #[tabled(display_with = "display_opt")]
@@ -322,7 +327,7 @@ struct GroupRow {
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
-struct ClientRow {
+pub(crate) struct ClientRow {
     id: String,
     client_id: String,
     name: String,
@@ -335,7 +340,7 @@ struct ClientRow {
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
-struct ClaimMapRow {
+pub(crate) struct ClaimMapRow {
     id: String,
     client_id: String,
     group_id: String,
@@ -345,7 +350,7 @@ struct ClaimMapRow {
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
-struct UserGroupRow {
+pub(crate) struct UserGroupRow {
     user_id: String,
     username: String,
     email: String,
@@ -354,7 +359,7 @@ struct UserGroupRow {
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
-struct PasswordResetRow {
+pub(crate) struct PasswordResetRow {
     user_id: String,
     reset_token: String,
     reset_url: String,
@@ -362,7 +367,7 @@ struct PasswordResetRow {
 }
 
 #[derive(Debug, Deserialize)]
-struct MessageResponse {
+pub(crate) struct MessageResponse {
     message: String,
 }
 
@@ -387,6 +392,7 @@ async fn main() -> Result<()> {
         Commands::Clients { command } => handle_clients(&http, output, command).await?,
         Commands::ClaimMaps { command } => handle_claim_maps(&http, output, command).await?,
         Commands::UserGroups { command } => handle_user_groups(&http, output, command).await?,
+        Commands::Tui => tui::run_tui(&http).await?,
         Commands::OAuth { command } => handle_oauth(&http, output, command).await?,
         Commands::Ping => handle_ping(&http).await?,
     }
@@ -1005,14 +1011,14 @@ impl KeyValueRow {
     }
 }
 
-struct HttpClient {
+pub(crate) struct HttpClient {
     base_url: String,
     token: String,
     client: reqwest::Client,
 }
 
 impl HttpClient {
-    fn new(base_url: String, token: String, insecure: bool) -> Result<Self> {
+    pub(crate) fn new(base_url: String, token: String, insecure: bool) -> Result<Self> {
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(insecure)
             .build()
@@ -1024,34 +1030,38 @@ impl HttpClient {
         })
     }
 
-    async fn get(&self, path: &str) -> Result<String> {
+    pub(crate) async fn get(&self, path: &str) -> Result<String> {
         self.request_with_auth(self.client.get(self.url(path))).await
     }
 
-    async fn delete(&self, path: &str) -> Result<String> {
+    pub(crate) async fn delete(&self, path: &str) -> Result<String> {
         self.request_with_auth(self.client.delete(self.url(path))).await
     }
 
-    async fn post_json<T: Serialize>(&self, path: &str, body: T) -> Result<String> {
+    pub(crate) async fn post_json<T: Serialize>(&self, path: &str, body: T) -> Result<String> {
         self.request_with_auth(self.client.post(self.url(path)).json(&body))
             .await
     }
 
-    async fn put_json<T: Serialize>(&self, path: &str, body: T) -> Result<String> {
+    pub(crate) async fn put_json<T: Serialize>(&self, path: &str, body: T) -> Result<String> {
         self.request_with_auth(self.client.put(self.url(path)).json(&body))
             .await
     }
 
-    async fn post_empty(&self, path: &str) -> Result<String> {
+    pub(crate) async fn post_empty(&self, path: &str) -> Result<String> {
         self.request_with_auth(self.client.post(self.url(path))).await
     }
 
-    async fn get_with_bearer(&self, path: &str, token: &str) -> Result<String> {
+    pub(crate) async fn get_with_bearer(&self, path: &str, token: &str) -> Result<String> {
         self.request_no_auth(self.client.get(self.url(path)).bearer_auth(token))
             .await
     }
 
-    async fn post_form_no_auth(&self, path: &str, body: Vec<(String, String)>) -> Result<String> {
+    pub(crate) async fn post_form_no_auth(
+        &self,
+        path: &str,
+        body: Vec<(String, String)>,
+    ) -> Result<String> {
         self.request_no_auth(self.client.post(self.url(path)).form(&body))
             .await
     }
@@ -1081,7 +1091,7 @@ impl HttpClient {
         Err(err)
     }
 
-    fn url(&self, path: &str) -> String {
+    pub(crate) fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
 }

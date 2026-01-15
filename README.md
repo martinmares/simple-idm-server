@@ -208,6 +208,11 @@ Output format:
 ./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> -o json users list
 ```
 
+TUI:
+```bash
+./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> tui
+```
+
 OAuth helpers:
 ```bash
 ./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> \
