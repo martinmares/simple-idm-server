@@ -350,6 +350,7 @@ cargo build --release
 - [x] Introspection endpoint
 - [x] Revocation endpoint
 - [x] Admin-initiated password reset flow
+- [x] Admin TUI for management workflows
 - [ ] Publish Docker image
 - [ ] Expand integration documentation
 

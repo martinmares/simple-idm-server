@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -12,9 +12,12 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs},
     Terminal,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use rand::RngCore;
 use serde_json::json;
 use std::{io, time::Duration};
 use tui_input::{backend::crossterm::EventHandler, Input};
+use url::Url;
 
 use crate::{ClaimMapRow, ClientRow, GroupRow, HttpClient, UserGroupRow, UserRow};
 
@@ -33,6 +36,7 @@ enum Tab {
 enum Mode {
     Normal,
     Form,
+    Picker,
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +52,7 @@ struct FormField {
     kind: FieldKind,
     optional: bool,
     input: Input,
+    reveal: bool,
 }
 
 impl FormField {
@@ -57,6 +62,7 @@ impl FormField {
             kind: FieldKind::Text,
             optional: false,
             input: input_with_value(value),
+            reveal: false,
         }
     }
 
@@ -66,6 +72,7 @@ impl FormField {
             kind: FieldKind::Secret,
             optional: false,
             input: input_with_value(value),
+            reveal: false,
         }
     }
 
@@ -75,6 +82,7 @@ impl FormField {
             kind: FieldKind::Bool,
             optional: false,
             input: input_with_value(value.to_string()),
+            reveal: false,
         }
     }
 
@@ -85,7 +93,13 @@ impl FormField {
 
     fn display(&self) -> String {
         match self.kind {
-            FieldKind::Secret => "*".repeat(self.input.value().len()),
+            FieldKind::Secret => {
+                if self.reveal {
+                    self.input.value().to_string()
+                } else {
+                    "*".repeat(self.input.value().len())
+                }
+            }
             _ => self.input.value().to_string(),
         }
     }
@@ -191,6 +205,7 @@ struct App {
     form: Option<FormState>,
     status: String,
     pending_select: Option<SelectHint>,
+    picker: Option<PickerState>,
 }
 
 impl App {
@@ -206,6 +221,7 @@ impl App {
             form: None,
             status: String::new(),
             pending_select: None,
+            picker: None,
         }
     }
 
@@ -224,6 +240,57 @@ impl App {
     }
 }
 
+#[derive(Clone, Debug)]
+struct PickerOption {
+    label: &'static str,
+    value: &'static str,
+    selected: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PickerState {
+    title: String,
+    options: Vec<PickerOption>,
+    index: usize,
+    target_field: &'static str,
+}
+
+impl PickerState {
+    fn new_grant_types(selected: &[String]) -> Self {
+        let options = supported_grant_types()
+            .iter()
+            .map(|(label, value)| PickerOption {
+                label,
+                value,
+                selected: selected.iter().any(|item| item == value),
+            })
+            .collect();
+
+        Self {
+            title: "Select grant types".to_string(),
+            options,
+            index: 0,
+            target_field: "grant_types",
+        }
+    }
+
+    fn selected_values(&self) -> Vec<String> {
+        self.options
+            .iter()
+            .filter(|opt| opt.selected)
+            .map(|opt| opt.value.to_string())
+            .collect()
+    }
+}
+
+fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("authorization_code", "authorization_code"),
+        ("refresh_token", "refresh_token"),
+        ("client_credentials", "client_credentials"),
+        ("device_code", "urn:ietf:params:oauth:grant-type:device_code"),
+    ]
+}
 #[derive(Clone, Debug)]
 struct SelectHint {
     tab: Tab,
@@ -262,6 +329,14 @@ async fn event_loop(
         }
 
         let event = event::read()?;
+        if app.mode == Mode::Picker {
+            let handled = handle_picker_event(app, event)?;
+            if handled == PickerResult::Applied || handled == PickerResult::Cancelled {
+                app.mode = Mode::Form;
+            }
+            continue;
+        }
+
         if app.mode == Mode::Form {
             let handled = handle_form_event(app, event, http).await?;
             if handled == FormResult::Submitted || handled == FormResult::Cancelled {
@@ -320,6 +395,52 @@ async fn handle_normal_key(app: &mut App, key: KeyEvent, http: &HttpClient) -> R
         _ => {}
     }
     Ok(false)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickerResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+fn handle_picker_event(app: &mut App, event: Event) -> Result<PickerResult> {
+    let Some(picker) = app.picker.as_mut() else {
+        return Ok(PickerResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(PickerResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.picker = None;
+            return Ok(PickerResult::Cancelled);
+        }
+        KeyCode::Up => {
+            picker.index = picker.index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            picker.index = (picker.index + 1).min(picker.options.len().saturating_sub(1));
+        }
+        KeyCode::Char(' ') => {
+            if let Some(option) = picker.options.get_mut(picker.index) {
+                option.selected = !option.selected;
+            }
+        }
+        KeyCode::Enter => {
+            if let Some(form) = app.form.as_mut() {
+                let values = picker.selected_values();
+                set_field_value(form, picker.target_field, values.join(", "));
+            }
+            app.picker = None;
+            return Ok(PickerResult::Applied);
+        }
+        _ => {}
+    }
+
+    Ok(PickerResult::Continue)
 }
 
 fn select_next(app: &mut App) {
@@ -812,10 +933,30 @@ async fn handle_form_event(
                 }
             }
         }
+        KeyCode::Char('g') => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                if let Some(field) = form.fields.get(form.index) {
+                    if field.label == "grant_types" {
+                        let values = split_csv(Some(field.value()));
+                        app.picker = Some(PickerState::new_grant_types(&values));
+                        app.mode = Mode::Picker;
+                    }
+                }
+            }
+        }
         _ => {}
     }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(field) = form.fields.get_mut(form.index) {
+            if field.label == "client_secret" && key.code == KeyCode::Char('g') {
+                let secret = generate_secret();
+                field.input = input_with_value(secret);
+            }
+            if matches!(field.kind, FieldKind::Secret) && key.code == KeyCode::Char('v') {
+                field.reveal = !field.reveal;
+            }
+        }
         return Ok(FormResult::Continue);
     }
 
@@ -842,10 +983,15 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 "password": field_value(form, "password")?,
                 "is_active": field_bool(form, "is_active"),
             });
-            http.post_json("/admin/users", payload).await?;
+            let body = http.post_json("/admin/users", payload).await?;
+            let created: UserRow =
+                serde_json::from_str(&body).context("Failed to parse user response")?;
             Ok(SubmitResult {
                 message: "User created".to_string(),
-                select_id: None,
+                select_id: Some(SelectHint {
+                    tab: Tab::Users,
+                    id: created.id,
+                }),
             })
         }
         FormAction::UpdateUser(id) => {
@@ -879,10 +1025,15 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 "name": field_value(form, "name")?,
                 "description": field_optional(form, "description"),
             });
-            http.post_json("/admin/groups", payload).await?;
+            let body = http.post_json("/admin/groups", payload).await?;
+            let created: GroupRow =
+                serde_json::from_str(&body).context("Failed to parse group response")?;
             Ok(SubmitResult {
                 message: "Group created".to_string(),
-                select_id: None,
+                select_id: Some(SelectHint {
+                    tab: Tab::Groups,
+                    id: created.id,
+                }),
             })
         }
         FormAction::UpdateGroup(id) => {
@@ -909,27 +1060,36 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
             })
         }
         FormAction::CreateClient => {
+            let redirect_uris = parse_redirect_uris(field_optional(form, "redirect_uris"))?;
+            let grant_types = parse_grant_types(Some(field_value(form, "grant_types")?))?;
             let payload = json!({
                 "client_id": field_value(form, "client_id")?,
                 "client_secret": field_value(form, "client_secret")?,
                 "name": field_value(form, "name")?,
-                "redirect_uris": split_csv(field_optional(form, "redirect_uris")),
-                "grant_types": split_csv(Some(field_value(form, "grant_types")?)),
+                "redirect_uris": redirect_uris,
+                "grant_types": grant_types,
                 "scope": field_value(form, "scope")?,
                 "is_active": field_bool(form, "is_active"),
             });
-            http.post_json("/admin/oauth-clients", payload).await?;
+            let body = http.post_json("/admin/oauth-clients", payload).await?;
+            let created: ClientRow =
+                serde_json::from_str(&body).context("Failed to parse client response")?;
             Ok(SubmitResult {
                 message: "Client created".to_string(),
-                select_id: None,
+                select_id: Some(SelectHint {
+                    tab: Tab::Clients,
+                    id: created.id,
+                }),
             })
         }
         FormAction::UpdateClient(id) => {
+            let redirect_uris = parse_redirect_uris(field_optional(form, "redirect_uris"))?;
+            let grant_types = parse_grant_types(field_optional(form, "grant_types"))?;
             let payload = json!({
                 "name": field_optional(form, "name"),
                 "client_secret": field_optional(form, "client_secret"),
-                "redirect_uris": split_csv(field_optional(form, "redirect_uris")),
-                "grant_types": split_csv(field_optional(form, "grant_types")),
+                "redirect_uris": if redirect_uris.is_empty() { None } else { Some(redirect_uris) },
+                "grant_types": if grant_types.is_empty() { None } else { Some(grant_types) },
                 "scope": field_optional(form, "scope"),
                 "is_active": field_bool(form, "is_active"),
             });
@@ -958,10 +1118,15 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 "claim_name": field_value(form, "claim_name")?,
                 "claim_value": field_optional(form, "claim_value"),
             });
-            http.post_json("/admin/claim-maps", payload).await?;
+            let body = http.post_json("/admin/claim-maps", payload).await?;
+            let created: ClaimMapRow =
+                serde_json::from_str(&body).context("Failed to parse claim map response")?;
             Ok(SubmitResult {
                 message: "Claim map created".to_string(),
-                select_id: None,
+                select_id: Some(SelectHint {
+                    tab: Tab::ClaimMaps,
+                    id: created.id,
+                }),
             })
         }
         FormAction::DeleteClaimMap(id) => {
@@ -1027,6 +1192,12 @@ fn ensure_confirm(form: &FormState) -> Result<()> {
     Ok(())
 }
 
+fn set_field_value(form: &mut FormState, name: &str, value: String) {
+    if let Some(field) = form.fields.iter_mut().find(|f| f.label == name) {
+        field.input = input_with_value(value);
+    }
+}
+
 fn split_csv(input: Option<String>) -> Vec<String> {
     input
         .unwrap_or_default()
@@ -1043,6 +1214,43 @@ fn input_with_value(value: String) -> Input {
     input
 }
 
+fn generate_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    BASE64_STANDARD.encode(bytes)
+}
+
+fn parse_redirect_uris(input: Option<String>) -> Result<Vec<String>> {
+    let values = split_csv(input);
+    let mut parsed = Vec::new();
+    for value in values {
+        if value.contains('*') {
+            return Err(anyhow!("redirect_uris cannot contain wildcard '*'."));
+        }
+        let url = Url::parse(&value).map_err(|_| anyhow!("Invalid redirect_uri: {value}"))?;
+        let scheme = url.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err(anyhow!("redirect_uris must be http or https: {value}"));
+        }
+        parsed.push(value);
+    }
+    Ok(parsed)
+}
+
+fn parse_grant_types(input: Option<String>) -> Result<Vec<String>> {
+    let values = split_csv(input);
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let allowed: Vec<&str> = supported_grant_types().iter().map(|(_, v)| *v).collect();
+    for value in &values {
+        if !allowed.iter().any(|allowed| allowed == value) {
+            return Err(anyhow!("Unsupported grant_type: {value}"));
+        }
+    }
+    Ok(values)
+}
+
 fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     let size = frame.size();
     let layout = Layout::default()
@@ -1054,8 +1262,8 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     draw_body(frame, layout[1], app);
     draw_status(frame, layout[2], app);
 
-    if let Some(form) = &app.form {
-        draw_form(frame, size, form);
+    if app.form.is_some() {
+        draw_form(frame, size, app);
     }
 }
 
@@ -1220,7 +1428,11 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_form(frame: &mut ratatui::Frame, area: Rect, form: &FormState) {
+fn draw_form(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let form = match &app.form {
+        Some(form) => form,
+        None => return,
+    };
     let popup = centered_rect(70, 60, area);
     frame.render_widget(Clear, popup);
     let block = Block::default()
@@ -1267,6 +1479,24 @@ fn draw_form(frame: &mut ratatui::Frame, area: Rect, form: &FormState) {
                 Style::default().fg(Color::DarkGray),
             ));
         }
+        if matches!(field.kind, FieldKind::Secret) {
+            spans.push(Span::styled(
+                " (Ctrl+V reveal)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "client_secret" {
+            spans.push(Span::styled(
+                " (Ctrl+G generate)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "grant_types" {
+            spans.push(Span::styled(
+                " (g picker)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         if is_active && !matches!(field.kind, FieldKind::Bool) {
             let cursor_offset = field.input.cursor();
             let cursor_x = inner[0].x
@@ -1290,9 +1520,13 @@ fn draw_form(frame: &mut ratatui::Frame, area: Rect, form: &FormState) {
         frame.set_cursor(x, y);
     }
 
-    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel")
+    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | g grant types | Ctrl+G secret | Ctrl+V reveal")
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
+
+    if let Some(picker) = &app.picker {
+        draw_picker(frame, area, picker);
+    }
 }
 
 fn tab_title(tab: Tab) -> &'static str {
@@ -1416,4 +1650,40 @@ fn centered_rect(percent_x: u16, percent_y: u16, rect: Rect) -> Rect {
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+fn draw_picker(frame: &mut ratatui::Frame, area: Rect, picker: &PickerState) {
+    let popup = centered_rect(50, 50, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(picker.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let lines: Vec<Line> = picker
+        .options
+        .iter()
+        .enumerate()
+        .map(|(idx, option)| {
+            let marker = if option.selected { "[x]" } else { "[ ]" };
+            let prefix = if idx == picker.index { ">" } else { " " };
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                Span::raw(format!(" {marker} {} ({})", option.label, option.value)),
+            ])
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    let footer = Paragraph::new("Space toggle | Enter apply | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
 }
