@@ -248,6 +248,10 @@ pub async fn handle_login(
         }
     };
 
+    // Normalize empty PKCE fields (Grafana can submit empty values)
+    let code_challenge = req.code_challenge.as_deref().and_then(non_empty);
+    let code_challenge_method = req.code_challenge_method.as_deref().and_then(non_empty);
+
     // Vygeneruj authorization code
     let code: String = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
@@ -271,8 +275,8 @@ pub async fn handle_login(
     .bind(user.id)
     .bind(&req.redirect_uri)
     .bind(&scope)
-    .bind(&req.code_challenge)
-    .bind(&req.code_challenge_method)
+    .bind(code_challenge)
+    .bind(code_challenge_method)
     .bind(expires_at)
     .execute(&state.db_pool)
     .await
@@ -444,11 +448,15 @@ async fn handle_authorization_code_token(
     }
 
     // PKCE validace
-    if let Some(challenge) = &auth_code.code_challenge {
+    if let Some(challenge) = auth_code.code_challenge.as_deref().and_then(non_empty) {
         match req.code_verifier {
             Some(ref verifier) => {
                 // Zjednodušená PKCE validace (S256 nebo plain)
-                let valid = match auth_code.code_challenge_method.as_deref() {
+                let valid = match auth_code
+                    .code_challenge_method
+                    .as_deref()
+                    .and_then(non_empty)
+                {
                     Some("plain") => challenge == verifier,
                     Some("S256") => {
                         use sha2::{Sha256, Digest};
@@ -600,6 +608,14 @@ async fn handle_authorization_code_token(
         scope: Some(auth_code.scope),
     })
     .into_response()
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Response {
