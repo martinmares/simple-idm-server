@@ -12,6 +12,7 @@ use axum::{
     Router,
 };
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -56,6 +57,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         access_token_expiry: config.jwt.access_token_expiry_seconds,
         refresh_token_expiry: config.jwt.refresh_token_expiry_seconds,
     });
+
+    let cleanup_interval = config.jwt.refresh_token_cleanup_interval_seconds;
+    if cleanup_interval > 0 {
+        let cleanup_pool = db_pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval));
+            loop {
+                interval.tick().await;
+                oauth2::cleanup::cleanup_refresh_tokens(&cleanup_pool).await;
+            }
+        });
+    }
 
     // Vytvoř Admin auth state
     let admin_auth = admin::AdminAuth::new(&config, jwt_service.clone());

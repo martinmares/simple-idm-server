@@ -1,5 +1,4 @@
 use crate::db::models::RefreshToken;
-use crate::db::DbPool;
 use axum::{
     body::Bytes,
     extract::State,
@@ -11,6 +10,7 @@ use serde::Deserialize;
 use sqlx;
 use std::sync::Arc;
 
+use super::cleanup::cleanup_refresh_tokens;
 use super::client_credentials::OAuth2State;
 use super::utils::apply_client_auth;
 
@@ -99,7 +99,7 @@ pub async fn handle_revoke(
             .into_response();
     }
 
-    cleanup_expired_refresh_tokens(&state.db_pool).await;
+    cleanup_refresh_tokens(&state.db_pool).await;
 
     if req
         .token_type_hint
@@ -235,13 +235,4 @@ fn parse_revocation_request(
         )
             .into_response()
     })
-}
-
-async fn cleanup_expired_refresh_tokens(pool: &DbPool) {
-    let _ = sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < NOW()")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM used_refresh_tokens WHERE expires_at < NOW()")
-        .execute(pool)
-        .await;
 }
