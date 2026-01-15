@@ -60,6 +60,7 @@ pub struct CreateGroupRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateGroupRequest {
+    pub name: Option<String>,
     pub description: Option<String>,
 }
 
@@ -94,6 +95,16 @@ pub struct CreateOAuthClientRequest {
     pub redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
     pub scope: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateOAuthClientRequest {
+    pub name: Option<String>,
+    pub client_secret: Option<String>,
+    pub redirect_uris: Option<Vec<String>>,
+    pub grant_types: Option<Vec<String>>,
+    pub scope: Option<String>,
+    pub is_active: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -245,6 +256,29 @@ pub async fn create_password_reset(
         .unwrap_or_else(|_| "3600".to_string())
         .parse()
         .unwrap_or(3600);
+    let max_per_hour = env::var("PASSWORD_RESET_MAX_PER_HOUR")
+        .unwrap_or_else(|_| "5".to_string())
+        .parse()
+        .unwrap_or(5);
+    let recent_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM password_reset_tokens WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+    )
+    .bind(user_id)
+    .fetch_one(&db_pool)
+    .await;
+
+    if let Ok(count) = recent_count {
+        if count >= max_per_hour {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorResponse {
+                    error: "rate_limited".to_string(),
+                    error_description: "Too many reset requests for this user".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    }
     let issuer = env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
 
     let PasswordResetTokenInfo {
@@ -265,6 +299,12 @@ pub async fn create_password_reset(
                 .into_response();
         }
     };
+
+    tracing::info!(
+        user_id = %user_id,
+        expires_at = %expires_at,
+        "Created password reset token"
+    );
 
     (
         StatusCode::CREATED,
@@ -521,7 +561,7 @@ pub async fn update_group(
     Path(group_id): Path<Uuid>,
     Json(req): Json<UpdateGroupRequest>,
 ) -> impl IntoResponse {
-    let Some(description) = req.description else {
+    if req.name.is_none() && req.description.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -532,14 +572,38 @@ pub async fn update_group(
             .into_response();
     };
 
+    if let Some(name) = &req.name {
+        let conflict = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM groups WHERE name = $1 AND id <> $2 LIMIT 1",
+        )
+        .bind(name)
+        .bind(group_id)
+        .fetch_optional(&db_pool)
+        .await;
+
+        if let Ok(Some(_)) = conflict {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: "Group name already exists".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    }
+
     let result = sqlx::query!(
         r#"
         UPDATE groups
-        SET description = $1
-        WHERE id = $2
+        SET
+            name = COALESCE($1, name),
+            description = COALESCE($2, description)
+        WHERE id = $3
         RETURNING id, name, description
         "#,
-        description,
+        req.name,
+        req.description,
         group_id
     )
     .fetch_optional(&db_pool)
@@ -930,6 +994,109 @@ pub async fn delete_oauth_client(
                 Json(ErrorResponse {
                     error: "server_error".to_string(),
                     error_description: "Failed to delete OAuth client".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn update_oauth_client(
+    State(db_pool): State<DbPool>,
+    Path(client_id): Path<Uuid>,
+    Json(req): Json<UpdateOAuthClientRequest>,
+) -> impl IntoResponse {
+    if req.name.is_none()
+        && req.client_secret.is_none()
+        && req.redirect_uris.is_none()
+        && req.grant_types.is_none()
+        && req.scope.is_none()
+        && req.is_active.is_none()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".to_string(),
+                error_description: "No fields to update".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let secret_hash = if let Some(secret) = &req.client_secret {
+        match hash_password(secret) {
+            Ok(hash) => Some(hash),
+            Err(e) => {
+                tracing::error!("Failed to hash client secret: {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Failed to hash client secret".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
+    let redirect_uris = req.redirect_uris.as_deref();
+    let grant_types = req.grant_types.as_deref();
+    let result = sqlx::query!(
+        r#"
+        UPDATE oauth_clients
+        SET
+            name = COALESCE($1, name),
+            client_secret_hash = COALESCE($2, client_secret_hash),
+            redirect_uris = COALESCE($3, redirect_uris),
+            grant_types = COALESCE($4, grant_types),
+            scope = COALESCE($5, scope),
+            is_active = COALESCE($6, is_active)
+        WHERE id = $7
+        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active
+        "#,
+        req.name,
+        secret_hash,
+        redirect_uris,
+        grant_types,
+        req.scope,
+        req.is_active,
+        client_id
+    )
+    .fetch_optional(&db_pool)
+    .await;
+
+    match result {
+        Ok(Some(client)) => (
+            StatusCode::OK,
+            Json(OAuthClientResponse {
+                id: client.id,
+                client_id: client.client_id,
+                name: client.name,
+                redirect_uris: client.redirect_uris,
+                grant_types: client.grant_types,
+                scope: client.scope,
+                is_active: client.is_active,
+            }),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".to_string(),
+                error_description: "OAuth client not found".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update OAuth client: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to update OAuth client".to_string(),
                 }),
             )
                 .into_response()

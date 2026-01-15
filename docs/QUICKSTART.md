@@ -37,6 +37,8 @@ Basic settings in `.env`:
 DATABASE_URL=postgres://postgres:postgres@localhost/simple_idm
 JWT_ISSUER=http://localhost:8080
 PASSWORD_RESET_TOKEN_EXPIRY_SECONDS=3600
+PASSWORD_RESET_CLEANUP_INTERVAL_SECONDS=0
+PASSWORD_RESET_MAX_PER_HOUR=5
 ```
 
 ## Step 4: Run Server

@@ -85,6 +85,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    let password_reset_cleanup_interval = std::env::var("PASSWORD_RESET_CLEANUP_INTERVAL_SECONDS")
+        .unwrap_or_else(|_| "0".to_string())
+        .parse()
+        .unwrap_or(0);
+    if password_reset_cleanup_interval > 0 {
+        let cleanup_pool = db_pool.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                "Password reset cleanup scheduler enabled (interval {}s)",
+                password_reset_cleanup_interval
+            );
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(password_reset_cleanup_interval));
+            loop {
+                interval.tick().await;
+                tracing::info!("Running password reset cleanup");
+                password_reset::cleanup_password_reset_tokens(&cleanup_pool).await;
+            }
+        });
+    }
+
     // Vytvoř Admin auth state
     let admin_auth = admin::AdminAuth::new(&config, jwt_service.clone(), db_pool.clone());
 
@@ -122,6 +143,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/admin/oauth-clients",
             get(admin::handlers::list_oauth_clients),
+        )
+        .route(
+            "/admin/oauth-clients/{id}",
+            put(admin::handlers::update_oauth_client),
         )
         .route(
             "/admin/oauth-clients/{id}",
