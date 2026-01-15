@@ -336,6 +336,8 @@ cargo build --release
 - [ ] Web UI for device verification
 - [ ] Publish Docker image
 - [ ] Expand integration documentation
+- [ ] Enrich `user-groups` output with user and group names
+- [ ] Enrich `claim-maps` output with client and group names
 
 ## License
 
