@@ -8,6 +8,7 @@ use axum::{
     Form, Json,
 };
 use chrono::{Duration, Utc};
+use base64::Engine as _;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx;
@@ -59,8 +60,8 @@ pub struct TokenRequest {
     pub grant_type: String,
     pub code: Option<String>,
     pub redirect_uri: Option<String>,
-    pub client_id: String,
-    pub client_secret: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
     pub code_verifier: Option<String>,
     pub refresh_token: Option<String>,
 }
@@ -309,6 +310,8 @@ pub async fn handle_token(
         Err(resp) => return resp,
     };
 
+    let req = apply_client_auth(req, &headers);
+
     match req.grant_type.as_str() {
         "authorization_code" => handle_authorization_code_token(state, req).await,
         "refresh_token" => handle_refresh_token(state, req).await,
@@ -357,6 +360,47 @@ fn parse_token_request(headers: &HeaderMap, body: &[u8]) -> Result<TokenRequest,
         )
             .into_response()
     })
+}
+
+fn apply_client_auth(mut req: TokenRequest, headers: &HeaderMap) -> TokenRequest {
+    if let Some((client_id, client_secret)) = parse_basic_auth(headers) {
+        if req.client_id.as_deref().unwrap_or("").is_empty() {
+            req.client_id = Some(client_id);
+        }
+        if req.client_secret.as_deref().unwrap_or("").is_empty() {
+            req.client_secret = Some(client_secret);
+        }
+    }
+
+    if req.client_id.as_deref().map(|s| s.trim().is_empty()).unwrap_or(false) {
+        req.client_id = None;
+    }
+    if req.client_secret.as_deref().map(|s| s.trim().is_empty()).unwrap_or(false) {
+        req.client_secret = None;
+    }
+
+    req
+}
+
+fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
+    let header_value = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())?;
+
+    if !header_value.to_ascii_lowercase().starts_with("basic ") {
+        return None;
+    }
+
+    let encoded = header_value.split_at(6).1;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded.as_bytes())
+        .ok()?;
+    let decoded = String::from_utf8(decoded).ok()?;
+
+    let mut parts = decoded.splitn(2, ':');
+    let client_id = parts.next()?.to_string();
+    let client_secret = parts.next()?.to_string();
+    Some((client_id, client_secret))
 }
 
 async fn handle_authorization_code_token(
@@ -439,7 +483,18 @@ async fn handle_authorization_code_token(
     };
 
     // Ověř client secret
-    if !verify_password(&req.client_secret, &client.client_secret_hash).unwrap_or(false) {
+    let client_secret = match req.client_secret {
+        Some(secret) => secret,
+        None => {
+            return Json(ErrorResponse {
+                error: "invalid_client".to_string(),
+                error_description: "Missing client_secret".to_string(),
+            })
+            .into_response()
+        }
+    };
+
+    if !verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
         return Json(ErrorResponse {
             error: "invalid_client".to_string(),
             error_description: "Invalid client credentials".to_string(),
@@ -547,7 +602,7 @@ async fn handle_authorization_code_token(
 
     // Vytvoř access token
     let access_token = match state.jwt_service.create_access_token(
-        user.id,
+        user.username.clone(),
         client.client_id.clone(),
         Some(user.email.clone()),
         user_group_names,
@@ -694,7 +749,18 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         }
     };
 
-    if !verify_password(&req.client_secret, &client.client_secret_hash).unwrap_or(false) {
+    let client_secret = match req.client_secret {
+        Some(secret) => secret,
+        None => {
+            return Json(ErrorResponse {
+                error: "invalid_client".to_string(),
+                error_description: "Missing client_secret".to_string(),
+            })
+            .into_response()
+        }
+    };
+
+    if !verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
         return Json(ErrorResponse {
             error: "invalid_client".to_string(),
             error_description: "Invalid client credentials".to_string(),
@@ -744,7 +810,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
 
     // Vytvoř nový access token
     let access_token = match state.jwt_service.create_access_token(
-        user.id,
+        user.username.clone(),
         client.client_id.clone(),
         Some(user.email.clone()),
         user_group_names,

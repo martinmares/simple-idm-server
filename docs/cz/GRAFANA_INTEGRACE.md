@@ -231,6 +231,10 @@ api_url = https://sso.cloud-app.cz/oauth2/userinfo
 # Auto-mapování rolí z JWT
 org_role = Viewer
 
+Poznámky:
+- `sub` v tokenu je username (ne UUID), proto je vhodné `login_attribute_path = sub`.
+- `grafana_role` musí být string hodnota (např. "Admin") z `claim_value`.
+
 [auth]
 oauth_auto_login = false
 disable_login_form = false
