@@ -26,11 +26,11 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
 
     format!(
         r#"<!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Přihlášení - Cloud App SSO</title>
+    <title>Sign In - Cloud App SSO</title>
     <style>
         * {{
             margin: 0;
@@ -184,13 +184,13 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
     <div class="login-container">
         <div class="logo">
             <h1>🔐 Cloud App SSO</h1>
-            <p>Bezpečné přihlášení</p>
+            <p>Secure Sign In</p>
         </div>
 
         {}
 
         <div class="client-info">
-            <strong>Přihlášení do aplikace:</strong> {}
+            <strong>Signing in to:</strong> {}
         </div>
 
         <form method="POST" action="/oauth2/login">
@@ -202,7 +202,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
             <input type="hidden" name="code_challenge_method" value="{}">
 
             <div class="form-group">
-                <label for="username">Uživatelské jméno</label>
+                <label for="username">Username</label>
                 <input
                     type="text"
                     id="username"
@@ -210,30 +210,30 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
                     required
                     autofocus
                     autocomplete="username"
-                    placeholder="Zadejte uživatelské jméno"
+                    placeholder="Enter your username"
                 >
             </div>
 
             <div class="form-group">
-                <label for="password">Heslo</label>
+                <label for="password">Password</label>
                 <input
                     type="password"
                     id="password"
                     name="password"
                     required
                     autocomplete="current-password"
-                    placeholder="Zadejte heslo"
+                    placeholder="Enter your password"
                 >
             </div>
 
             <button type="submit" class="submit-btn">
-                Přihlásit se
+                Sign In
             </button>
         </form>
 
         <div class="footer">
-            <p>Chráněno pomocí OAuth 2.0 + OIDC</p>
-            <p><a href="/.well-known/openid-configuration">Konfigurace</a></p>
+            <p>Protected by OAuth 2.0 + OIDC</p>
+            <p><a href="/.well-known/openid-configuration">Configuration</a></p>
         </div>
     </div>
 </body>
@@ -253,11 +253,11 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
 pub fn error_page(error: &str, error_description: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
-<html lang="cs">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Chyba - Cloud App SSO</title>
+    <title>Error - Cloud App SSO</title>
     <style>
         * {{
             margin: 0;
@@ -333,13 +333,13 @@ pub fn error_page(error: &str, error_description: &str) -> String {
 <body>
     <div class="error-container">
         <div class="error-icon">⚠️</div>
-        <h1>Chyba při autorizaci</h1>
+        <h1>Authorization Error</h1>
         <p>{}</p>
         <div class="error-code">
-            <strong>Kód chyby:</strong> {}
+            <strong>Error Code:</strong> {}
         </div>
         <p style="margin-top: 32px;">
-            <a href="javascript:history.back()" class="back-btn">Zpět</a>
+            <a href="javascript:history.back()" class="back-btn">Go Back</a>
         </p>
     </div>
 </body>

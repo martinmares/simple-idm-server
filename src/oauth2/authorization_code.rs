@@ -86,7 +86,7 @@ pub async fn handle_authorize(
     if response_type != "code" {
         let html = templates::error_page(
             "unsupported_response_type",
-            "Pouze 'code' response type je podporován",
+            "Only 'code' response type is supported",
         );
         return Html(html).into_response();
     }
@@ -97,7 +97,7 @@ pub async fn handle_authorize(
         None => {
             let html = templates::error_page(
                 "invalid_request",
-                "Chybí povinný parametr client_id",
+                "Missing required parameter: client_id",
             );
             return Html(html).into_response();
         }
@@ -109,7 +109,7 @@ pub async fn handle_authorize(
         None => {
             let html = templates::error_page(
                 "invalid_request",
-                "Chybí povinný parametr redirect_uri",
+                "Missing required parameter: redirect_uri",
             );
             return Html(html).into_response();
         }
@@ -127,14 +127,14 @@ pub async fn handle_authorize(
         Ok(None) => {
             let html = templates::error_page(
                 "invalid_client",
-                "OAuth klient nebyl nalezen nebo není aktivní",
+                "OAuth client not found or inactive",
             );
             return Html(html).into_response();
         }
         Err(_) => {
             let html = templates::error_page(
                 "server_error",
-                "Chyba databáze při ověřování klienta",
+                "Database error while validating client",
             );
             return Html(html).into_response();
         }
@@ -144,7 +144,7 @@ pub async fn handle_authorize(
     if !client.redirect_uris.contains(redirect_uri) {
         let html = templates::error_page(
             "invalid_request",
-            "Neplatná redirect_uri pro tohoto klienta",
+            "Invalid redirect_uri for this client",
         );
         return Html(html).into_response();
     }
@@ -187,13 +187,13 @@ pub async fn handle_login(
                 params.insert("code_challenge_method".to_string(), method.clone());
             }
 
-            let html = templates::login_page(&params, Some("Neplatné přihlašovací údaje"));
+            let html = templates::login_page(&params, Some("Invalid username or password"));
             return Html(html).into_response();
         }
         Err(_) => {
             let html = templates::error_page(
                 "server_error",
-                "Chyba databáze při ověřování uživatele",
+                "Database error while validating user",
             );
             return Html(html).into_response();
         }
@@ -218,7 +218,7 @@ pub async fn handle_login(
             params.insert("code_challenge_method".to_string(), method.clone());
         }
 
-        let html = templates::login_page(&params, Some("Neplatné přihlašovací údaje"));
+        let html = templates::login_page(&params, Some("Invalid username or password"));
         return Html(html).into_response();
     }
 
@@ -234,14 +234,14 @@ pub async fn handle_login(
         Ok(None) => {
             let html = templates::error_page(
                 "invalid_client",
-                "OAuth klient nebyl nalezen",
+                "OAuth client not found",
             );
             return Html(html).into_response();
         }
         Err(_) => {
             let html = templates::error_page(
                 "server_error",
-                "Chyba databáze při ověřování klienta",
+                "Database error while validating client",
             );
             return Html(html).into_response();
         }
@@ -278,7 +278,7 @@ pub async fn handle_login(
     {
         let html = templates::error_page(
             "server_error",
-            "Nepodařilo se vytvořit autorizační kód",
+            "Failed to create authorization code",
         );
         return Html(html).into_response();
     }
