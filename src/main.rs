@@ -65,9 +65,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if cleanup_interval > 0 {
         let cleanup_pool = db_pool.clone();
         tokio::spawn(async move {
+            tracing::info!(
+                "Refresh token cleanup scheduler enabled (interval {}s)",
+                cleanup_interval
+            );
             let mut interval = tokio::time::interval(Duration::from_secs(cleanup_interval));
             loop {
                 interval.tick().await;
+                tracing::info!("Running refresh token cleanup");
                 oauth2::cleanup::cleanup_refresh_tokens(&cleanup_pool).await;
             }
         });
