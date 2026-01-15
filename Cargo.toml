@@ -50,7 +50,7 @@ anyhow = "1.0"
 validator = { version = "0.20", features = ["derive"] }
 
 # HTTP client (for OIDC discovery)
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", features = ["json", "form"] }
 
 [[bin]]
 name = "simple-idm-ctl"
@@ -58,7 +58,7 @@ path = "src/bin/simple-idm-ctl.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
-reqwest = { version = "0.13", features = ["json"] }
+reqwest = { version = "0.13", features = ["json", "form"] }
 chrono = { version = "0.4", features = ["serde"] }
 sha2 = "0.10"
 base64 = "0.22"

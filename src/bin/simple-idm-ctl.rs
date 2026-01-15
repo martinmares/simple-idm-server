@@ -11,6 +11,8 @@ struct Cli {
     base_url: String,
     #[arg(long)]
     token: String,
+    #[arg(long, global = true)]
+    insecure: bool,
     #[arg(short = 'o', long, default_value = "table", global = true)]
     output: OutputFormat,
     #[arg(long, default_value = "sharp", global = true)]
@@ -57,6 +59,11 @@ enum Commands {
     UserGroups {
         #[command(subcommand)]
         command: UserGroupsCommand,
+    },
+    #[command(name = "oauth")]
+    OAuth {
+        #[command(subcommand)]
+        command: OAuthCommand,
     },
     Ping,
 }
@@ -224,6 +231,74 @@ enum UserGroupsCommand {
     },
 }
 
+#[derive(Subcommand, Debug)]
+enum OAuthCommand {
+    AuthorizeUrl {
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        redirect_uri: String,
+        #[arg(long, default_value = "code")]
+        response_type: String,
+        #[arg(long, default_value = "openid")]
+        scope: String,
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        code_challenge: Option<String>,
+        #[arg(long)]
+        code_challenge_method: Option<String>,
+    },
+    Token {
+        #[arg(long, default_value = "authorization_code")]
+        grant_type: String,
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        client_secret: String,
+        #[arg(long)]
+        code: Option<String>,
+        #[arg(long)]
+        redirect_uri: Option<String>,
+        #[arg(long)]
+        code_verifier: Option<String>,
+        #[arg(long)]
+        refresh_token: Option<String>,
+    },
+    Refresh {
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        client_secret: String,
+        #[arg(long)]
+        refresh_token: String,
+    },
+    UserInfo {
+        #[arg(long)]
+        access_token: String,
+    },
+    Introspect {
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        client_secret: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        token_type_hint: Option<String>,
+    },
+    Revoke {
+        #[arg(long)]
+        client_id: String,
+        #[arg(long)]
+        client_secret: String,
+        #[arg(long)]
+        token: String,
+        #[arg(long)]
+        token_type_hint: Option<String>,
+    },
+}
+
 #[derive(Debug, Deserialize)]
 struct ErrorResponse {
     error: String,
@@ -300,7 +375,7 @@ struct OutputConfig {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let http = HttpClient::new(cli.base_url, cli.token);
+    let http = HttpClient::new(cli.base_url, cli.token, cli.insecure)?;
     let output = OutputConfig {
         format: cli.output,
         style: cli.style,
@@ -312,6 +387,7 @@ async fn main() -> Result<()> {
         Commands::Clients { command } => handle_clients(&http, output, command).await?,
         Commands::ClaimMaps { command } => handle_claim_maps(&http, output, command).await?,
         Commands::UserGroups { command } => handle_user_groups(&http, output, command).await?,
+        Commands::OAuth { command } => handle_oauth(&http, output, command).await?,
         Commands::Ping => handle_ping(&http).await?,
     }
 
@@ -321,10 +397,10 @@ async fn main() -> Result<()> {
 async fn handle_users(http: &HttpClient, output: OutputConfig, command: UsersCommand) -> Result<()> {
     match command {
         UsersCommand::List { page, limit } => {
-            let body = http.get("/admin/users").await?;
-            let mut rows: Vec<UserRow> =
+            let path = append_pagination("/admin/users", page, limit);
+            let body = http.get(&path).await?;
+            let rows: Vec<UserRow> =
                 serde_json::from_str(&body).context("Failed to parse response")?;
-            rows = apply_paging(rows, page, limit);
             print_table_rows_vec(output, rows)?;
         }
         UsersCommand::Create {
@@ -379,10 +455,10 @@ async fn handle_users(http: &HttpClient, output: OutputConfig, command: UsersCom
 async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsCommand) -> Result<()> {
     match command {
         GroupsCommand::List { page, limit } => {
-            let body = http.get("/admin/groups").await?;
-            let mut rows: Vec<GroupRow> =
+            let path = append_pagination("/admin/groups", page, limit);
+            let body = http.get(&path).await?;
+            let rows: Vec<GroupRow> =
                 serde_json::from_str(&body).context("Failed to parse response")?;
-            rows = apply_paging(rows, page, limit);
             print_table_rows_vec(output, rows)?;
         }
         GroupsCommand::Create { name, description } => {
@@ -419,10 +495,10 @@ async fn handle_clients(
 ) -> Result<()> {
     match command {
         ClientsCommand::List { page, limit } => {
-            let body = http.get("/admin/oauth-clients").await?;
-            let mut rows: Vec<ClientRow> =
+            let path = append_pagination("/admin/oauth-clients", page, limit);
+            let body = http.get(&path).await?;
+            let rows: Vec<ClientRow> =
                 serde_json::from_str(&body).context("Failed to parse response")?;
-            rows = apply_paging(rows, page, limit);
             print_clients_output(output, rows)?;
         }
         ClientsCommand::Create {
@@ -498,10 +574,10 @@ async fn handle_claim_maps(
 ) -> Result<()> {
     match command {
         ClaimMapsCommand::List { page, limit } => {
-            let body = http.get("/admin/claim-maps").await?;
-            let mut rows: Vec<ClaimMapRow> =
+            let path = append_pagination("/admin/claim-maps", page, limit);
+            let body = http.get(&path).await?;
+            let rows: Vec<ClaimMapRow> =
                 serde_json::from_str(&body).context("Failed to parse response")?;
-            rows = apply_paging(rows, page, limit);
             print_table_rows_vec(output, rows)?;
         }
         ClaimMapsCommand::Create {
@@ -534,10 +610,10 @@ async fn handle_user_groups(
 ) -> Result<()> {
     match command {
         UserGroupsCommand::List { page, limit } => {
-            let body = http.get("/admin/user-groups").await?;
-            let mut rows: Vec<UserGroupRow> =
+            let path = append_pagination("/admin/user-groups", page, limit);
+            let body = http.get(&path).await?;
+            let rows: Vec<UserGroupRow> =
                 serde_json::from_str(&body).context("Failed to parse response")?;
-            rows = apply_paging(rows, page, limit);
             print_table_rows_vec(output, rows)?;
         }
         UserGroupsCommand::Add { user_id, group_id } => {
@@ -554,6 +630,134 @@ async fn handle_user_groups(
             print_message(output, &body)?;
         }
     }
+    Ok(())
+}
+
+async fn handle_oauth(http: &HttpClient, output: OutputConfig, command: OAuthCommand) -> Result<()> {
+    match command {
+        OAuthCommand::AuthorizeUrl {
+            client_id,
+            redirect_uri,
+            response_type,
+            scope,
+            state,
+            code_challenge,
+            code_challenge_method,
+        } => {
+            let mut params = vec![
+                ("client_id".to_string(), client_id),
+                ("redirect_uri".to_string(), redirect_uri),
+                ("response_type".to_string(), response_type),
+                ("scope".to_string(), scope),
+            ];
+            if let Some(state) = state {
+                params.push(("state".to_string(), state));
+            }
+            if let Some(code_challenge) = code_challenge {
+                params.push(("code_challenge".to_string(), code_challenge));
+            }
+            if let Some(code_challenge_method) = code_challenge_method {
+                params.push(("code_challenge_method".to_string(), code_challenge_method));
+            }
+
+            let query = serde_urlencoded::to_string(params)
+                .context("Failed to build authorize query")?;
+            let mut url = http.url("/oauth2/authorize");
+            url.push('?');
+            url.push_str(&query);
+            println!("{url}");
+        }
+        OAuthCommand::Token {
+            grant_type,
+            client_id,
+            client_secret,
+            code,
+            redirect_uri,
+            code_verifier,
+            refresh_token,
+        } => {
+            let mut params = vec![
+                ("grant_type".to_string(), grant_type.clone()),
+                ("client_id".to_string(), client_id),
+                ("client_secret".to_string(), client_secret),
+            ];
+            match grant_type.as_str() {
+                "authorization_code" => {
+                    let code = code.ok_or_else(|| anyhow!("Missing --code"))?;
+                    let redirect_uri =
+                        redirect_uri.ok_or_else(|| anyhow!("Missing --redirect-uri"))?;
+                    params.push(("code".to_string(), code));
+                    params.push(("redirect_uri".to_string(), redirect_uri));
+                    if let Some(code_verifier) = code_verifier {
+                        params.push(("code_verifier".to_string(), code_verifier));
+                    }
+                }
+                "refresh_token" => {
+                    let refresh_token =
+                        refresh_token.ok_or_else(|| anyhow!("Missing --refresh-token"))?;
+                    params.push(("refresh_token".to_string(), refresh_token));
+                }
+                other => bail!("Unsupported grant_type: {other}"),
+            }
+            let body = http.post_form_no_auth("/oauth2/token", params).await?;
+            print_json_or_kv(output, &body)?;
+        }
+        OAuthCommand::Refresh {
+            client_id,
+            client_secret,
+            refresh_token,
+        } => {
+            let params = vec![
+                ("grant_type".to_string(), "refresh_token".to_string()),
+                ("client_id".to_string(), client_id),
+                ("client_secret".to_string(), client_secret),
+                ("refresh_token".to_string(), refresh_token),
+            ];
+            let body = http.post_form_no_auth("/oauth2/token", params).await?;
+            print_json_or_kv(output, &body)?;
+        }
+        OAuthCommand::UserInfo { access_token } => {
+            let body = http.get_with_bearer("/oauth2/userinfo", &access_token).await?;
+            print_json_or_kv(output, &body)?;
+        }
+        OAuthCommand::Introspect {
+            client_id,
+            client_secret,
+            token,
+            token_type_hint,
+        } => {
+            let mut params = vec![
+                ("client_id".to_string(), client_id),
+                ("client_secret".to_string(), client_secret),
+                ("token".to_string(), token),
+            ];
+            if let Some(hint) = token_type_hint {
+                params.push(("token_type_hint".to_string(), hint));
+            }
+            let body = http.post_form_no_auth("/oauth2/introspect", params).await?;
+            print_json_or_kv(output, &body)?;
+        }
+        OAuthCommand::Revoke {
+            client_id,
+            client_secret,
+            token,
+            token_type_hint,
+        } => {
+            let mut params = vec![
+                ("client_id".to_string(), client_id),
+                ("client_secret".to_string(), client_secret),
+                ("token".to_string(), token),
+            ];
+            if let Some(hint) = token_type_hint {
+                params.push(("token_type_hint".to_string(), hint));
+            }
+            let body = http.post_form_no_auth("/oauth2/revoke", params).await?;
+            if !body.trim().is_empty() {
+                print_json_or_kv(output, &body)?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -618,11 +822,35 @@ fn limit_text(value: &str, max_len: usize) -> String {
     format!("{trimmed}...")
 }
 
-fn apply_paging<T>(items: Vec<T>, page: Option<usize>, limit: Option<usize>) -> Vec<T> {
-    let limit = limit.unwrap_or(items.len());
-    let page = page.unwrap_or(1);
-    let start = limit.saturating_mul(page.saturating_sub(1));
-    items.into_iter().skip(start).take(limit).collect()
+fn json_value_to_string(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "".to_string(),
+        serde_json::Value::Bool(val) => val.to_string(),
+        serde_json::Value::Number(val) => val.to_string(),
+        serde_json::Value::String(val) => val.clone(),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(json_value_to_string)
+            .collect::<Vec<_>>()
+            .join(", "),
+        serde_json::Value::Object(_) => value.to_string(),
+    }
+}
+
+fn append_pagination(path: &str, page: Option<usize>, limit: Option<usize>) -> String {
+    let mut params = Vec::new();
+    if let Some(page) = page {
+        params.push(format!("page={page}"));
+    }
+    if let Some(limit) = limit {
+        params.push(format!("limit={limit}"));
+    }
+
+    if params.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{}", params.join("&"))
+    }
 }
 
 fn apply_style(table: &mut Table, style: TableStyle) {
@@ -680,6 +908,32 @@ fn print_message(output: OutputConfig, body: &str) -> Result<()> {
             }
         }
     }
+    Ok(())
+}
+
+fn print_json_or_kv(output: OutputConfig, body: &str) -> Result<()> {
+    if matches!(output.format, OutputFormat::Json) {
+        println!("{}", body);
+        return Ok(());
+    }
+
+    let value: serde_json::Value =
+        serde_json::from_str(body).context("Failed to parse response")?;
+    let obj = match value.as_object() {
+        Some(obj) => obj,
+        None => {
+            println!("{}", body);
+            return Ok(());
+        }
+    };
+
+    let mut rows = Vec::new();
+    for (key, value) in obj {
+        rows.push(KeyValueRow::new(key, json_value_to_string(value)));
+    }
+    let mut table = Table::new(rows);
+    apply_style(&mut table, output.style);
+    println!("{table}");
     Ok(())
 }
 
@@ -758,36 +1012,61 @@ struct HttpClient {
 }
 
 impl HttpClient {
-    fn new(base_url: String, token: String) -> Self {
-        Self {
+    fn new(base_url: String, token: String, insecure: bool) -> Result<Self> {
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(insecure)
+            .build()
+            .context("Failed to build HTTP client")?;
+        Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-            client: reqwest::Client::new(),
-        }
+            client,
+        })
     }
 
     async fn get(&self, path: &str) -> Result<String> {
-        self.request(self.client.get(self.url(path))).await
+        self.request_with_auth(self.client.get(self.url(path))).await
     }
 
     async fn delete(&self, path: &str) -> Result<String> {
-        self.request(self.client.delete(self.url(path))).await
+        self.request_with_auth(self.client.delete(self.url(path))).await
     }
 
     async fn post_json<T: Serialize>(&self, path: &str, body: T) -> Result<String> {
-        self.request(self.client.post(self.url(path)).json(&body)).await
+        self.request_with_auth(self.client.post(self.url(path)).json(&body))
+            .await
     }
 
     async fn put_json<T: Serialize>(&self, path: &str, body: T) -> Result<String> {
-        self.request(self.client.put(self.url(path)).json(&body)).await
+        self.request_with_auth(self.client.put(self.url(path)).json(&body))
+            .await
     }
 
     async fn post_empty(&self, path: &str) -> Result<String> {
-        self.request(self.client.post(self.url(path))).await
+        self.request_with_auth(self.client.post(self.url(path))).await
     }
 
-    async fn request(&self, req: reqwest::RequestBuilder) -> Result<String> {
+    async fn get_with_bearer(&self, path: &str, token: &str) -> Result<String> {
+        self.request_no_auth(self.client.get(self.url(path)).bearer_auth(token))
+            .await
+    }
+
+    async fn post_form_no_auth(&self, path: &str, body: Vec<(String, String)>) -> Result<String> {
+        self.request_no_auth(self.client.post(self.url(path)).form(&body))
+            .await
+    }
+
+    async fn request_with_auth(&self, req: reqwest::RequestBuilder) -> Result<String> {
         let resp = req.bearer_auth(&self.token).send().await?;
+        Self::handle_response(resp).await
+    }
+
+    async fn request_no_auth(&self, req: reqwest::RequestBuilder) -> Result<String> {
+        let resp = req.send().await?;
+        Self::handle_response(resp).await
+    }
+
+    async fn handle_response(resp: reqwest::Response) -> Result<String> {
         let status = resp.status();
         let text = resp.text().await?;
 

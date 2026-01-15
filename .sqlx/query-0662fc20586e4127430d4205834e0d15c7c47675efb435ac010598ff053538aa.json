@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, name, description\n        FROM groups\n        ORDER BY name\n        ",
+  "query": "\n        SELECT id, name, description\n        FROM groups\n        ORDER BY name\n        LIMIT $1 OFFSET $2\n        ",
   "describe": {
     "columns": [
       {
@@ -20,7 +20,10 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
     },
     "nullable": [
       false,
@@ -28,5 +31,5 @@
       true
     ]
   },
-  "hash": "aea91b8cfd4ea1b89a9684e62ab6a701beae934856b4deabb3aeeaaf514396aa"
+  "hash": "0662fc20586e4127430d4205834e0d15c7c47675efb435ac010598ff053538aa"
 }
