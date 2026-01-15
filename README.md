@@ -267,7 +267,6 @@ cargo build --release
 - [x] Admin API for managing users, groups and clients
 - [x] Web UI for login flow
 - [ ] Web UI for device verification
-- [x] Rate limiting
 - [x] OIDC Discovery endpoint
 - [x] UserInfo endpoint
 - [x] Validate redirect_uri and client_id during auth code exchange
@@ -275,6 +274,19 @@ cargo build --release
 - [x] JWT audience validation
 - [x] Introspection endpoint
 - [x] Revocation endpoint
+- [ ] Publish Docker image
+- [ ] Expand integration documentation
+
+### Critical
+- [ ] Enforce `openid` (and optional `email`/`profile`) scopes on `/oauth2/userinfo`
+- [ ] Validate `aud` in all access-token protected endpoints (not just userinfo)
+
+### Important
+- [ ] Add per-endpoint rate limit tuning (stricter for `/oauth2/token`)
+- [ ] Add `kid` support + JWKS key rotation strategy
+
+### Nice to have
+- [ ] Web UI for device verification
 - [ ] Publish Docker image
 - [ ] Expand integration documentation
 
