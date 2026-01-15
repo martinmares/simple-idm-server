@@ -46,11 +46,115 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
             }}
         }}
     </script>
+    <style>
+        :root {{
+            --bg-start: #f1f5f9;
+            --bg-mid: #e2e8f0;
+            --bg-end: #f1f5f9;
+            --streak-1: rgba(59, 130, 246, 0.25);
+            --streak-2: rgba(96, 165, 250, 0.35);
+        }}
+
+        @media (prefers-color-scheme: dark) {{
+            :root {{
+                --bg-start: #05080f;
+                --bg-mid: #080f1a;
+                --bg-end: #05080f;
+                --streak-1: rgba(84, 141, 214, 0.6);
+                --streak-2: rgba(120, 170, 235, 0.75);
+            }}
+        }}
+
+        .bg-shell {{
+            background: linear-gradient(
+                135deg,
+                var(--bg-start) 0%,
+                var(--bg-mid) 50%,
+                var(--bg-end) 100%
+            );
+        }}
+
+        .bg-streak {{
+            position: absolute;
+            left: -30%;
+            top: -30%;
+            width: 200%;
+            height: 2px;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                var(--streak-1),
+                var(--streak-2),
+                transparent
+            );
+            opacity: 0;
+            transform: rotate(35deg);
+            animation: streakMove 12s ease-in-out infinite;
+        }}
+
+        .bg-streak.streak-2 {{
+            animation-duration: 15s;
+            animation-delay: 3s;
+            height: 3px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-3 {{
+            animation-duration: 18s;
+            animation-delay: 6s;
+            height: 2px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-4 {{
+            animation-duration: 20s;
+            animation-delay: 9s;
+            height: 1px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-5 {{
+            animation-duration: 22s;
+            animation-delay: 12s;
+            height: 2px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-6 {{
+            animation-duration: 26s;
+            animation-delay: 15s;
+            height: 3px;
+            opacity: 0;
+        }}
+
+        @keyframes streakMove {{
+            0% {{
+                transform: translate(-40%, -40%) rotate(35deg);
+                opacity: 0;
+            }}
+            8% {{
+                opacity: 0.9;
+            }}
+            16% {{
+                opacity: 0;
+            }}
+            100% {{
+                transform: translate(40%, 40%) rotate(35deg);
+                opacity: 0;
+            }}
+        }}
+    </style>
 </head>
-<body class="min-h-screen bg-slate-50 px-4 py-10 font-sans text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-    <div class="pointer-events-none fixed inset-0 opacity-[0.15] dark:opacity-[0.2]" style="background-image: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22><filter id=%22n%22 x=%220%22 y=%220%22 width=%22100%25%22 height=%22100%25%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%221%22 stitchTiles=%22stitch%22/></filter><rect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.2%22/></svg>');"></div>
-    <div class="mx-auto flex w-full max-w-md items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:shadow-2xl">
+<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
+    <div class="absolute inset-0 -z-10 bg-shell"></div>
+    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
+    <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
+        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
             <div class="mb-6">
                 <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
                 <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Sign in to your workspace</h1>
@@ -146,11 +250,115 @@ pub fn error_page(error: &str, error_description: &str) -> String {
             }}
         }}
     </script>
+    <style>
+        :root {{
+            --bg-start: #f1f5f9;
+            --bg-mid: #e2e8f0;
+            --bg-end: #f1f5f9;
+            --streak-1: rgba(59, 130, 246, 0.25);
+            --streak-2: rgba(96, 165, 250, 0.35);
+        }}
+
+        @media (prefers-color-scheme: dark) {{
+            :root {{
+                --bg-start: #05080f;
+                --bg-mid: #080f1a;
+                --bg-end: #05080f;
+                --streak-1: rgba(84, 141, 214, 0.6);
+                --streak-2: rgba(120, 170, 235, 0.75);
+            }}
+        }}
+
+        .bg-shell {{
+            background: linear-gradient(
+                135deg,
+                var(--bg-start) 0%,
+                var(--bg-mid) 50%,
+                var(--bg-end) 100%
+            );
+        }}
+
+        .bg-streak {{
+            position: absolute;
+            left: -30%;
+            top: -30%;
+            width: 200%;
+            height: 2px;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                var(--streak-1),
+                var(--streak-2),
+                transparent
+            );
+            opacity: 0;
+            transform: rotate(35deg);
+            animation: streakMove 12s ease-in-out infinite;
+        }}
+
+        .bg-streak.streak-2 {{
+            animation-duration: 15s;
+            animation-delay: 3s;
+            height: 3px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-3 {{
+            animation-duration: 18s;
+            animation-delay: 6s;
+            height: 2px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-4 {{
+            animation-duration: 20s;
+            animation-delay: 9s;
+            height: 1px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-5 {{
+            animation-duration: 22s;
+            animation-delay: 12s;
+            height: 2px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-6 {{
+            animation-duration: 26s;
+            animation-delay: 15s;
+            height: 3px;
+            opacity: 0;
+        }}
+
+        @keyframes streakMove {{
+            0% {{
+                transform: translate(-40%, -40%) rotate(35deg);
+                opacity: 0;
+            }}
+            8% {{
+                opacity: 0.9;
+            }}
+            16% {{
+                opacity: 0;
+            }}
+            100% {{
+                transform: translate(40%, 40%) rotate(35deg);
+                opacity: 0;
+            }}
+        }}
+    </style>
 </head>
-<body class="min-h-screen bg-slate-50 px-4 py-10 font-sans text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-    <div class="pointer-events-none fixed inset-0 opacity-[0.15] dark:opacity-[0.2]" style="background-image: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22><filter id=%22n%22 x=%220%22 y=%220%22 width=%22100%25%22 height=%22100%25%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%221%22 stitchTiles=%22stitch%22/></filter><rect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.2%22/></svg>');"></div>
-    <div class="mx-auto flex w-full max-w-lg items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-10 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:shadow-2xl">
+<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
+    <div class="absolute inset-0 -z-10 bg-shell"></div>
+    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
+    <div class="relative z-10 mx-auto flex w-full max-w-lg items-center justify-center">
+        <div class="rounded-2xl border border-slate-200 bg-white p-10 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
             <div class="mb-6">
                 <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
                 <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Sign in to your workspace</h1>
@@ -227,11 +435,115 @@ pub fn password_reset_page(token: &str, error: Option<&str>) -> String {
             }}
         }}
     </script>
+    <style>
+        :root {{
+            --bg-start: #f1f5f9;
+            --bg-mid: #e2e8f0;
+            --bg-end: #f1f5f9;
+            --streak-1: rgba(59, 130, 246, 0.25);
+            --streak-2: rgba(96, 165, 250, 0.35);
+        }}
+
+        @media (prefers-color-scheme: dark) {{
+            :root {{
+                --bg-start: #05080f;
+                --bg-mid: #080f1a;
+                --bg-end: #05080f;
+                --streak-1: rgba(84, 141, 214, 0.6);
+                --streak-2: rgba(120, 170, 235, 0.75);
+            }}
+        }}
+
+        .bg-shell {{
+            background: linear-gradient(
+                135deg,
+                var(--bg-start) 0%,
+                var(--bg-mid) 50%,
+                var(--bg-end) 100%
+            );
+        }}
+
+        .bg-streak {{
+            position: absolute;
+            left: -30%;
+            top: -30%;
+            width: 200%;
+            height: 2px;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                var(--streak-1),
+                var(--streak-2),
+                transparent
+            );
+            opacity: 0;
+            transform: rotate(35deg);
+            animation: streakMove 12s ease-in-out infinite;
+        }}
+
+        .bg-streak.streak-2 {{
+            animation-duration: 15s;
+            animation-delay: 3s;
+            height: 3px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-3 {{
+            animation-duration: 18s;
+            animation-delay: 6s;
+            height: 2px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-4 {{
+            animation-duration: 20s;
+            animation-delay: 9s;
+            height: 1px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-5 {{
+            animation-duration: 22s;
+            animation-delay: 12s;
+            height: 2px;
+            opacity: 0;
+        }}
+
+        .bg-streak.streak-6 {{
+            animation-duration: 26s;
+            animation-delay: 15s;
+            height: 3px;
+            opacity: 0;
+        }}
+
+        @keyframes streakMove {{
+            0% {{
+                transform: translate(-40%, -40%) rotate(35deg);
+                opacity: 0;
+            }}
+            8% {{
+                opacity: 0.9;
+            }}
+            16% {{
+                opacity: 0;
+            }}
+            100% {{
+                transform: translate(40%, 40%) rotate(35deg);
+                opacity: 0;
+            }}
+        }}
+    </style>
 </head>
-<body class="min-h-screen bg-slate-50 px-4 py-10 font-sans text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-    <div class="pointer-events-none fixed inset-0 opacity-[0.15] dark:opacity-[0.2]" style="background-image: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22><filter id=%22n%22 x=%220%22 y=%220%22 width=%22100%25%22 height=%22100%25%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%221%22 stitchTiles=%22stitch%22/></filter><rect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.2%22/></svg>');"></div>
-    <div class="mx-auto flex w-full max-w-md items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:shadow-2xl">
+<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
+    <div class="absolute inset-0 -z-10 bg-shell"></div>
+    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
+    <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
+        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
             <div class="mb-6">
                 <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
                 <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Set a new password</h1>
@@ -308,11 +620,115 @@ pub fn password_reset_success_page() -> String {
             }
         }
     </script>
+    <style>
+        :root {
+            --bg-start: #f1f5f9;
+            --bg-mid: #e2e8f0;
+            --bg-end: #f1f5f9;
+            --streak-1: rgba(59, 130, 246, 0.25);
+            --streak-2: rgba(96, 165, 250, 0.35);
+        }
+
+        @media (prefers-color-scheme: dark) {
+            :root {
+                --bg-start: #05080f;
+                --bg-mid: #080f1a;
+                --bg-end: #05080f;
+                --streak-1: rgba(84, 141, 214, 0.6);
+                --streak-2: rgba(120, 170, 235, 0.75);
+            }
+        }
+
+        .bg-shell {
+            background: linear-gradient(
+                135deg,
+                var(--bg-start) 0%,
+                var(--bg-mid) 50%,
+                var(--bg-end) 100%
+            );
+        }
+
+        .bg-streak {
+            position: absolute;
+            left: -30%;
+            top: -30%;
+            width: 200%;
+            height: 2px;
+            background: linear-gradient(
+                90deg,
+                transparent,
+                var(--streak-1),
+                var(--streak-2),
+                transparent
+            );
+            opacity: 0;
+            transform: rotate(35deg);
+            animation: streakMove 12s ease-in-out infinite;
+        }
+
+        .bg-streak.streak-2 {
+            animation-duration: 15s;
+            animation-delay: 3s;
+            height: 3px;
+            opacity: 0;
+        }
+
+        .bg-streak.streak-3 {
+            animation-duration: 18s;
+            animation-delay: 6s;
+            height: 2px;
+            opacity: 0;
+        }
+
+        .bg-streak.streak-4 {
+            animation-duration: 20s;
+            animation-delay: 9s;
+            height: 1px;
+            opacity: 0;
+        }
+
+        .bg-streak.streak-5 {
+            animation-duration: 22s;
+            animation-delay: 12s;
+            height: 2px;
+            opacity: 0;
+        }
+
+        .bg-streak.streak-6 {
+            animation-duration: 26s;
+            animation-delay: 15s;
+            height: 3px;
+            opacity: 0;
+        }
+
+        @keyframes streakMove {
+            0% {
+                transform: translate(-40%, -40%) rotate(35deg);
+                opacity: 0;
+            }
+            8% {
+                opacity: 0.9;
+            }
+            16% {
+                opacity: 0;
+            }
+            100% {
+                transform: translate(40%, 40%) rotate(35deg);
+                opacity: 0;
+            }
+        }
+    </style>
 </head>
-<body class="min-h-screen bg-slate-50 px-4 py-10 font-sans text-slate-900 dark:bg-slate-950 dark:text-slate-100">
-    <div class="pointer-events-none fixed inset-0 opacity-[0.15] dark:opacity-[0.2]" style="background-image: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22><filter id=%22n%22 x=%220%22 y=%220%22 width=%22100%25%22 height=%22100%25%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%221%22 stitchTiles=%22stitch%22/></filter><rect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.2%22/></svg>');"></div>
-    <div class="mx-auto flex w-full max-w-md items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:shadow-2xl">
+<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
+    <div class="absolute inset-0 -z-10 bg-shell"></div>
+    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
+    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
+    <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
+        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
             <div class="mb-6">
                 <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
                 <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Password updated</h1>
