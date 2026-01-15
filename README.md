@@ -6,7 +6,7 @@ A simple OAuth2/OIDC Identity Provider Server written in Rust.
 
 - **Machine-to-Machine (M2M)** - OAuth2 Client Credentials Grant
 - **User-to-Webserver** - OAuth2 Authorization Code Flow with PKCE + HTML Login Form
-- **TV/Device Flow** - OAuth2 Device Authorization Grant (RFC 8628)
+- **TV/Device Flow** - OAuth2 Device Authorization Grant (RFC 8628) (experimental)
 - **Custom Claim Mapping** - Similar to Kanidm, allows filtering groups/claims per application
 - **JWT tokens** - RS256 with asymmetric keys
 - **Refresh tokens** - For long-term sessions

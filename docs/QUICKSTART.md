@@ -94,37 +94,20 @@ Expected response:
 #### 2.1 Initiate authorize
 
 ```bash
-curl -X POST http://localhost:8080/oauth2/authorize \
-  -H "Content-Type: application/json" \
-  -d '{
-    "response_type": "code",
-    "client_id": "webapp_dashboard",
-    "redirect_uri": "http://localhost:3000/callback",
-    "scope": "openid profile email"
-  }'
+curl "http://localhost:8080/oauth2/authorize?response_type=code&client_id=webapp_dashboard&redirect_uri=http://localhost:3000/callback&scope=openid%20profile%20email"
 ```
+
+This returns an HTML login page.
 
 #### 2.2 User login
 
 ```bash
 curl -X POST http://localhost:8080/oauth2/login \
-  -H "Content-Type: application/json" \
-  -d '{
-    "username": "admin",
-    "password": "password123",
-    "client_id": "webapp_dashboard",
-    "redirect_uri": "http://localhost:3000/callback",
-    "scope": "openid profile email"
-  }'
+  -H "Content-Type: application/x-www-form-urlencoded" \
+  -d "username=admin&password=password123&client_id=webapp_dashboard&redirect_uri=http://localhost:3000/callback&scope=openid%20profile%20email"
 ```
 
-Response contains `code`:
-```json
-{
-  "code": "abc123...",
-  "state": null
-}
-```
+Response is a redirect to the `redirect_uri` with `code` (and optional `state`) in the query string.
 
 #### 2.3 Exchange code for token
 
@@ -165,6 +148,8 @@ Response:
 Notice the `is_admin` and `can_view_reports` - these are custom claims from claim maps!
 
 ### Test 3: Device Flow (TV)
+
+**Note:** Device flow endpoints are implemented but considered experimental (work in progress).
 
 #### 3.1 Initialize device flow (on TV)
 

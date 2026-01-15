@@ -16,20 +16,10 @@ Uživatel → Grafana → sso.cloud-app.cz (Authorization Code Flow)
                   ← JWT token s claims
 ```
 
-## DŮLEŽITÉ: Chybějící HTML Login Formulář
+## DŮLEŽITÉ: HTML Login Formulář
 
-**POZOR**: Současná verze simple-idm-server používá JSON API místo HTML formuláře!
-
-### Co to znamená:
-- Grafana redirectuje uživatele na `/oauth2/authorize`
-- Server **NEVRÁTÍ** HTML formulář pro přihlášení
-- Místo toho vrací JSON response
-
-### Řešení:
-Pro produkční použití musíme přidat HTML login formulář. Zatím můžeš:
-1. Testovat s custom frontendem
-2. Použít Postman/curl pro testování toku
-3. Počkat na implementaci HTML formuláře (doporučeno)
+Současná verze simple-idm-server vrací HTML login formulář na `GET /oauth2/authorize`
+a očekává `application/x-www-form-urlencoded` na `POST /oauth2/login`.
 
 ---
 
