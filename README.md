@@ -273,8 +273,8 @@ cargo build --release
 - [ ] Validate redirect_uri and client_id during auth code exchange
 - [ ] Refresh token rotation + configurable expiry
 - [ ] JWT audience validation
-- [ ] Introspection endpoint
-- [ ] Revocation endpoint
+- [x] Introspection endpoint
+- [x] Revocation endpoint
 - [ ] Publish Docker image
 - [ ] Expand integration documentation
 
