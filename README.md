@@ -5,17 +5,21 @@ A simple OAuth2/OIDC Identity Provider Server written in Rust.
 ## Features
 
 - **Machine-to-Machine (M2M)** - OAuth2 Client Credentials Grant
-- **User-to-Webserver** - OAuth2 Authorization Code Flow with PKCE
+- **User-to-Webserver** - OAuth2 Authorization Code Flow with PKCE + HTML Login Form
 - **TV/Device Flow** - OAuth2 Device Authorization Grant (RFC 8628)
 - **Custom Claim Mapping** - Similar to Kanidm, allows filtering groups/claims per application
 - **JWT tokens** - RS256 with asymmetric keys
 - **Refresh tokens** - For long-term sessions
+- **OIDC Discovery** - `/.well-known/openid-configuration`
+- **JWKS Endpoint** - `/.well-known/jwks.json`
+- **Admin API** - Complete REST API for managing users, groups, clients, and claim maps
 
 ## Requirements
 
 - Rust 1.70+
 - PostgreSQL 14+
 - OpenSSL (for generating RSA keys)
+- **sqlx-cli** (for database migrations and offline mode)
 
 ## Quick Start
 
@@ -28,6 +32,9 @@ brew install postgresql
 
 # Linux (Ubuntu/Debian)
 sudo apt-get install postgresql
+
+# sqlx-cli (for database migrations)
+cargo install sqlx-cli --no-default-features --features postgres
 ```
 
 ### 2. Create Database
@@ -57,6 +64,50 @@ cargo run
 
 The server will run on `http://localhost:8080`.
 
+---
+
+## ⚠️ IMPORTANT: sqlx Offline Mode
+
+This project uses **sqlx offline mode** to allow compilation without a running PostgreSQL database.
+
+### 🔴 BEFORE PUSHING TO GIT/GITLAB:
+
+**YOU MUST UPDATE SQLX METADATA** if you modified any SQL queries:
+
+```bash
+# 1. Ensure PostgreSQL is running with the database
+docker-compose up -d
+
+# 2. Run migrations (if any)
+sqlx migrate run
+
+# 3. Generate metadata
+cargo sqlx prepare
+
+# 4. Commit the .sqlx/ directory
+git add .sqlx/
+git commit -m "chore: update sqlx metadata"
+```
+
+### Why?
+
+- The `.sqlx/` directory contains **pre-generated type information** for all SQL queries
+- CI/CD can build **without a database connection**
+- Compile-time SQL validation is preserved
+- **If you forget this step, CI/CD will fail!**
+
+### Building Locally
+
+```bash
+# With database (normal development)
+cargo build
+
+# Without database (uses offline cache)
+SQLX_OFFLINE=true cargo build
+```
+
+---
+
 ## API Endpoints
 
 ### Health Check
@@ -77,37 +128,26 @@ Content-Type: application/json
 }
 ```
 
-### Authorization Code Flow
+### Authorization Code Flow (with HTML Login Form)
 
-#### 1. Authorize (obtaining authorization code)
+#### 1. Authorize (shows HTML login form)
 ```
-POST /oauth2/authorize
-Content-Type: application/json
-
-{
-  "response_type": "code",
-  "client_id": "your_client_id",
-  "redirect_uri": "https://your-app.com/callback",
-  "scope": "openid profile email",
-  "state": "random_state",
-  "code_challenge": "challenge_string",
-  "code_challenge_method": "S256"
-}
+GET /oauth2/authorize?response_type=code&client_id=your_client_id&redirect_uri=https://your-app.com/callback&scope=openid%20profile%20email&state=random_state&code_challenge=challenge&code_challenge_method=S256
 ```
 
-#### 2. Login (user login)
+This returns an **HTML login form** where users enter their username and password.
+
+#### 2. Login (submitted via HTML form)
 ```
 POST /oauth2/login
-Content-Type: application/json
+Content-Type: application/x-www-form-urlencoded
 
-{
-  "username": "user@example.com",
-  "password": "password123",
-  "client_id": "your_client_id",
-  "redirect_uri": "https://your-app.com/callback",
-  "code_challenge": "challenge_string",
-  "code_challenge_method": "S256"
-}
+username=user@example.com&password=password123&client_id=your_client_id&redirect_uri=https://your-app.com/callback&code_challenge=challenge&code_challenge_method=S256&state=random_state
+```
+
+On success, redirects to:
+```
+https://your-app.com/callback?code=AUTHORIZATION_CODE&state=random_state
 ```
 
 #### 3. Token Exchange (exchange code for token)
