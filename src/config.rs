@@ -25,6 +25,7 @@ pub struct JwtConfig {
     pub issuer: String,
     pub access_token_expiry_seconds: i64,
     pub refresh_token_expiry_seconds: i64,
+    pub refresh_token_cleanup_interval_seconds: u64,
     pub private_key_path: String,
     pub public_key_path: String,
 }
@@ -55,6 +56,10 @@ impl Config {
             .unwrap_or_else(|_| "2592000".to_string()) // 30 days
             .parse()
             .unwrap_or(2592000);
+        let refresh_token_cleanup_interval = env::var("REFRESH_TOKEN_CLEANUP_INTERVAL_SECONDS")
+            .unwrap_or_else(|_| "0".to_string())
+            .parse()
+            .unwrap_or(0);
         let private_key_path = env::var("JWT_PRIVATE_KEY_PATH")
             .unwrap_or_else(|_| "./keys/private.pem".to_string());
         let public_key_path = env::var("JWT_PUBLIC_KEY_PATH")
@@ -72,6 +77,7 @@ impl Config {
                 issuer: jwt_issuer,
                 access_token_expiry_seconds: access_token_expiry,
                 refresh_token_expiry_seconds: refresh_token_expiry,
+                refresh_token_cleanup_interval_seconds: refresh_token_cleanup_interval,
                 private_key_path,
                 public_key_path,
             },

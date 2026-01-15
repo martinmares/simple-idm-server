@@ -1,5 +1,5 @@
 use crate::auth::{build_custom_claims, get_user_group_names, get_user_groups, verify_password, JwtService};
-use crate::db::{models::{AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User}, DbPool};
+use crate::db::models::{AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User};
 use axum::{
     body::Bytes,
     extract::{Query, State},
@@ -16,6 +16,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::client_credentials::{ErrorResponse, OAuth2State, TokenResponse};
+use super::cleanup::cleanup_refresh_tokens;
 use super::templates;
 use super::utils::apply_client_auth;
 
@@ -375,7 +376,7 @@ async fn handle_authorization_code_token(
     state: Arc<OAuth2State>,
     req: TokenRequest,
 ) -> Response {
-    cleanup_expired_refresh_tokens(&state.db_pool).await;
+    cleanup_refresh_tokens(&state.db_pool).await;
 
     let code = match req.code {
         Some(c) => c,
@@ -653,7 +654,7 @@ async fn handle_authorization_code_token(
         .into_response();
     }
 
-    cleanup_expired_refresh_tokens(&state.db_pool).await;
+    cleanup_refresh_tokens(&state.db_pool).await;
 
     // Smaž použitý authorization code
     let _ = sqlx::query("DELETE FROM authorization_codes WHERE code = $1")
@@ -679,17 +680,8 @@ fn non_empty(value: &str) -> Option<&str> {
     }
 }
 
-async fn cleanup_expired_refresh_tokens(pool: &DbPool) {
-    let _ = sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < NOW()")
-        .execute(pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM used_refresh_tokens WHERE expires_at < NOW()")
-        .execute(pool)
-        .await;
-}
-
 async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Response {
-    cleanup_expired_refresh_tokens(&state.db_pool).await;
+    cleanup_refresh_tokens(&state.db_pool).await;
 
     let refresh_token_str = match req.refresh_token {
         Some(rt) => rt,
