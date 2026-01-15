@@ -264,16 +264,19 @@ cargo build --release
 
 ## TODO
 
-- [ ] Admin API for managing users, groups and clients
-- [ ] Web UI for login flow
+- [x] Admin API for managing users, groups and clients
+- [x] Web UI for login flow
 - [ ] Web UI for device verification
 - [ ] Rate limiting
-- [ ] OIDC Discovery endpoint
-- [ ] UserInfo endpoint
+- [x] OIDC Discovery endpoint
+- [x] UserInfo endpoint
+- [ ] Validate redirect_uri and client_id during auth code exchange
+- [ ] Refresh token rotation + configurable expiry
+- [ ] JWT audience validation
 - [ ] Introspection endpoint
 - [ ] Revocation endpoint
-- [ ] Docker image
-- [ ] Integration documentation
+- [ ] Publish Docker image
+- [ ] Expand integration documentation
 
 ## License
 
