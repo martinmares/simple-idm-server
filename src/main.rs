@@ -11,6 +11,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::trace::TraceLayer;
@@ -143,6 +144,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_state(oidc_state);
 
+    let governor = GovernorConfigBuilder::default()
+        .per_second(5)
+        .burst_size(10)
+        .finish()
+        .expect("Failed to build rate limiter");
+
     // Vytvoř routes
     let app = Router::new()
         // Health check
@@ -166,6 +173,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         // Userinfo endpoint
         .route("/oauth2/userinfo", get(oauth2::handle_userinfo))
+        .layer(GovernorLayer {
+            config: Arc::new(governor),
+        })
         .with_state(oauth_state)
         // Merge well-known routes
         .merge(jwks_routes)
