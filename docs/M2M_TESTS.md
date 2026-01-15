@@ -24,16 +24,29 @@ The file `tests/m2m_tests.rs` contains a complete integration test that:
 
 ## Running Tests
 
+### ⚠️ Important: sqlx Offline Mode
+
+These tests will **automatically start a database**, but the initial compilation uses sqlx offline mode.
+
 ```bash
-# Run all M2M tests
-cargo test --test m2m_tests
+# Run all M2M tests (recommended - uses offline mode for faster compilation)
+SQLX_OFFLINE=true cargo test --test m2m_tests
 
 # Run with output (see println!)
-cargo test --test m2m_tests -- --nocapture
+SQLX_OFFLINE=true cargo test --test m2m_tests -- --nocapture
 
 # Run with debug logging
-RUST_LOG=debug cargo test --test m2m_tests -- --nocapture
+SQLX_OFFLINE=true RUST_LOG=debug cargo test --test m2m_tests -- --nocapture
+
+# Alternative: Without offline mode (requires database during compilation)
+# This will work but is slower and requires postgres to be already running
+cargo test --test m2m_tests
 ```
+
+**Why SQLX_OFFLINE=true?**
+- Faster compilation (no database connection during build)
+- Tests will start their own database automatically
+- Matches CI/CD behavior
 
 ## Test Scenarios
 
