@@ -76,6 +76,16 @@ pub struct RefreshToken {
 }
 
 #[derive(Debug, Clone, FromRow)]
+pub struct UsedRefreshToken {
+    pub token: String,
+    pub client_id: Uuid,
+    pub user_id: Uuid,
+    pub scope: String,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,

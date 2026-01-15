@@ -1,5 +1,5 @@
 use crate::auth::{build_custom_claims, get_user_group_names, get_user_groups, verify_password, JwtService};
-use crate::db::{models::{AuthorizationCode, OAuthClient, RefreshToken, User}, DbPool};
+use crate::db::{models::{AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User}, DbPool};
 use axum::{
     body::Bytes,
     extract::{Query, State},
@@ -8,7 +8,6 @@ use axum::{
     Form, Json,
 };
 use chrono::{Duration, Utc};
-use base64::Engine as _;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx;
@@ -18,6 +17,7 @@ use uuid::Uuid;
 
 use super::client_credentials::{ErrorResponse, OAuth2State, TokenResponse};
 use super::templates;
+use super::utils::apply_client_auth;
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -310,7 +310,8 @@ pub async fn handle_token(
         Err(resp) => return resp,
     };
 
-    let req = apply_client_auth(req, &headers);
+    let mut req = req;
+    apply_client_auth(&mut req.client_id, &mut req.client_secret, &headers);
 
     match req.grant_type.as_str() {
         "authorization_code" => handle_authorization_code_token(state, req).await,
@@ -362,47 +363,6 @@ fn parse_token_request(headers: &HeaderMap, body: &[u8]) -> Result<TokenRequest,
     })
 }
 
-fn apply_client_auth(mut req: TokenRequest, headers: &HeaderMap) -> TokenRequest {
-    if let Some((client_id, client_secret)) = parse_basic_auth(headers) {
-        if req.client_id.as_deref().unwrap_or("").is_empty() {
-            req.client_id = Some(client_id);
-        }
-        if req.client_secret.as_deref().unwrap_or("").is_empty() {
-            req.client_secret = Some(client_secret);
-        }
-    }
-
-    if req.client_id.as_deref().map(|s| s.trim().is_empty()).unwrap_or(false) {
-        req.client_id = None;
-    }
-    if req.client_secret.as_deref().map(|s| s.trim().is_empty()).unwrap_or(false) {
-        req.client_secret = None;
-    }
-
-    req
-}
-
-fn parse_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
-    let header_value = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())?;
-
-    if !header_value.to_ascii_lowercase().starts_with("basic ") {
-        return None;
-    }
-
-    let encoded = header_value.split_at(6).1;
-    let decoded = base64::engine::general_purpose::STANDARD
-        .decode(encoded.as_bytes())
-        .ok()?;
-    let decoded = String::from_utf8(decoded).ok()?;
-
-    let mut parts = decoded.splitn(2, ':');
-    let client_id = parts.next()?.to_string();
-    let client_secret = parts.next()?.to_string();
-    Some((client_id, client_secret))
-}
-
 fn generate_refresh_token() -> String {
     rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
@@ -415,6 +375,8 @@ async fn handle_authorization_code_token(
     state: Arc<OAuth2State>,
     req: TokenRequest,
 ) -> Response {
+    cleanup_expired_refresh_tokens(&state.db_pool).await;
+
     let code = match req.code {
         Some(c) => c,
         None => {
@@ -691,6 +653,8 @@ async fn handle_authorization_code_token(
         .into_response();
     }
 
+    cleanup_expired_refresh_tokens(&state.db_pool).await;
+
     // Smaž použitý authorization code
     let _ = sqlx::query("DELETE FROM authorization_codes WHERE code = $1")
         .bind(&code)
@@ -715,7 +679,18 @@ fn non_empty(value: &str) -> Option<&str> {
     }
 }
 
+async fn cleanup_expired_refresh_tokens(pool: &DbPool) {
+    let _ = sqlx::query("DELETE FROM refresh_tokens WHERE expires_at < NOW()")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("DELETE FROM used_refresh_tokens WHERE expires_at < NOW()")
+        .execute(pool)
+        .await;
+}
+
 async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Response {
+    cleanup_expired_refresh_tokens(&state.db_pool).await;
+
     let refresh_token_str = match req.refresh_token {
         Some(rt) => rt,
         None => {
@@ -737,6 +712,23 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     {
         Ok(Some(rt)) => rt,
         Ok(None) => {
+            let used = sqlx::query_as::<_, UsedRefreshToken>(
+                "SELECT * FROM used_refresh_tokens WHERE token = $1",
+            )
+            .bind(&refresh_token_str)
+            .fetch_optional(&state.db_pool)
+            .await;
+
+            if let Ok(Some(used)) = used {
+                let _ = sqlx::query(
+                    "DELETE FROM refresh_tokens WHERE client_id = $1 AND user_id = $2",
+                )
+                .bind(used.client_id)
+                .bind(used.user_id)
+                .execute(&state.db_pool)
+                .await;
+            }
+
             return Json(ErrorResponse {
                 error: "invalid_grant".to_string(),
                 error_description: "Invalid refresh token".to_string(),
@@ -904,6 +896,29 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         return Json(ErrorResponse {
             error: "server_error".to_string(),
             error_description: "Failed to create refresh token".to_string(),
+        })
+        .into_response();
+    }
+
+    if sqlx::query(
+        r#"
+        INSERT INTO used_refresh_tokens (token, client_id, user_id, scope, expires_at)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(&refresh_token.token)
+    .bind(refresh_token.client_id)
+    .bind(refresh_token.user_id)
+    .bind(&refresh_token.scope)
+    .bind(refresh_token.expires_at)
+    .execute(&mut *tx)
+    .await
+    .is_err()
+    {
+        let _ = tx.rollback().await;
+        return Json(ErrorResponse {
+            error: "server_error".to_string(),
+            error_description: "Failed to mark refresh token as used".to_string(),
         })
         .into_response();
     }
