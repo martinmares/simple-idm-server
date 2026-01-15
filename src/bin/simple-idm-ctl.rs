@@ -2,6 +2,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use tabled::{settings::Style, Table, Tabled};
+use std::process::Command;
 
 #[derive(Parser, Debug)]
 #[command(name = "simple-idm-ctl", version, about = "Admin CLI for simple-idm-server")]
@@ -12,6 +13,8 @@ struct Cli {
     token: String,
     #[arg(short = 'o', long, default_value = "table", global = true)]
     output: OutputFormat,
+    #[arg(long, default_value = "sharp", global = true)]
+    style: TableStyle,
     #[command(subcommand)]
     command: Commands,
 }
@@ -20,6 +23,16 @@ struct Cli {
 enum OutputFormat {
     Table,
     Json,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum TableStyle {
+    Sharp,
+    Psql,
+    Markdown,
+    Modern,
+    Rounded,
+    Ascii,
 }
 
 #[derive(Subcommand, Debug)]
@@ -51,7 +64,12 @@ enum Commands {
 #[derive(Subcommand, Debug)]
 enum UsersCommand {
     #[command(alias = "ls")]
-    List,
+    List {
+        #[arg(long)]
+        page: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     Create {
         #[arg(long)]
         username: String,
@@ -79,13 +97,20 @@ enum UsersCommand {
     ResetPassword {
         #[arg(long)]
         id: String,
+        #[arg(long)]
+        open: bool,
     },
 }
 
 #[derive(Subcommand, Debug)]
 enum GroupsCommand {
     #[command(alias = "ls")]
-    List,
+    List {
+        #[arg(long)]
+        page: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     Create {
         #[arg(long)]
         name: String,
@@ -95,6 +120,8 @@ enum GroupsCommand {
     Update {
         #[arg(long)]
         id: String,
+        #[arg(long)]
+        name: Option<String>,
         #[arg(long)]
         description: Option<String>,
     },
@@ -107,7 +134,12 @@ enum GroupsCommand {
 #[derive(Subcommand, Debug)]
 enum ClientsCommand {
     #[command(alias = "ls")]
-    List,
+    List {
+        #[arg(long)]
+        page: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     Create {
         #[arg(long)]
         client_id: String,
@@ -122,6 +154,22 @@ enum ClientsCommand {
         #[arg(long, default_value = "openid profile email")]
         scope: String,
     },
+    Update {
+        #[arg(long)]
+        id: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        client_secret: Option<String>,
+        #[arg(long, action = clap::ArgAction::Append)]
+        redirect_uri: Vec<String>,
+        #[arg(long, action = clap::ArgAction::Append)]
+        grant_type: Vec<String>,
+        #[arg(long)]
+        scope: Option<String>,
+        #[arg(long)]
+        is_active: Option<bool>,
+    },
     Delete {
         #[arg(long)]
         id: String,
@@ -131,7 +179,12 @@ enum ClientsCommand {
 #[derive(Subcommand, Debug)]
 enum ClaimMapsCommand {
     #[command(alias = "ls")]
-    List,
+    List {
+        #[arg(long)]
+        page: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     Create {
         #[arg(long)]
         client_id: String,
@@ -151,7 +204,12 @@ enum ClaimMapsCommand {
 #[derive(Subcommand, Debug)]
 enum UserGroupsCommand {
     #[command(alias = "ls")]
-    List,
+    List {
+        #[arg(long)]
+        page: Option<usize>,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     Add {
         #[arg(long)]
         user_id: String,
@@ -172,7 +230,7 @@ struct ErrorResponse {
     error_description: String,
 }
 
-#[derive(Debug, Deserialize, Tabled)]
+#[derive(Debug, Deserialize, Serialize, Tabled)]
 struct UserRow {
     id: String,
     username: String,
@@ -180,7 +238,7 @@ struct UserRow {
     is_active: bool,
 }
 
-#[derive(Debug, Deserialize, Tabled)]
+#[derive(Debug, Deserialize, Serialize, Tabled)]
 struct GroupRow {
     id: String,
     name: String,
@@ -188,7 +246,7 @@ struct GroupRow {
     description: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Tabled)]
+#[derive(Debug, Deserialize, Serialize, Tabled)]
 struct ClientRow {
     id: String,
     client_id: String,
@@ -201,7 +259,7 @@ struct ClientRow {
     is_active: bool,
 }
 
-#[derive(Debug, Deserialize, Tabled)]
+#[derive(Debug, Deserialize, Serialize, Tabled)]
 struct ClaimMapRow {
     id: String,
     client_id: String,
@@ -211,7 +269,7 @@ struct ClaimMapRow {
     claim_value: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Tabled)]
+#[derive(Debug, Deserialize, Serialize, Tabled)]
 struct UserGroupRow {
     user_id: String,
     username: String,
@@ -220,7 +278,7 @@ struct UserGroupRow {
     group_name: String,
 }
 
-#[derive(Debug, Deserialize, Tabled)]
+#[derive(Debug, Deserialize, Serialize, Tabled)]
 struct PasswordResetRow {
     user_id: String,
     reset_token: String,
@@ -233,28 +291,41 @@ struct MessageResponse {
     message: String,
 }
 
+#[derive(Clone, Copy)]
+struct OutputConfig {
+    format: OutputFormat,
+    style: TableStyle,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     let http = HttpClient::new(cli.base_url, cli.token);
+    let output = OutputConfig {
+        format: cli.output,
+        style: cli.style,
+    };
 
     match cli.command {
-        Commands::Users { command } => handle_users(&http, cli.output, command).await?,
-        Commands::Groups { command } => handle_groups(&http, cli.output, command).await?,
-        Commands::Clients { command } => handle_clients(&http, cli.output, command).await?,
-        Commands::ClaimMaps { command } => handle_claim_maps(&http, cli.output, command).await?,
-        Commands::UserGroups { command } => handle_user_groups(&http, cli.output, command).await?,
+        Commands::Users { command } => handle_users(&http, output, command).await?,
+        Commands::Groups { command } => handle_groups(&http, output, command).await?,
+        Commands::Clients { command } => handle_clients(&http, output, command).await?,
+        Commands::ClaimMaps { command } => handle_claim_maps(&http, output, command).await?,
+        Commands::UserGroups { command } => handle_user_groups(&http, output, command).await?,
         Commands::Ping => handle_ping(&http).await?,
     }
 
     Ok(())
 }
 
-async fn handle_users(http: &HttpClient, output: OutputFormat, command: UsersCommand) -> Result<()> {
+async fn handle_users(http: &HttpClient, output: OutputConfig, command: UsersCommand) -> Result<()> {
     match command {
-        UsersCommand::List => {
+        UsersCommand::List { page, limit } => {
             let body = http.get("/admin/users").await?;
-            print_table_rows::<UserRow>(output, &body)?;
+            let mut rows: Vec<UserRow> =
+                serde_json::from_str(&body).context("Failed to parse response")?;
+            rows = apply_paging(rows, page, limit);
+            print_table_rows_vec(output, rows)?;
         }
         UsersCommand::Create {
             username,
@@ -292,20 +363,27 @@ async fn handle_users(http: &HttpClient, output: OutputFormat, command: UsersCom
             let body = http.delete(&format!("/admin/users/{id}")).await?;
             print_message(output, &body)?;
         }
-        UsersCommand::ResetPassword { id } => {
+        UsersCommand::ResetPassword { id, open } => {
             let body = http.post_empty(&format!("/admin/users/{id}/password-reset")).await?;
-            print_reset_output(output, &body)?;
+            let reset = parse_reset_row(&body)?;
+            print_reset_output(output, &reset, &body)?;
+            if open {
+                open_url(&reset.reset_url)?;
+            }
         }
     }
 
     Ok(())
 }
 
-async fn handle_groups(http: &HttpClient, output: OutputFormat, command: GroupsCommand) -> Result<()> {
+async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsCommand) -> Result<()> {
     match command {
-        GroupsCommand::List => {
+        GroupsCommand::List { page, limit } => {
             let body = http.get("/admin/groups").await?;
-            print_table_rows::<GroupRow>(output, &body)?;
+            let mut rows: Vec<GroupRow> =
+                serde_json::from_str(&body).context("Failed to parse response")?;
+            rows = apply_paging(rows, page, limit);
+            print_table_rows_vec(output, rows)?;
         }
         GroupsCommand::Create { name, description } => {
             let payload = serde_json::json!({
@@ -315,11 +393,12 @@ async fn handle_groups(http: &HttpClient, output: OutputFormat, command: GroupsC
             let body = http.post_json("/admin/groups", payload).await?;
             print_table_item::<GroupRow>(output, &body)?;
         }
-        GroupsCommand::Update { id, description } => {
-            if description.is_none() {
+        GroupsCommand::Update { id, name, description } => {
+            if name.is_none() && description.is_none() {
                 bail!("At least one field must be provided for update.");
             }
             let payload = serde_json::json!({
+                "name": name,
                 "description": description,
             });
             let body = http.put_json(&format!("/admin/groups/{id}"), payload).await?;
@@ -335,13 +414,16 @@ async fn handle_groups(http: &HttpClient, output: OutputFormat, command: GroupsC
 
 async fn handle_clients(
     http: &HttpClient,
-    output: OutputFormat,
+    output: OutputConfig,
     command: ClientsCommand,
 ) -> Result<()> {
     match command {
-        ClientsCommand::List => {
+        ClientsCommand::List { page, limit } => {
             let body = http.get("/admin/oauth-clients").await?;
-            print_clients_output(output, &body)?;
+            let mut rows: Vec<ClientRow> =
+                serde_json::from_str(&body).context("Failed to parse response")?;
+            rows = apply_paging(rows, page, limit);
+            print_clients_output(output, rows)?;
         }
         ClientsCommand::Create {
             client_id,
@@ -362,6 +444,45 @@ async fn handle_clients(
             let body = http.post_json("/admin/oauth-clients", payload).await?;
             print_table_item::<ClientRow>(output, &body)?;
         }
+        ClientsCommand::Update {
+            id,
+            name,
+            client_secret,
+            redirect_uri,
+            grant_type,
+            scope,
+            is_active,
+        } => {
+            if name.is_none()
+                && client_secret.is_none()
+                && redirect_uri.is_empty()
+                && grant_type.is_empty()
+                && scope.is_none()
+                && is_active.is_none()
+            {
+                bail!("At least one field must be provided for update.");
+            }
+            let redirect_uris = if redirect_uri.is_empty() {
+                None
+            } else {
+                Some(redirect_uri)
+            };
+            let grant_types = if grant_type.is_empty() {
+                None
+            } else {
+                Some(grant_type)
+            };
+            let payload = serde_json::json!({
+                "name": name,
+                "client_secret": client_secret,
+                "redirect_uris": redirect_uris,
+                "grant_types": grant_types,
+                "scope": scope,
+                "is_active": is_active,
+            });
+            let body = http.put_json(&format!("/admin/oauth-clients/{id}"), payload).await?;
+            print_table_item::<ClientRow>(output, &body)?;
+        }
         ClientsCommand::Delete { id } => {
             let body = http.delete(&format!("/admin/oauth-clients/{id}")).await?;
             print_message(output, &body)?;
@@ -372,13 +493,16 @@ async fn handle_clients(
 
 async fn handle_claim_maps(
     http: &HttpClient,
-    output: OutputFormat,
+    output: OutputConfig,
     command: ClaimMapsCommand,
 ) -> Result<()> {
     match command {
-        ClaimMapsCommand::List => {
+        ClaimMapsCommand::List { page, limit } => {
             let body = http.get("/admin/claim-maps").await?;
-            print_table_rows::<ClaimMapRow>(output, &body)?;
+            let mut rows: Vec<ClaimMapRow> =
+                serde_json::from_str(&body).context("Failed to parse response")?;
+            rows = apply_paging(rows, page, limit);
+            print_table_rows_vec(output, rows)?;
         }
         ClaimMapsCommand::Create {
             client_id,
@@ -405,13 +529,16 @@ async fn handle_claim_maps(
 
 async fn handle_user_groups(
     http: &HttpClient,
-    output: OutputFormat,
+    output: OutputConfig,
     command: UserGroupsCommand,
 ) -> Result<()> {
     match command {
-        UserGroupsCommand::List => {
+        UserGroupsCommand::List { page, limit } => {
             let body = http.get("/admin/user-groups").await?;
-            print_table_rows::<UserGroupRow>(output, &body)?;
+            let mut rows: Vec<UserGroupRow> =
+                serde_json::from_str(&body).context("Failed to parse response")?;
+            rows = apply_paging(rows, page, limit);
+            print_table_rows_vec(output, rows)?;
         }
         UserGroupsCommand::Add { user_id, group_id } => {
             let payload = serde_json::json!({ "group_id": group_id });
@@ -436,63 +563,35 @@ async fn handle_ping(http: &HttpClient) -> Result<()> {
     Ok(())
 }
 
-fn print_table_item<T>(output: OutputFormat, body: &str) -> Result<()>
+fn print_table_item<T>(output: OutputConfig, body: &str) -> Result<()>
 where
     T: for<'de> Deserialize<'de> + Tabled,
 {
-    match output {
+    match output.format {
         OutputFormat::Json => println!("{}", body),
         OutputFormat::Table => {
             let parsed: T = serde_json::from_str(body).context("Failed to parse response")?;
             let mut table = Table::new(vec![parsed]);
-            table.with(Style::sharp());
+            apply_style(&mut table, output.style);
             println!("{table}");
         }
     }
     Ok(())
 }
 
-fn print_table_rows<T>(output: OutputFormat, body: &str) -> Result<()>
+fn print_table_rows_vec<T>(output: OutputConfig, rows: Vec<T>) -> Result<()>
 where
-    T: for<'de> Deserialize<'de> + Tabled,
+    T: Serialize + Tabled,
 {
-    match output {
-        OutputFormat::Json => println!("{}", body),
-        OutputFormat::Table => {
-            let parsed: Vec<T> = serde_json::from_str(body).context("Failed to parse response")?;
-            let mut table = Table::new(parsed);
-            table.with(Style::sharp());
-            println!("{table}");
+    match output.format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string(&rows).context("Failed to serialize response")?;
+            println!("{json}");
         }
-    }
-    Ok(())
-}
-
-fn print_clients_output(output: OutputFormat, body: &str) -> Result<()> {
-    match output {
-        OutputFormat::Json => println!("{}", body),
         OutputFormat::Table => {
-            let parsed: Vec<ClientRow> =
-                serde_json::from_str(body).context("Failed to parse response")?;
-            let total = parsed.len();
-            for (idx, client) in parsed.into_iter().enumerate() {
-                println!("{}", yellow_text(&format!(">> {}", client.client_id)));
-                let rows = vec![
-                    KeyValueRow::new("id", client.id),
-                    KeyValueRow::new("client_id", client.client_id),
-                    KeyValueRow::new("name", client.name),
-                    KeyValueRow::new("redirect_uris", client.redirect_uris.join(", ")),
-                    KeyValueRow::new("grant_types", client.grant_types.join(", ")),
-                    KeyValueRow::new("scope", client.scope),
-                    KeyValueRow::new("is_active", client.is_active.to_string()),
-                ];
-                let mut table = Table::new(rows);
-                table.with(Style::sharp());
-                println!("{table}");
-                if idx + 1 < total {
-                    println!();
-                }
-            }
+            let mut table = Table::new(rows);
+            apply_style(&mut table, output.style);
+            println!("{table}");
         }
     }
     Ok(())
@@ -519,8 +618,59 @@ fn limit_text(value: &str, max_len: usize) -> String {
     format!("{trimmed}...")
 }
 
-fn print_message(output: OutputFormat, body: &str) -> Result<()> {
-    match output {
+fn apply_paging<T>(items: Vec<T>, page: Option<usize>, limit: Option<usize>) -> Vec<T> {
+    let limit = limit.unwrap_or(items.len());
+    let page = page.unwrap_or(1);
+    let start = limit.saturating_mul(page.saturating_sub(1));
+    items.into_iter().skip(start).take(limit).collect()
+}
+
+fn apply_style(table: &mut Table, style: TableStyle) {
+    match style {
+        TableStyle::Sharp => {
+            table.with(Style::sharp());
+        }
+        TableStyle::Psql => {
+            table.with(Style::psql());
+        }
+        TableStyle::Markdown => {
+            table.with(Style::markdown());
+        }
+        TableStyle::Modern => {
+            table.with(Style::modern());
+        }
+        TableStyle::Rounded => {
+            table.with(Style::rounded());
+        }
+        TableStyle::Ascii => {
+            table.with(Style::ascii());
+        }
+    }
+}
+
+fn open_url(url: &str) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open").arg(url).status()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("cmd").args(["/C", "start", url]).status()?;
+        return Ok(());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        Command::new("xdg-open").arg(url).status()?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err(anyhow!("Unsupported OS for opening URLs"))
+}
+
+fn print_message(output: OutputConfig, body: &str) -> Result<()> {
+    match output.format {
         OutputFormat::Json => println!("{}", body),
         OutputFormat::Table => {
             if let Ok(msg) = serde_json::from_str::<MessageResponse>(body) {
@@ -533,21 +683,54 @@ fn print_message(output: OutputFormat, body: &str) -> Result<()> {
     Ok(())
 }
 
-fn print_reset_output(output: OutputFormat, body: &str) -> Result<()> {
-    match output {
+fn parse_reset_row(body: &str) -> Result<PasswordResetRow> {
+    serde_json::from_str(body).context("Failed to parse response")
+}
+
+fn print_reset_output(output: OutputConfig, parsed: &PasswordResetRow, body: &str) -> Result<()> {
+    match output.format {
         OutputFormat::Json => println!("{}", body),
         OutputFormat::Table => {
-            let parsed: PasswordResetRow =
-                serde_json::from_str(body).context("Failed to parse response")?;
             let rows = vec![
-                KeyValueRow::new("user_id", parsed.user_id),
-                KeyValueRow::new("reset_token", parsed.reset_token),
-                KeyValueRow::new("reset_url", parsed.reset_url),
-                KeyValueRow::new("expires_at", parsed.expires_at),
+                KeyValueRow::new("user_id", parsed.user_id.clone()),
+                KeyValueRow::new("reset_token", parsed.reset_token.clone()),
+                KeyValueRow::new("reset_url", parsed.reset_url.clone()),
+                KeyValueRow::new("expires_at", parsed.expires_at.clone()),
             ];
             let mut table = Table::new(rows);
-            table.with(Style::sharp());
+            apply_style(&mut table, output.style);
             println!("{table}");
+        }
+    }
+    Ok(())
+}
+
+fn print_clients_output(output: OutputConfig, rows: Vec<ClientRow>) -> Result<()> {
+    match output.format {
+        OutputFormat::Json => {
+            let json = serde_json::to_string(&rows).context("Failed to serialize response")?;
+            println!("{json}");
+        }
+        OutputFormat::Table => {
+            let total = rows.len();
+            for (idx, client) in rows.into_iter().enumerate() {
+                println!("{}", yellow_text(&format!(">> {}", client.client_id)));
+                let rows = vec![
+                    KeyValueRow::new("id", client.id),
+                    KeyValueRow::new("client_id", client.client_id),
+                    KeyValueRow::new("name", client.name),
+                    KeyValueRow::new("redirect_uris", client.redirect_uris.join(", ")),
+                    KeyValueRow::new("grant_types", client.grant_types.join(", ")),
+                    KeyValueRow::new("scope", client.scope),
+                    KeyValueRow::new("is_active", client.is_active.to_string()),
+                ];
+                let mut table = Table::new(rows);
+                apply_style(&mut table, output.style);
+                println!("{table}");
+                if idx + 1 < total {
+                    println!();
+                }
+            }
         }
     }
     Ok(())

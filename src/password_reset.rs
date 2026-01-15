@@ -156,6 +156,8 @@ pub async fn submit_password_reset_form(
         return (StatusCode::INTERNAL_SERVER_ERROR, Html(html)).into_response();
     }
 
+    tracing::info!(user_id = %record.user_id, "Password reset completed");
+
     let html = templates::password_reset_success_page();
     (StatusCode::OK, Html(html)).into_response()
 }
@@ -189,6 +191,14 @@ pub async fn create_reset_token_for_user(
         reset_url,
         expires_at,
     })
+}
+
+pub async fn cleanup_password_reset_tokens(pool: &crate::db::DbPool) {
+    let _ = sqlx::query(
+        "DELETE FROM password_reset_tokens WHERE expires_at < NOW() OR used_at IS NOT NULL",
+    )
+    .execute(pool)
+    .await;
 }
 
 fn generate_token() -> String {
