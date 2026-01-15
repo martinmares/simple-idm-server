@@ -482,6 +482,44 @@ async fn handle_authorization_code_token(
         }
     };
 
+    let req_client_id = match req.client_id {
+        Some(id) => id,
+        None => {
+            return Json(ErrorResponse {
+                error: "invalid_request".to_string(),
+                error_description: "Missing client_id".to_string(),
+            })
+            .into_response()
+        }
+    };
+
+    if req_client_id != client.client_id {
+        return Json(ErrorResponse {
+            error: "invalid_client".to_string(),
+            error_description: "Client ID mismatch".to_string(),
+        })
+        .into_response();
+    }
+
+    let req_redirect_uri = match req.redirect_uri {
+        Some(uri) => uri,
+        None => {
+            return Json(ErrorResponse {
+                error: "invalid_request".to_string(),
+                error_description: "Missing redirect_uri".to_string(),
+            })
+            .into_response()
+        }
+    };
+
+    if req_redirect_uri != auth_code.redirect_uri {
+        return Json(ErrorResponse {
+            error: "invalid_grant".to_string(),
+            error_description: "Redirect URI mismatch".to_string(),
+        })
+        .into_response();
+    }
+
     // Ověř client secret
     let client_secret = match req.client_secret {
         Some(secret) => secret,
