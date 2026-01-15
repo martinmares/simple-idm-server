@@ -1,0 +1,90 @@
+# GitLab CI/CD Example for simple-idm-server
+# This demonstrates how to build with sqlx offline mode
+
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  CARGO_HOME: $CI_PROJECT_DIR/.cargo
+  # Enable sqlx offline mode - NO DATABASE NEEDED!
+  SQLX_OFFLINE: "true"
+
+# Cache Rust dependencies
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - .cargo/
+    - target/
+
+# Run tests
+test:
+  stage: test
+  image: rust:1.75
+  before_script:
+    - rustc --version
+    - cargo --version
+  script:
+    # Compile check (uses .sqlx/ metadata)
+    - cargo check --all-features
+    # Run tests (note: integration tests need DB, so run unit tests only)
+    - cargo test --lib
+  only:
+    - merge_requests
+    - main
+
+# Build release binary
+build:
+  stage: build
+  image: rust:1.75
+  before_script:
+    - rustc --version
+    - cargo --version
+  script:
+    # Build release binary (uses .sqlx/ metadata, NO DB!)
+    - cargo build --release
+    # Strip binary for smaller size
+    - strip target/release/simple-idm-server
+  artifacts:
+    paths:
+      - target/release/simple-idm-server
+    expire_in: 1 week
+  only:
+    - main
+    - tags
+
+# Deploy to production (example)
+deploy:production:
+  stage: deploy
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache openssh-client
+  script:
+    - echo "Deploying to production server..."
+    # Copy binary to server
+    - scp target/release/simple-idm-server user@server:/opt/simple-idm-server/
+    # Restart service
+    - ssh user@server "systemctl restart simple-idm-server"
+  only:
+    - tags
+  when: manual
+
+# Docker build (optional)
+docker:build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  variables:
+    DOCKER_DRIVER: overlay2
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA .
+    - docker build -t $CI_REGISTRY_IMAGE:latest .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA
+    - docker push $CI_REGISTRY_IMAGE:latest
+  only:
+    - main
+    - tags
