@@ -10,7 +10,7 @@ struct Cli {
     base_url: String,
     #[arg(long)]
     token: String,
-    #[arg(short = 'o', long, default_value = "table")]
+    #[arg(short = 'o', long, default_value = "table", global = true)]
     output: OutputFormat,
     #[command(subcommand)]
     command: Commands,
