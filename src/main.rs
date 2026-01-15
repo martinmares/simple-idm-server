@@ -144,6 +144,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .with_state(oidc_state);
 
+    tracing::info!(
+        "Rate limiting enabled (rps={}, burst={})",
+        config.rate_limit.requests_per_second,
+        config.rate_limit.burst_size
+    );
     let governor = GovernorConfigBuilder::default()
         .per_second(config.rate_limit.requests_per_second.into())
         .burst_size(config.rate_limit.burst_size)
