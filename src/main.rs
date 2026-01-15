@@ -145,8 +145,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(oidc_state);
 
     let governor = GovernorConfigBuilder::default()
-        .per_second(5)
-        .burst_size(10)
+        .per_second(config.rate_limit.requests_per_second.into())
+        .burst_size(config.rate_limit.burst_size)
         .finish()
         .expect("Failed to build rate limiter");
 
