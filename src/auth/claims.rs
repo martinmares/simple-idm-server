@@ -38,9 +38,11 @@ pub async fn build_custom_claims(
 
     // Seskup claim_names podle stejného jména (některé skupiny mohou mít stejný claim_name)
     for map in claim_maps {
-        custom_claims
-            .entry(map.claim_name.clone())
-            .or_insert_with(|| Value::Bool(true));
+        let value = match map.claim_value.as_deref() {
+            Some(v) if !v.trim().is_empty() => Value::String(v.to_string()),
+            _ => Value::Bool(true),
+        };
+        custom_claims.entry(map.claim_name.clone()).or_insert(value);
     }
 
     Ok(custom_claims)

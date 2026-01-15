@@ -97,6 +97,7 @@ pub struct CreateClaimMapRequest {
     pub client_id: Uuid,
     pub group_id: Uuid,
     pub claim_name: String,
+    pub claim_value: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -105,6 +106,8 @@ pub struct ClaimMapResponse {
     pub client_id: Uuid,
     pub group_id: Uuid,
     pub claim_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claim_value: Option<String>,
 }
 
 // ============================================================================
@@ -714,16 +717,17 @@ pub async fn create_claim_map(
     State(db_pool): State<DbPool>,
     Json(req): Json<CreateClaimMapRequest>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!(
+    let result = sqlx::query_as::<_, crate::db::models::ClaimMap>(
         r#"
-        INSERT INTO claim_maps (client_id, group_id, claim_name)
-        VALUES ($1, $2, $3)
-        RETURNING id, client_id, group_id, claim_name
+        INSERT INTO claim_maps (client_id, group_id, claim_name, claim_value)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, client_id, group_id, claim_name, claim_value
         "#,
-        req.client_id,
-        req.group_id,
-        req.claim_name
     )
+    .bind(req.client_id)
+    .bind(req.group_id)
+    .bind(req.claim_name)
+    .bind(req.claim_value)
     .fetch_one(&db_pool)
     .await;
 
@@ -735,6 +739,7 @@ pub async fn create_claim_map(
                 client_id: claim_map.client_id,
                 group_id: claim_map.group_id,
                 claim_name: claim_map.claim_name,
+                claim_value: claim_map.claim_value,
             }),
         )
             .into_response(),
@@ -753,12 +758,12 @@ pub async fn create_claim_map(
 }
 
 pub async fn list_claim_maps(State(db_pool): State<DbPool>) -> impl IntoResponse {
-    let result = sqlx::query!(
+    let result = sqlx::query_as::<_, crate::db::models::ClaimMap>(
         r#"
-        SELECT id, client_id, group_id, claim_name
+        SELECT id, client_id, group_id, claim_name, claim_value
         FROM claim_maps
         ORDER BY claim_name
-        "#
+        "#,
     )
     .fetch_all(&db_pool)
     .await;
@@ -772,6 +777,7 @@ pub async fn list_claim_maps(State(db_pool): State<DbPool>) -> impl IntoResponse
                     client_id: cm.client_id,
                     group_id: cm.group_id,
                     claim_name: cm.claim_name,
+                    claim_value: cm.claim_value,
                 })
                 .collect();
             (StatusCode::OK, Json(claim_maps)).into_response()

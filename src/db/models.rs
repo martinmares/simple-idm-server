@@ -49,6 +49,7 @@ pub struct ClaimMap {
     pub client_id: Uuid,
     pub group_id: Uuid,
     pub claim_name: String,
+    pub claim_value: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
