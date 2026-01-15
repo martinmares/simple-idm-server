@@ -118,6 +118,25 @@ pub async fn create_user(
     State(db_pool): State<DbPool>,
     Json(req): Json<CreateUserRequest>,
 ) -> impl IntoResponse {
+    let conflict = sqlx::query_scalar::<_, i64>(
+        "SELECT 1 FROM users WHERE email = $1 OR username = $2 LIMIT 1",
+    )
+    .bind(&req.username)
+    .bind(&req.email)
+    .fetch_optional(&db_pool)
+    .await;
+
+    if let Ok(Some(_)) = conflict {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".to_string(),
+                error_description: "Username or email conflicts with an existing account".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
     // Hash password
     let password_hash = match hash_password(&req.password) {
         Ok(hash) => hash,
@@ -225,6 +244,25 @@ pub async fn update_user(
     let mut param_idx = 1;
 
     if let Some(email) = &req.email {
+        let conflict = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM users WHERE username = $1 AND id <> $2 LIMIT 1",
+        )
+        .bind(email)
+        .bind(user_id)
+        .fetch_optional(&db_pool)
+        .await;
+
+        if let Ok(Some(_)) = conflict {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: "Email conflicts with an existing username".to_string(),
+                }),
+            )
+                .into_response();
+        }
+
         query_parts.push(format!("email = ${}", param_idx));
         params.push(email.clone());
         param_idx += 1;

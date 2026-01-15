@@ -164,7 +164,7 @@ pub async fn handle_login(
 ) -> impl IntoResponse {
     // Ověř uživatele
     let user = match sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE username = $1 AND is_active = true",
+        "SELECT * FROM users WHERE (username = $1 OR email = $1) AND is_active = true",
     )
     .bind(&req.username)
     .fetch_optional(&state.db_pool)

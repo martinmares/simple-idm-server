@@ -202,7 +202,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
             <input type="hidden" name="code_challenge_method" value="{}">
 
             <div class="form-group">
-                <label for="username">Username</label>
+                <label for="username">Email or Username</label>
                 <input
                     type="text"
                     id="username"
@@ -210,7 +210,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
                     required
                     autofocus
                     autocomplete="username"
-                    placeholder="Enter your username"
+                    placeholder="Enter your email or username"
                 >
             </div>
 
