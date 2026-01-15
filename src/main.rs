@@ -11,7 +11,12 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
-use tower_governor::{governor::GovernorConfigBuilder, GovernorLayer};
+use tower_governor::{
+    governor::GovernorConfigBuilder,
+    key_extractor::SmartIpKeyExtractor,
+    GovernorLayer,
+};
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::trace::TraceLayer;
@@ -152,6 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let governor = GovernorConfigBuilder::default()
         .per_second(config.rate_limit.requests_per_second.into())
         .burst_size(config.rate_limit.burst_size)
+        .key_extractor(SmartIpKeyExtractor)
         .finish()
         .expect("Failed to build rate limiter");
 
@@ -192,7 +198,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     tracing::info!("Listening on {}", addr);
 
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .await?;
 
     Ok(())
 }
