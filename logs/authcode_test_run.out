@@ -1,0 +1,354 @@
+   Compiling ring v0.17.14
+   Compiling rustls v0.23.36
+   Compiling rustls-webpki v0.103.8
+   Compiling sqlx-core v0.8.6
+   Compiling tokio-rustls v0.26.4
+   Compiling rustls-platform-verifier v0.6.2
+   Compiling hyper-rustls v0.27.7
+   Compiling reqwest v0.13.1
+   Compiling sqlx-postgres v0.8.6
+   Compiling sqlx-macros-core v0.8.6
+   Compiling sqlx-macros v0.8.6
+   Compiling sqlx v0.8.6
+   Compiling simple-idm-server v0.1.0 (/Users/mares/Development/Src/Rust/simple-idm-server)
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:137:18
+    |
+137 |       let result = sqlx::query!(
+    |  __________________^
+138 | |         r#"
+139 | |         INSERT INTO users (username, email, password_hash, is_active)
+140 | |         VALUES ($1, $2, $3, $4)
+...   |
+146 | |         is_active
+147 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:177:18
+    |
+177 |       let result = sqlx::query!(
+    |  __________________^
+178 | |         r#"
+179 | |         SELECT id, username, email, is_active
+180 | |         FROM users
+181 | |         ORDER BY username
+182 | |         "#
+183 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:312:18
+    |
+312 |     let result = sqlx::query!("DELETE FROM users WHERE id = $1", user_id)
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:359:18
+    |
+359 |       let result = sqlx::query!(
+    |  __________________^
+360 | |         r#"
+361 | |         INSERT INTO groups (name, description)
+362 | |         VALUES ($1, $2)
+...   |
+366 | |         req.description
+367 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:396:18
+    |
+396 |       let result = sqlx::query!(
+    |  __________________^
+397 | |         r#"
+398 | |         SELECT id, name, description
+399 | |         FROM groups
+400 | |         ORDER BY name
+401 | |         "#
+402 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:436:18
+    |
+436 |     let result = sqlx::query!("DELETE FROM groups WHERE id = $1", group_id)
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:484:18
+    |
+484 |       let result = sqlx::query!(
+    |  __________________^
+485 | |         "INSERT INTO user_groups (user_id, group_id) VALUES ($1, $2)",
+486 | |         user_id,
+487 | |         req.group_id
+488 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:518:18
+    |
+518 |       let result = sqlx::query!(
+    |  __________________^
+519 | |         "DELETE FROM user_groups WHERE user_id = $1 AND group_id = $2",
+520 | |         user_id,
+521 | |         group_id
+522 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:585:18
+    |
+585 |       let result = sqlx::query!(
+    |  __________________^
+586 | |         r#"
+587 | |         INSERT INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, grant_types, scope, is_active)
+588 | |         VALUES ($1, $2, $3, $4, $5, $6, true)
+...   |
+596 | |         req.scope
+597 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:670:18
+    |
+670 |     let result = sqlx::query!("DELETE FROM oauth_clients WHERE id = $1", client_id)
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:717:18
+    |
+717 |       let result = sqlx::query!(
+    |  __________________^
+718 | |         r#"
+719 | |         INSERT INTO claim_maps (client_id, group_id, claim_name)
+720 | |         VALUES ($1, $2, $3)
+...   |
+725 | |         req.claim_name
+726 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:756:18
+    |
+756 |       let result = sqlx::query!(
+    |  __________________^
+757 | |         r#"
+758 | |         SELECT id, client_id, group_id, claim_name
+759 | |         FROM claim_maps
+760 | |         ORDER BY claim_name
+761 | |         "#
+762 | |     )
+    | |_____^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error: error communicating with database: Connection refused (os error 61)
+   --> src/admin/handlers.rs:797:18
+    |
+797 |     let result = sqlx::query!("DELETE FROM claim_maps WHERE id = $1", claim_map_id)
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this error originates in the macro `$crate::sqlx_macros::expand_query` which comes from the expansion of the macro `sqlx::query` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0425]: cannot find function `encode_config` in crate `base64`
+   --> tests/authorization_code_tests.rs:237:21
+    |
+237 |             base64::encode_config(hash, base64::URL_SAFE_NO_PAD)
+    |                     ^^^^^^^^^^^^^ not found in `base64`
+
+error[E0425]: cannot find value `URL_SAFE_NO_PAD` in crate `base64`
+   --> tests/authorization_code_tests.rs:237:49
+    |
+237 |             base64::encode_config(hash, base64::URL_SAFE_NO_PAD)
+    |                                                 ^^^^^^^^^^^^^^^ not found in `base64`
+    |
+help: consider importing this constant
+    |
+  1 + use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    |
+help: if you import `URL_SAFE_NO_PAD`, refer to it directly
+    |
+237 -             base64::encode_config(hash, base64::URL_SAFE_NO_PAD)
+237 +             base64::encode_config(hash, URL_SAFE_NO_PAD)
+    |
+
+warning: unused import: `Claims`
+ --> src/auth/mod.rs:6:15
+  |
+6 | pub use jwt::{Claims, JwtService};
+  |               ^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `hash_password`
+ --> src/auth/mod.rs:7:20
+  |
+7 | pub use password::{hash_password, verify_password};
+  |                    ^^^^^^^^^^^^^
+
+warning: unused import: `JwtService`
+ --> src/oauth2/authorization_code.rs:1:96
+  |
+1 | use crate::auth::{build_custom_claims, get_user_group_names, get_user_groups, verify_password, JwtService};
+  |                                                                                                ^^^^^^^^^^
+
+warning: unused import: `DbPool`
+ --> src/oauth2/authorization_code.rs:2:79
+  |
+2 | use crate::db::{models::{AuthorizationCode, OAuthClient, RefreshToken, User}, DbPool};
+  |                                                                               ^^^^^^
+
+warning: unused import: `uuid::Uuid`
+ --> src/oauth2/authorization_code.rs:9:5
+  |
+9 | use uuid::Uuid;
+  |     ^^^^^^^^^^
+
+warning: unused import: `TokenResponse`
+  --> src/oauth2/authorization_code.rs:11:61
+   |
+11 | use super::client_credentials::{ErrorResponse, OAuth2State, TokenResponse};
+   |                                                             ^^^^^^^^^^^^^
+
+error[E0282]: type annotations needed for `Result<_, _>`
+   --> src/admin/handlers.rs:177:9
+    |
+177 |     let result = sqlx::query!(
+    |         ^^^^^^
+...
+189 |             let users: Vec<UserResponse> = users
+    |                                            ----- type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+177 |     let result: Result<_, E> = sqlx::query!(
+    |               ++++++++++++++
+
+error[E0282]: type annotations needed for `Result<_, _>`
+   --> src/admin/handlers.rs:312:9
+    |
+312 |     let result = sqlx::query!("DELETE FROM users WHERE id = $1", user_id)
+    |         ^^^^^^
+...
+318 |             if result.rows_affected() == 0 {
+    |                ------ type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+312 |     let result: Result<_, E> = sqlx::query!("DELETE FROM users WHERE id = $1", user_id)
+    |               ++++++++++++++
+
+error[E0282]: type annotations needed for `Result<_, _>`
+   --> src/admin/handlers.rs:396:9
+    |
+396 |     let result = sqlx::query!(
+    |         ^^^^^^
+...
+408 |             let groups: Vec<GroupResponse> = groups
+    |                                              ------ type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+396 |     let result: Result<_, E> = sqlx::query!(
+    |               ++++++++++++++
+
+error[E0282]: type annotations needed for `Result<_, _>`
+   --> src/admin/handlers.rs:436:9
+    |
+436 |     let result = sqlx::query!("DELETE FROM groups WHERE id = $1", group_id)
+    |         ^^^^^^
+...
+442 |             if result.rows_affected() == 0 {
+    |                ------ type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+436 |     let result: Result<_, E> = sqlx::query!("DELETE FROM groups WHERE id = $1", group_id)
+    |               ++++++++++++++
+
+error[E0282]: type annotations needed for `Result<_, _>`
+   --> src/admin/handlers.rs:518:9
+    |
+518 |     let result = sqlx::query!(
+    |         ^^^^^^
+...
+528 |             if result.rows_affected() == 0 {
+    |                ------ type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+518 |     let result: Result<_, E> = sqlx::query!(
+    |               ++++++++++++++
+
+error[E0282]: type annotations needed for `Result<_, _>`
+   --> src/admin/handlers.rs:670:9
+    |
+670 |     let result = sqlx::query!("DELETE FROM oauth_clients WHERE id = $1", client_id)
+    |         ^^^^^^
+...
+676 |             if result.rows_affected() == 0 {
+    |                ------ type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+670 |     let result: Result<_, E> = sqlx::query!("DELETE FROM oauth_clients WHERE id = $1", client_id)
+    |               ++++++++++++++
+
+error[E0282]: type annotations needed for `Result<_, _>`
+   --> src/admin/handlers.rs:756:9
+    |
+756 |     let result = sqlx::query!(
+    |         ^^^^^^
+...
+768 |             let claim_maps: Vec<ClaimMapResponse> = claim_maps
+    |                                                     ---------- type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+756 |     let result: Result<_, E> = sqlx::query!(
+    |               ++++++++++++++
+
+error[E0282]: type annotations needed for `Result<_, _>`
+   --> src/admin/handlers.rs:797:9
+    |
+797 |     let result = sqlx::query!("DELETE FROM claim_maps WHERE id = $1", claim_map_id)
+    |         ^^^^^^
+...
+803 |             if result.rows_affected() == 0 {
+    |                ------ type must be known at this point
+    |
+help: consider giving `result` an explicit type, where the placeholders `_` are specified
+    |
+797 |     let result: Result<_, E> = sqlx::query!("DELETE FROM claim_maps WHERE id = $1", claim_map_id)
+    |               ++++++++++++++
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `simple-idm-server` (test "authorization_code_tests") due to 2 previous errors
+warning: build failed, waiting for other jobs to finish...
+For more information about this error, try `rustc --explain E0282`.
+warning: `simple-idm-server` (bin "simple-idm-server") generated 6 warnings
+error: could not compile `simple-idm-server` (bin "simple-idm-server") due to 21 previous errors; 6 warnings emitted
