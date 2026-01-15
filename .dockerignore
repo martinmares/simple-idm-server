@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+
+# Rust
+target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local
+
+# Keys (these should be mounted at runtime)
+keys/*.pem
+
+# Documentation
+docs/
+README.md
+
+# CI/CD
+.gitlab-ci.yml
+.github/
+
+# Tests
+tests/
+tmp/
+
+# Images
+images/
+
+# Claude
+.claude/
