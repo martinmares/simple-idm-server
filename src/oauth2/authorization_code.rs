@@ -323,15 +323,15 @@ fn parse_token_request(headers: &HeaderMap, body: &[u8]) -> Result<TokenRequest,
         .unwrap_or("")
         .to_ascii_lowercase();
 
-    let try_json = || serde_json::from_slice::<TokenRequest>(body);
-    let try_form = || serde_urlencoded::from_bytes::<TokenRequest>(body);
+    let parse_json = || serde_json::from_slice::<TokenRequest>(body).map_err(|_| ());
+    let parse_form = || serde_urlencoded::from_bytes::<TokenRequest>(body).map_err(|_| ());
 
-    let parsed = if content_type.starts_with("application/json") {
-        try_json()
+    let parsed: Result<TokenRequest, ()> = if content_type.starts_with("application/json") {
+        parse_json()
     } else if content_type.starts_with("application/x-www-form-urlencoded") {
-        try_form()
+        parse_form()
     } else if content_type.is_empty() {
-        try_json().or_else(|_| try_form())
+        parse_json().or_else(|_| parse_form())
     } else {
         return Err((
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
