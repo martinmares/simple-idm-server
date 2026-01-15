@@ -28,6 +28,8 @@ pub struct Claims {
     pub exp: i64,              // Expiration time
     pub iat: i64,              // Issued at
     pub email: Option<String>, // User email
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_username: Option<String>,
     pub groups: Vec<String>,   // User groups
     #[serde(flatten)]
     pub custom_claims: HashMap<String, serde_json::Value>, // Custom claim maps
@@ -66,9 +68,10 @@ impl JwtService {
 
     pub fn create_access_token(
         &self,
-        subject: String,
+        user_id: Uuid,
         client_id: String,
         email: Option<String>,
+        preferred_username: Option<String>,
         groups: Vec<String>,
         custom_claims: HashMap<String, serde_json::Value>,
         expiry_seconds: i64,
@@ -77,12 +80,13 @@ impl JwtService {
         let exp = now + Duration::seconds(expiry_seconds);
 
         let claims = Claims {
-            sub: subject,
+            sub: user_id.to_string(),
             iss: self.issuer.clone(),
             aud: vec![client_id],
             exp: exp.timestamp(),
             iat: now.timestamp(),
             email,
+            preferred_username,
             groups,
             custom_claims,
         };

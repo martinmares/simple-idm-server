@@ -110,9 +110,10 @@ pub async fn handle_client_credentials(
 
     // Vytvoř access token (bez custom claims pro M2M)
     let access_token = match state.jwt_service.create_access_token(
-        client.client_id.clone(), // použijeme client_id jako subject
+        client.id,
         client.client_id.clone(),
         None, // žádný email
+        None, // žádné preferred_username
         vec![], // žádné skupiny
         HashMap::new(), // žádné custom claims
         state.access_token_expiry,

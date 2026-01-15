@@ -14,6 +14,8 @@ pub struct UserinfoResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub groups: Option<Vec<String>>,
     #[serde(flatten)]
     pub custom_claims: std::collections::HashMap<String, serde_json::Value>,
@@ -67,6 +69,7 @@ pub async fn handle_userinfo(
             let userinfo = UserinfoResponse {
                 sub: claims.sub,
                 email: claims.email,
+                preferred_username: claims.preferred_username,
                 groups: Some(claims.groups),
                 custom_claims: claims.custom_claims,
             };
