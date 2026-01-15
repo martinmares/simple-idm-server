@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         db_pool: db_pool.clone(),
         jwt_service: jwt_service.clone(),
         access_token_expiry: config.jwt.access_token_expiry_seconds,
+        refresh_token_expiry: config.jwt.refresh_token_expiry_seconds,
     });
 
     // Vytvoř Admin auth state
