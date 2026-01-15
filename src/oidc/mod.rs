@@ -105,6 +105,7 @@ impl OidcState {
                 "exp".to_string(),
                 "iat".to_string(),
                 "email".to_string(),
+                "preferred_username".to_string(),
                 "groups".to_string(),
             ]),
             userinfo_endpoint: Some(format!("{}/oauth2/userinfo", self.issuer)),

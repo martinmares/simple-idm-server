@@ -220,7 +220,7 @@ client_secret = <CLIENT_SECRET_Z_KROKU_4>
 scopes = openid profile email groups
 email_attribute_path = email
 login_attribute_path = sub
-name_attribute_path = email
+name_attribute_path = preferred_username
 role_attribute_path = grafana_role
 role_attribute_strict = true
 
@@ -232,7 +232,8 @@ api_url = https://sso.cloud-app.cz/oauth2/userinfo
 org_role = Viewer
 
 Poznámky:
-- `sub` v tokenu je username (ne UUID), proto je vhodné `login_attribute_path = sub`.
+- `sub` je stabilní UUID, proto je vhodné `login_attribute_path = sub` (bez kolizí).
+- `preferred_username` je uživatelské jméno pro zobrazení v UI.
 - `grafana_role` musí být string hodnota (např. "Admin") z `claim_value`.
 
 [auth]
