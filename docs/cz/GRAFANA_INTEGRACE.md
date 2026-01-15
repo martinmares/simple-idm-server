@@ -141,7 +141,7 @@ curl -X POST "${BASE_URL}/admin/users/3/groups" \
 # Vygeneruj client_secret (nebo použij vlastní)
 CLIENT_SECRET=$(openssl rand -base64 32)
 
-curl -X POST "${BASE_URL}/admin/clients" \
+curl -X POST "${BASE_URL}/admin/oauth-clients" \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
@@ -165,7 +165,7 @@ echo "Client Secret: ${CLIENT_SECRET}"
 ```bash
 # Poznámka: client_id z předchozího kroku (vždycky tam dej ID, ne string "grafana")
 # Získej client ID (numerické):
-curl -X GET "${BASE_URL}/admin/clients" \
+curl -X GET "${BASE_URL}/admin/oauth-clients" \
   -H "Authorization: Bearer ${ADMIN_TOKEN}" | jq '.[] | select(.client_id=="grafana") | .id'
 
 # Předpokládejme client id=1, group_id jsme si poznamenali výše
