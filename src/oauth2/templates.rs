@@ -12,11 +12,13 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
 
     let error_html = if let Some(err) = error {
         format!(
-            r#"<div class="error-message">
-                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
-                    <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                </svg>
-                {}
+            r#"<div class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
+                <div class="flex items-center gap-2">
+                    <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+                    </svg>
+                    <span>{}</span>
+                </div>
             </div>"#,
             err
         )
@@ -31,209 +33,82 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Sign In - Cloud App SSO</title>
-    <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }}
-
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }}
-
-        .login-container {{
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            max-width: 420px;
-            width: 100%;
-            padding: 48px 40px;
-            animation: slideUp 0.4s ease-out;
-        }}
-
-        @keyframes slideUp {{
-            from {{
-                opacity: 0;
-                transform: translateY(20px);
-            }}
-            to {{
-                opacity: 1;
-                transform: translateY(0);
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {{
+            darkMode: 'media',
+            theme: {{
+                extend: {{
+                    fontFamily: {{
+                        sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
+                    }}
+                }}
             }}
         }}
-
-        .logo {{
-            text-align: center;
-            margin-bottom: 32px;
-        }}
-
-        .logo h1 {{
-            color: #667eea;
-            font-size: 28px;
-            font-weight: 700;
-            margin-bottom: 8px;
-        }}
-
-        .logo p {{
-            color: #6b7280;
-            font-size: 14px;
-        }}
-
-        .form-group {{
-            margin-bottom: 24px;
-        }}
-
-        label {{
-            display: block;
-            color: #374151;
-            font-size: 14px;
-            font-weight: 600;
-            margin-bottom: 8px;
-        }}
-
-        input[type="text"],
-        input[type="password"] {{
-            width: 100%;
-            padding: 12px 16px;
-            border: 2px solid #e5e7eb;
-            border-radius: 8px;
-            font-size: 15px;
-            transition: all 0.2s;
-            outline: none;
-        }}
-
-        input[type="text"]:focus,
-        input[type="password"]:focus {{
-            border-color: #667eea;
-            box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
-        }}
-
-        .submit-btn {{
-            width: 100%;
-            padding: 14px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s;
-            margin-top: 8px;
-        }}
-
-        .submit-btn:hover {{
-            transform: translateY(-2px);
-            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.3);
-        }}
-
-        .submit-btn:active {{
-            transform: translateY(0);
-        }}
-
-        .error-message {{
-            background: #fee2e2;
-            color: #991b1b;
-            padding: 12px 16px;
-            border-radius: 8px;
-            margin-bottom: 24px;
-            font-size: 14px;
-            display: flex;
-            align-items: center;
-            gap: 8px;
-        }}
-
-        .client-info {{
-            background: #f3f4f6;
-            padding: 16px;
-            border-radius: 8px;
-            margin-bottom: 24px;
-            font-size: 13px;
-            color: #6b7280;
-        }}
-
-        .client-info strong {{
-            color: #374151;
-        }}
-
-        .footer {{
-            margin-top: 32px;
-            text-align: center;
-            font-size: 12px;
-            color: #9ca3af;
-        }}
-
-        .footer a {{
-            color: #667eea;
-            text-decoration: none;
-        }}
-
-        .footer a:hover {{
-            text-decoration: underline;
-        }}
-    </style>
+    </script>
 </head>
-<body>
-    <div class="login-container">
-        <div class="logo">
-            <h1>🔐 Cloud App SSO</h1>
-            <p>Secure Sign In</p>
-        </div>
-
-        {}
-
-        <div class="client-info">
-            <strong>Signing in to:</strong> {}
-        </div>
-
-        <form method="POST" action="/oauth2/login">
-            <input type="hidden" name="client_id" value="{}">
-            <input type="hidden" name="redirect_uri" value="{}">
-            <input type="hidden" name="state" value="{}">
-            <input type="hidden" name="scope" value="{}">
-            <input type="hidden" name="code_challenge" value="{}">
-            <input type="hidden" name="code_challenge_method" value="{}">
-
-            <div class="form-group">
-                <label for="username">Email or Username</label>
-                <input
-                    type="text"
-                    id="username"
-                    name="username"
-                    required
-                    autofocus
-                    autocomplete="username"
-                    placeholder="Enter your email or username"
-                >
+<body class="min-h-screen bg-slate-50 px-4 py-10 font-sans text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+    <div class="pointer-events-none fixed inset-0 opacity-[0.15] dark:opacity-[0.2]" style="background-image: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22><filter id=%22n%22 x=%220%22 y=%220%22 width=%22100%25%22 height=%22100%25%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%221%22 stitchTiles=%22stitch%22/></filter><rect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.2%22/></svg>');"></div>
+    <div class="mx-auto flex w-full max-w-md items-center justify-center">
+        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:shadow-2xl">
+            <div class="mb-6">
+                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
+                <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Sign in to your workspace</h1>
+                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Secure sign-in for internal dashboards and admin tools.</p>
             </div>
 
-            <div class="form-group">
-                <label for="password">Password</label>
-                <input
-                    type="password"
-                    id="password"
-                    name="password"
-                    required
-                    autocomplete="current-password"
-                    placeholder="Enter your password"
-                >
+            <div class="space-y-4">
+                {}
             </div>
 
-            <button type="submit" class="submit-btn">
-                Sign In
-            </button>
-        </form>
+            <div class="mt-5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-400">
+                Signing in to <span class="font-semibold text-slate-900 dark:text-white">{}</span>
+            </div>
 
-        <div class="footer">
-            <p>Protected by OAuth 2.0 + OIDC</p>
-            <p><a href="/.well-known/openid-configuration">Configuration</a></p>
+            <form method="POST" action="/oauth2/login" class="mt-6 space-y-4">
+                <input type="hidden" name="client_id" value="{}">
+                <input type="hidden" name="redirect_uri" value="{}">
+                <input type="hidden" name="state" value="{}">
+                <input type="hidden" name="scope" value="{}">
+                <input type="hidden" name="code_challenge" value="{}">
+                <input type="hidden" name="code_challenge_method" value="{}">
+
+                <div>
+                    <label for="username" class="text-sm font-medium text-slate-700 dark:text-slate-200">Email or username</label>
+                    <input
+                        type="text"
+                        id="username"
+                        name="username"
+                        required
+                        autofocus
+                        autocomplete="username"
+                        placeholder="you@company.com"
+                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
+                    >
+                </div>
+
+                <div>
+                    <label for="password" class="text-sm font-medium text-slate-700 dark:text-slate-200">Password</label>
+                    <input
+                        type="password"
+                        id="password"
+                        name="password"
+                        required
+                        autocomplete="current-password"
+                        placeholder="••••••••"
+                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
+                    >
+                </div>
+
+                <button type="submit" class="mt-2 w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
+                    Sign in
+                </button>
+            </form>
+
+            <div class="mt-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                Protected by OAuth 2.0 + OIDC •
+                <a class="font-medium text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white" href="/.well-known/openid-configuration">Configuration</a>
+            </div>
         </div>
     </div>
 </body>
@@ -258,89 +133,56 @@ pub fn error_page(error: &str, error_description: &str) -> String {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Error - Cloud App SSO</title>
-    <style>
-        * {{
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {{
+            darkMode: 'media',
+            theme: {{
+                extend: {{
+                    fontFamily: {{
+                        sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
+                    }}
+                }}
+            }}
         }}
-
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 20px;
-        }}
-
-        .error-container {{
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-            max-width: 500px;
-            width: 100%;
-            padding: 48px 40px;
-            text-align: center;
-        }}
-
-        .error-icon {{
-            font-size: 64px;
-            margin-bottom: 24px;
-        }}
-
-        h1 {{
-            color: #991b1b;
-            font-size: 24px;
-            margin-bottom: 16px;
-        }}
-
-        p {{
-            color: #6b7280;
-            font-size: 16px;
-            line-height: 1.6;
-            margin-bottom: 32px;
-        }}
-
-        .error-code {{
-            background: #fee2e2;
-            color: #991b1b;
-            padding: 12px 16px;
-            border-radius: 8px;
-            font-family: 'Courier New', monospace;
-            font-size: 14px;
-            margin-top: 24px;
-        }}
-
-        .back-btn {{
-            display: inline-block;
-            padding: 12px 32px;
-            background: #667eea;
-            color: white;
-            text-decoration: none;
-            border-radius: 8px;
-            font-weight: 600;
-            transition: all 0.2s;
-        }}
-
-        .back-btn:hover {{
-            background: #5568d3;
-            transform: translateY(-2px);
-        }}
-    </style>
+    </script>
 </head>
-<body>
-    <div class="error-container">
-        <div class="error-icon">⚠️</div>
-        <h1>Authorization Error</h1>
-        <p>{}</p>
-        <div class="error-code">
-            <strong>Error Code:</strong> {}
+<body class="min-h-screen bg-slate-50 px-4 py-10 font-sans text-slate-900 dark:bg-slate-950 dark:text-slate-100">
+    <div class="pointer-events-none fixed inset-0 opacity-[0.15] dark:opacity-[0.2]" style="background-image: url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%22120%22 height=%22120%22 viewBox=%220 0 120 120%22><filter id=%22n%22 x=%220%22 y=%220%22 width=%22100%25%22 height=%22100%25%22><feTurbulence type=%22fractalNoise%22 baseFrequency=%220.8%22 numOctaves=%221%22 stitchTiles=%22stitch%22/></filter><rect width=%22120%22 height=%22120%22 filter=%22url(%23n)%22 opacity=%220.2%22/></svg>');"></div>
+    <div class="mx-auto flex w-full max-w-lg items-center justify-center">
+        <div class="rounded-2xl border border-slate-200 bg-white p-10 shadow-xl dark:border-slate-800 dark:bg-slate-900 dark:shadow-2xl">
+            <div class="mb-6">
+                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
+                <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Sign in to your workspace</h1>
+                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Secure sign-in for internal dashboards and admin tools.</p>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-300">
+                <div class="flex items-start gap-3">
+                    <div class="mt-0.5 flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200">
+                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86l-7.1 12.27A2 2 0 004.9 19h14.2a2 2 0 001.71-2.87l-7.1-12.27a2 2 0 00-3.42 0z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <p class="font-medium text-slate-900 dark:text-white">Authorization error</p>
+                        <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">{}</p>
+                        <p class="mt-3 text-xs font-medium text-red-700 dark:text-red-300">Error code: {}</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-6">
+                <a href="javascript:history.back()" class="inline-flex w-full items-center justify-center rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
+                    Go back
+                </a>
+            </div>
+
+            <div class="mt-6 text-center text-xs text-slate-500 dark:text-slate-400">
+                Protected by OAuth 2.0 + OIDC •
+                <a class="font-medium text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white" href="/.well-known/openid-configuration">Configuration</a>
+            </div>
         </div>
-        <p style="margin-top: 32px;">
-            <a href="javascript:history.back()" class="back-btn">Go Back</a>
-        </p>
     </div>
 </body>
 </html>"#,
