@@ -1,7 +1,9 @@
-use reqwest::Client;
+use reqwest::{redirect::Policy, Client, Url};
 use serde_json::json;
 use std::process::{Child, Command};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::sync::OnceCell;
 use tokio::time::sleep;
 
 // Test configuration
@@ -14,21 +16,23 @@ const HEALTH_CHECK_URL: &str = "http://127.0.0.1:8080/health";
 
 // Test data - from scripts/init_test_data.sql
 const TEST_USERNAME: &str = "admin";
+const TEST_EMAIL: &str = "admin@example.com";
 const TEST_PASSWORD: &str = "password123";
 const TEST_CLIENT_ID: &str = "webapp_dashboard";
 const TEST_CLIENT_SECRET: &str = "client_secret_123";
 const TEST_REDIRECT_URI: &str = "http://localhost:3000/callback";
 
+static TEST_MUTEX: Mutex<()> = Mutex::new(());
+static ENV: OnceCell<Arc<TestEnvironment>> = OnceCell::const_new();
+
 /// Test environment manager
 struct TestEnvironment {
-    docker_process: Option<Child>,
     server_process: Option<Child>,
 }
 
 impl TestEnvironment {
     fn new() -> Self {
         Self {
-            docker_process: None,
             server_process: None,
         }
     }
@@ -72,7 +76,6 @@ impl TestEnvironment {
                 .arg("postgres")
                 .arg("pg_isready")
                 .arg("-U")
-                .arg("postgres")
                 .output();
 
             if let Ok(output) = output {
@@ -119,7 +122,10 @@ impl TestEnvironment {
     async fn build_app(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Building application...");
 
-        let output = Command::new("cargo").arg("build").output()?;
+        let output = Command::new("cargo")
+            .arg("build")
+            .env("SQLX_OFFLINE", "true")
+            .output()?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -159,6 +165,7 @@ impl TestEnvironment {
             .env("SERVER_PORT", SERVER_PORT.to_string())
             .env("JWT_ISSUER", "http://localhost:8080")
             .env("ACCESS_TOKEN_EXPIRY_SECONDS", "3600")
+            .env("REFRESH_TOKEN_EXPIRY_SECONDS", "2592000")
             .env("JWT_PRIVATE_KEY_PATH", "./keys/private.pem")
             .env("JWT_PUBLIC_KEY_PATH", "./keys/public.pem")
             .env("RUST_LOG", "simple_idm_server=debug");
@@ -197,34 +204,40 @@ impl TestEnvironment {
             sleep(Duration::from_secs(1)).await;
         }
     }
-
-    /// Cleanup resources
-    async fn cleanup(&mut self) {
-        println!("Cleaning up...");
-
-        // Kill server
-        if let Some(mut process) = self.server_process.take() {
-            let _ = process.kill();
-        }
-
-        // Stop Docker services
-        let _ = Command::new("docker-compose")
-            .arg("-f")
-            .arg(DOCKER_COMPOSE_FILE)
-            .arg("down")
-            .output();
-
-        println!("Cleanup completed");
-    }
 }
 
-impl Drop for TestEnvironment {
-    fn drop(&mut self) {
-        // Ensure cleanup on drop
-        if let Some(mut process) = self.server_process.take() {
-            let _ = process.kill();
+async fn setup_env() -> Arc<TestEnvironment> {
+    ENV.get_or_init(|| async {
+        let mut env = TestEnvironment::new();
+
+        if let Err(e) = env.start_docker().await {
+            panic!("Failed to start Docker: {}", e);
         }
-    }
+
+        if let Err(e) = env.wait_for_postgres().await {
+            panic!("PostgreSQL not ready: {}", e);
+        }
+
+        if let Err(e) = env.setup_database().await {
+            panic!("Database setup failed: {}", e);
+        }
+
+        if let Err(e) = env.build_app().await {
+            panic!("Build failed: {}", e);
+        }
+
+        if let Err(e) = env.start_server().await {
+            panic!("Server start failed: {}", e);
+        }
+
+        if let Err(e) = env.wait_for_server().await {
+            panic!("Server not ready: {}", e);
+        }
+
+        Arc::new(env)
+    })
+    .await
+    .clone()
 }
 
 // Helper function to generate PKCE challenge
@@ -241,327 +254,359 @@ fn generate_pkce_challenge(verifier: &str, method: &str) -> String {
     }
 }
 
+fn build_client() -> Client {
+    Client::builder()
+        .redirect(Policy::none())
+        .build()
+        .expect("Failed to build HTTP client")
+}
+
+fn extract_code_from_location(location: &str) -> String {
+    let url = Url::parse(location).expect("Invalid redirect URL");
+    let code = url
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.to_string())
+        .expect("Missing code in redirect URL");
+    assert!(!code.is_empty());
+    code
+}
+
+async fn login_and_get_code(
+    client: &Client,
+    username: &str,
+    password: &str,
+    code_challenge: Option<&str>,
+    code_challenge_method: Option<&str>,
+) -> String {
+    let mut form = vec![
+        ("username".to_string(), username.to_string()),
+        ("password".to_string(), password.to_string()),
+        ("client_id".to_string(), TEST_CLIENT_ID.to_string()),
+        ("redirect_uri".to_string(), TEST_REDIRECT_URI.to_string()),
+        ("scope".to_string(), "openid profile email".to_string()),
+    ];
+
+    if let Some(challenge) = code_challenge {
+        form.push(("code_challenge".to_string(), challenge.to_string()));
+    }
+    if let Some(method) = code_challenge_method {
+        form.push(("code_challenge_method".to_string(), method.to_string()));
+    }
+
+    let encoded = serde_urlencoded::to_string(form).expect("Failed to encode login form");
+
+    let login_response = client
+        .post(&format!("{}/oauth2/login", BASE_URL))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(encoded)
+        .send()
+        .await
+        .expect("Failed to call login");
+
+    assert_eq!(login_response.status(), 303);
+    let location = login_response
+        .headers()
+        .get("location")
+        .and_then(|h| h.to_str().ok())
+        .expect("Missing redirect location");
+
+    extract_code_from_location(location)
+}
+
+async fn exchange_code_for_tokens(client: &Client, code: &str) -> serde_json::Value {
+    let token_response = client
+        .post(&format!("{}/oauth2/token", BASE_URL))
+        .json(&json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": TEST_REDIRECT_URI,
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET
+        }))
+        .send()
+        .await
+        .expect("Failed to call token");
+
+    assert_eq!(token_response.status(), 200);
+    token_response.json().await.unwrap()
+}
+
 #[tokio::test]
-async fn test_authorization_code_full_integration() {
-    let mut env = TestEnvironment::new();
+async fn test_authorization_code_flow_success() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _env = setup_env().await;
 
-    // Setup
-    if let Err(e) = env.start_docker().await {
-        panic!("Failed to start Docker: {}", e);
-    }
+    let client = build_client();
 
-    if let Err(e) = env.wait_for_postgres().await {
-        env.cleanup().await;
-        panic!("PostgreSQL not ready: {}", e);
-    }
+    let authorize_query = serde_urlencoded::to_string([
+        ("response_type", "code"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
+        ("scope", "openid profile email"),
+        ("state", "test-state-123"),
+    ])
+    .expect("Failed to encode authorize query");
 
-    if let Err(e) = env.setup_database().await {
-        env.cleanup().await;
-        panic!("Database setup failed: {}", e);
-    }
+    let authorize_response = client
+        .get(&format!("{}/oauth2/authorize?{}", BASE_URL, authorize_query))
+        .send()
+        .await
+        .expect("Failed to call authorize");
 
-    if let Err(e) = env.build_app().await {
-        env.cleanup().await;
-        panic!("Build failed: {}", e);
-    }
+    assert_eq!(authorize_response.status(), 200);
 
-    if let Err(e) = env.start_server().await {
-        env.cleanup().await;
-        panic!("Server start failed: {}", e);
-    }
+    let code = login_and_get_code(&client, TEST_USERNAME, TEST_PASSWORD, None, None).await;
+    let token_json = exchange_code_for_tokens(&client, &code).await;
 
-    if let Err(e) = env.wait_for_server().await {
-        env.cleanup().await;
-        panic!("Server not ready: {}", e);
-    }
+    assert!(token_json["access_token"].as_str().is_some());
+    assert!(token_json["refresh_token"].as_str().is_some());
 
-    println!("\n=== Running Authorization Code Flow Tests ===\n");
+    let access_token = token_json["access_token"].as_str().unwrap();
+    let userinfo_response = client
+        .get(&format!("{}/oauth2/userinfo", BASE_URL))
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .expect("Failed to call userinfo");
 
-    let client = Client::new();
+    assert_eq!(userinfo_response.status(), 200);
+    let userinfo_json: serde_json::Value = userinfo_response.json().await.unwrap();
+    assert_eq!(userinfo_json["email"].as_str().unwrap(), TEST_EMAIL);
+    assert!(userinfo_json["groups"].as_array().unwrap().len() > 0);
+}
 
-    // Test 1: Successful Authorization Code Flow
-    println!("Test 1: Successfully complete Authorization Code Flow");
-    {
-        // Step 1: Authorize
-        let authorize_response = client
-            .post(&format!("{}/oauth2/authorize", BASE_URL))
-            .json(&json!({
-                "response_type": "code",
-                "client_id": TEST_CLIENT_ID,
-                "redirect_uri": TEST_REDIRECT_URI,
-                "scope": "openid profile email",
-                "state": "test-state-123"
-            }))
-            .send()
-            .await
-            .expect("Failed to call authorize");
+#[tokio::test]
+async fn test_login_with_invalid_password() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _env = setup_env().await;
 
-        assert_eq!(authorize_response.status(), 200);
+    let client = build_client();
 
-        // Step 2: Login
-        let login_response = client
-            .post(&format!("{}/oauth2/login", BASE_URL))
-            .json(&json!({
-                "username": TEST_USERNAME,
-                "password": TEST_PASSWORD,
-                "client_id": TEST_CLIENT_ID,
-                "redirect_uri": TEST_REDIRECT_URI,
-                "scope": "openid profile email",
-                "state": "test-state-123"
-            }))
-            .send()
-            .await
-            .expect("Failed to call login");
+    let encoded = serde_urlencoded::to_string([
+        ("username", TEST_USERNAME),
+        ("password", "wrong-password"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
+    ])
+    .expect("Failed to encode login form");
 
-        assert_eq!(login_response.status(), 200);
-        let login_json: serde_json::Value = login_response.json().await.unwrap();
-        let code = login_json["code"].as_str().unwrap();
-        assert!(!code.is_empty());
+    let login_response = client
+        .post(&format!("{}/oauth2/login", BASE_URL))
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(encoded)
+        .send()
+        .await
+        .expect("Failed to call login");
 
-        // Step 3: Exchange code for token
-        let token_response = client
-            .post(&format!("{}/oauth2/token", BASE_URL))
-            .json(&json!({
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": TEST_REDIRECT_URI,
-                "client_id": TEST_CLIENT_ID,
-                "client_secret": TEST_CLIENT_SECRET
-            }))
-            .send()
-            .await
-            .expect("Failed to call token");
+    assert_eq!(login_response.status(), 200);
+    let body = login_response.text().await.unwrap();
+    assert!(body.contains("Invalid username or password"));
+}
 
-        assert_eq!(token_response.status(), 200);
-        let token_json: serde_json::Value = token_response.json().await.unwrap();
-        assert!(token_json["access_token"].as_str().is_some());
-        assert!(token_json["refresh_token"].as_str().is_some());
+#[tokio::test]
+async fn test_invalid_authorization_code() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _env = setup_env().await;
 
-        // Step 4: Call userinfo
-        let access_token = token_json["access_token"].as_str().unwrap();
-        let userinfo_response = client
-            .get(&format!("{}/oauth2/userinfo", BASE_URL))
-            .header("Authorization", format!("Bearer {}", access_token))
-            .send()
-            .await
-            .expect("Failed to call userinfo");
+    let client = build_client();
 
-        assert_eq!(userinfo_response.status(), 200);
-        let userinfo_json: serde_json::Value = userinfo_response.json().await.unwrap();
-        assert_eq!(userinfo_json["email"].as_str().unwrap(), "admin@example.com");
-        assert!(userinfo_json["groups"].as_array().unwrap().len() > 0);
+    let token_response = client
+        .post(&format!("{}/oauth2/token", BASE_URL))
+        .json(&json!({
+            "grant_type": "authorization_code",
+            "code": "invalid-code-12345",
+            "redirect_uri": TEST_REDIRECT_URI,
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET
+        }))
+        .send()
+        .await
+        .expect("Failed to call token");
 
-        println!("✅ Test 1 PASSED: Authorization Code Flow successful\n");
-    }
+    assert_eq!(token_response.status(), 200);
+    let token_json: serde_json::Value = token_response.json().await.unwrap();
+    assert_eq!(token_json["error"].as_str().unwrap(), "invalid_grant");
+}
 
-    // Test 2: Invalid credentials
-    println!("Test 2: Failure with incorrect password");
-    {
-        let login_response = client
-            .post(&format!("{}/oauth2/login", BASE_URL))
-            .json(&json!({
-                "username": TEST_USERNAME,
-                "password": "wrong-password",
-                "client_id": TEST_CLIENT_ID,
-                "redirect_uri": TEST_REDIRECT_URI
-            }))
-            .send()
-            .await
-            .expect("Failed to call login");
+#[tokio::test]
+async fn test_pkce_s256_validation() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _env = setup_env().await;
 
-        assert_eq!(login_response.status(), 200);
-        let login_json: serde_json::Value = login_response.json().await.unwrap();
-        assert_eq!(login_json["error"].as_str().unwrap(), "invalid_grant");
+    let client = build_client();
 
-        println!("✅ Test 2 PASSED: Correctly rejected invalid credentials\n");
-    }
+    let code_verifier = "test-verifier-1234567890-abcdefghijklmnop";
+    let code_challenge = generate_pkce_challenge(code_verifier, "S256");
 
-    // Test 3: Invalid authorization code
-    println!("Test 3: Failure with invalid authorization code");
-    {
-        let token_response = client
-            .post(&format!("{}/oauth2/token", BASE_URL))
-            .json(&json!({
-                "grant_type": "authorization_code",
-                "code": "invalid-code-12345",
-                "redirect_uri": TEST_REDIRECT_URI,
-                "client_id": TEST_CLIENT_ID,
-                "client_secret": TEST_CLIENT_SECRET
-            }))
-            .send()
-            .await
-            .expect("Failed to call token");
+    let code = login_and_get_code(
+        &client,
+        TEST_USERNAME,
+        TEST_PASSWORD,
+        Some(&code_challenge),
+        Some("S256"),
+    )
+    .await;
 
-        assert_eq!(token_response.status(), 200);
-        let token_json: serde_json::Value = token_response.json().await.unwrap();
-        assert_eq!(token_json["error"].as_str().unwrap(), "invalid_grant");
+    let token_response = client
+        .post(&format!("{}/oauth2/token", BASE_URL))
+        .json(&json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": TEST_REDIRECT_URI,
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET,
+            "code_verifier": code_verifier
+        }))
+        .send()
+        .await
+        .expect("Failed to call token");
 
-        println!("✅ Test 3 PASSED: Correctly rejected invalid code\n");
-    }
+    assert_eq!(token_response.status(), 200);
+    let token_json: serde_json::Value = token_response.json().await.unwrap();
+    assert!(token_json["access_token"].as_str().is_some());
+}
 
-    // Test 4: PKCE S256 validation
-    println!("Test 4: PKCE S256 validation");
-    {
-        let code_verifier = "test-verifier-1234567890-abcdefghijklmnop";
-        let code_challenge = generate_pkce_challenge(code_verifier, "S256");
+#[tokio::test]
+async fn test_pkce_wrong_verifier() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _env = setup_env().await;
 
-        // Login with PKCE challenge
-        let login_response = client
-            .post(&format!("{}/oauth2/login", BASE_URL))
-            .json(&json!({
-                "username": TEST_USERNAME,
-                "password": TEST_PASSWORD,
-                "client_id": TEST_CLIENT_ID,
-                "redirect_uri": TEST_REDIRECT_URI,
-                "code_challenge": code_challenge,
-                "code_challenge_method": "S256"
-            }))
-            .send()
-            .await
-            .expect("Failed to call login");
+    let client = build_client();
 
-        let login_json: serde_json::Value = login_response.json().await.unwrap();
-        let code = login_json["code"].as_str().unwrap();
+    let code_verifier = "correct-verifier-1234567890-abcdefghijklmnop";
+    let code_challenge = generate_pkce_challenge(code_verifier, "S256");
 
-        // Exchange with correct verifier
-        let token_response = client
-            .post(&format!("{}/oauth2/token", BASE_URL))
-            .json(&json!({
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": TEST_REDIRECT_URI,
-                "client_id": TEST_CLIENT_ID,
-                "client_secret": TEST_CLIENT_SECRET,
-                "code_verifier": code_verifier
-            }))
-            .send()
-            .await
-            .expect("Failed to call token");
+    let code = login_and_get_code(
+        &client,
+        TEST_USERNAME,
+        TEST_PASSWORD,
+        Some(&code_challenge),
+        Some("S256"),
+    )
+    .await;
 
-        assert_eq!(token_response.status(), 200);
-        let token_json: serde_json::Value = token_response.json().await.unwrap();
-        assert!(token_json["access_token"].as_str().is_some());
+    let token_response = client
+        .post(&format!("{}/oauth2/token", BASE_URL))
+        .json(&json!({
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": TEST_REDIRECT_URI,
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET,
+            "code_verifier": "wrong-verifier"
+        }))
+        .send()
+        .await
+        .expect("Failed to call token");
 
-        println!("✅ Test 4 PASSED: PKCE S256 validation successful\n");
-    }
+    assert_eq!(token_response.status(), 200);
+    let token_json: serde_json::Value = token_response.json().await.unwrap();
+    assert_eq!(token_json["error"].as_str().unwrap(), "invalid_grant");
+}
 
-    // Test 5: PKCE with wrong verifier
-    println!("Test 5: PKCE validation failure with wrong verifier");
-    {
-        let code_verifier = "correct-verifier-1234567890-abcdefghijklmnop";
-        let code_challenge = generate_pkce_challenge(code_verifier, "S256");
+#[tokio::test]
+async fn test_refresh_token_rotation() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _env = setup_env().await;
 
-        // Login with PKCE challenge
-        let login_response = client
-            .post(&format!("{}/oauth2/login", BASE_URL))
-            .json(&json!({
-                "username": TEST_USERNAME,
-                "password": TEST_PASSWORD,
-                "client_id": TEST_CLIENT_ID,
-                "redirect_uri": TEST_REDIRECT_URI,
-                "code_challenge": code_challenge,
-                "code_challenge_method": "S256"
-            }))
-            .send()
-            .await
-            .expect("Failed to call login");
+    let client = build_client();
 
-        let login_json: serde_json::Value = login_response.json().await.unwrap();
-        let code = login_json["code"].as_str().unwrap();
+    let code = login_and_get_code(&client, TEST_USERNAME, TEST_PASSWORD, None, None).await;
+    let token_json = exchange_code_for_tokens(&client, &code).await;
+    let refresh_token = token_json["refresh_token"].as_str().unwrap().to_string();
 
-        // Exchange with WRONG verifier
-        let token_response = client
-            .post(&format!("{}/oauth2/token", BASE_URL))
-            .json(&json!({
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": TEST_REDIRECT_URI,
-                "client_id": TEST_CLIENT_ID,
-                "client_secret": TEST_CLIENT_SECRET,
-                "code_verifier": "wrong-verifier"
-            }))
-            .send()
-            .await
-            .expect("Failed to call token");
+    let refresh_response = client
+        .post(&format!("{}/oauth2/token", BASE_URL))
+        .json(&json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET
+        }))
+        .send()
+        .await
+        .expect("Failed to call refresh token");
 
-        assert_eq!(token_response.status(), 200);
-        let token_json: serde_json::Value = token_response.json().await.unwrap();
-        assert_eq!(token_json["error"].as_str().unwrap(), "invalid_grant");
+    assert_eq!(refresh_response.status(), 200);
+    let refresh_json: serde_json::Value = refresh_response.json().await.unwrap();
+    assert!(refresh_json["access_token"].as_str().is_some());
+    let new_refresh_token = refresh_json["refresh_token"].as_str().unwrap();
+    assert_ne!(new_refresh_token, token_json["refresh_token"].as_str().unwrap());
+}
 
-        println!("✅ Test 5 PASSED: Correctly rejected wrong PKCE verifier\n");
-    }
+#[tokio::test]
+async fn test_refresh_token_reuse_detection() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _env = setup_env().await;
 
-    // Test 6: Refresh token flow
-    println!("Test 6: Refresh token flow");
-    {
-        // First get tokens
-        let login_response = client
-            .post(&format!("{}/oauth2/login", BASE_URL))
-            .json(&json!({
-                "username": TEST_USERNAME,
-                "password": TEST_PASSWORD,
-                "client_id": TEST_CLIENT_ID,
-                "redirect_uri": TEST_REDIRECT_URI
-            }))
-            .send()
-            .await
-            .expect("Failed to call login");
+    let client = build_client();
 
-        let login_json: serde_json::Value = login_response.json().await.unwrap();
-        let code = login_json["code"].as_str().unwrap();
+    let code = login_and_get_code(&client, TEST_USERNAME, TEST_PASSWORD, None, None).await;
+    let token_json = exchange_code_for_tokens(&client, &code).await;
+    let refresh_token = token_json["refresh_token"].as_str().unwrap().to_string();
 
-        let token_response = client
-            .post(&format!("{}/oauth2/token", BASE_URL))
-            .json(&json!({
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": TEST_REDIRECT_URI,
-                "client_id": TEST_CLIENT_ID,
-                "client_secret": TEST_CLIENT_SECRET
-            }))
-            .send()
-            .await
-            .expect("Failed to call token");
+    let refresh_response = client
+        .post(&format!("{}/oauth2/token", BASE_URL))
+        .json(&json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET
+        }))
+        .send()
+        .await
+        .expect("Failed to call refresh token");
 
-        let token_json: serde_json::Value = token_response.json().await.unwrap();
-        let refresh_token = token_json["refresh_token"].as_str().unwrap();
+    assert_eq!(refresh_response.status(), 200);
+    let refresh_json: serde_json::Value = refresh_response.json().await.unwrap();
+    let new_refresh_token = refresh_json["refresh_token"].as_str().unwrap().to_string();
 
-        // Use refresh token
-        let refresh_response = client
-            .post(&format!("{}/oauth2/token", BASE_URL))
-            .json(&json!({
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": TEST_CLIENT_ID,
-                "client_secret": TEST_CLIENT_SECRET
-            }))
-            .send()
-            .await
-            .expect("Failed to call refresh token");
+    let reuse_response = client
+        .post(&format!("{}/oauth2/token", BASE_URL))
+        .json(&json!({
+            "grant_type": "refresh_token",
+            "refresh_token": token_json["refresh_token"].as_str().unwrap(),
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET
+        }))
+        .send()
+        .await
+        .expect("Failed to call refresh token");
 
-        assert_eq!(refresh_response.status(), 200);
-        let refresh_json: serde_json::Value = refresh_response.json().await.unwrap();
-        assert!(refresh_json["access_token"].as_str().is_some());
+    assert_eq!(reuse_response.status(), 200);
+    let reuse_json: serde_json::Value = reuse_response.json().await.unwrap();
+    assert_eq!(reuse_json["error"].as_str().unwrap(), "invalid_grant");
 
-        println!("✅ Test 6 PASSED: Refresh token flow successful\n");
-    }
+    let revoked_response = client
+        .post(&format!("{}/oauth2/token", BASE_URL))
+        .json(&json!({
+            "grant_type": "refresh_token",
+            "refresh_token": new_refresh_token,
+            "client_id": TEST_CLIENT_ID,
+            "client_secret": TEST_CLIENT_SECRET
+        }))
+        .send()
+        .await
+        .expect("Failed to call refresh token");
 
-    // Test 7: Userinfo without token
-    println!("Test 7: Userinfo endpoint without token");
-    {
-        let userinfo_response = client
-            .get(&format!("{}/oauth2/userinfo", BASE_URL))
-            .send()
-            .await
-            .expect("Failed to call userinfo");
+    assert_eq!(revoked_response.status(), 200);
+    let revoked_json: serde_json::Value = revoked_response.json().await.unwrap();
+    assert_eq!(revoked_json["error"].as_str().unwrap(), "invalid_grant");
+}
 
-        assert_eq!(userinfo_response.status(), 401);
+#[tokio::test]
+async fn test_userinfo_without_token() {
+    let _lock = TEST_MUTEX.lock().unwrap();
+    let _env = setup_env().await;
 
-        println!("✅ Test 7 PASSED: Correctly rejected missing token\n");
-    }
+    let client = build_client();
 
-    // Cleanup
-    env.cleanup().await;
+    let userinfo_response = client
+        .get(&format!("{}/oauth2/userinfo", BASE_URL))
+        .send()
+        .await
+        .expect("Failed to call userinfo");
 
-    println!("=== All Authorization Code Flow Tests Passed! ===");
+    assert_eq!(userinfo_response.status(), 401);
 }
