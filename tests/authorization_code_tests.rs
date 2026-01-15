@@ -1,9 +1,9 @@
 use reqwest::{redirect::Policy, Client, Url};
 use serde_json::json;
 use std::process::{Child, Command};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::OnceCell;
+use tokio::sync::{Mutex, OnceCell};
 use tokio::time::sleep;
 
 // Test configuration
@@ -22,7 +22,7 @@ const TEST_CLIENT_ID: &str = "webapp_dashboard";
 const TEST_CLIENT_SECRET: &str = "client_secret_123";
 const TEST_REDIRECT_URI: &str = "http://localhost:3000/callback";
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
+static TEST_MUTEX: OnceCell<Mutex<()>> = OnceCell::const_new();
 static ENV: OnceCell<Arc<TestEnvironment>> = OnceCell::const_new();
 
 /// Test environment manager
@@ -64,7 +64,7 @@ impl TestEnvironment {
     async fn wait_for_postgres(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Waiting for PostgreSQL to be ready...");
 
-        let max_attempts = 30;
+        let max_attempts = 60;
         let mut attempts = 0;
 
         loop {
@@ -115,24 +115,6 @@ impl TestEnvironment {
         }
 
         println!("Database setup completed");
-        Ok(())
-    }
-
-    /// Build the application
-    async fn build_app(&self) -> Result<(), Box<dyn std::error::Error>> {
-        println!("Building application...");
-
-        let output = Command::new("cargo")
-            .arg("build")
-            .env("SQLX_OFFLINE", "true")
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("Build failed: {}", stderr).into());
-        }
-
-        println!("Application built successfully");
         Ok(())
     }
 
@@ -220,10 +202,6 @@ async fn setup_env() -> Arc<TestEnvironment> {
 
         if let Err(e) = env.setup_database().await {
             panic!("Database setup failed: {}", e);
-        }
-
-        if let Err(e) = env.build_app().await {
-            panic!("Build failed: {}", e);
         }
 
         if let Err(e) = env.start_server().await {
@@ -334,7 +312,8 @@ async fn exchange_code_for_tokens(client: &Client, code: &str) -> serde_json::Va
 
 #[tokio::test]
 async fn test_authorization_code_flow_success() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
     let _env = setup_env().await;
 
     let client = build_client();
@@ -378,7 +357,8 @@ async fn test_authorization_code_flow_success() {
 
 #[tokio::test]
 async fn test_login_with_invalid_password() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
     let _env = setup_env().await;
 
     let client = build_client();
@@ -406,7 +386,8 @@ async fn test_login_with_invalid_password() {
 
 #[tokio::test]
 async fn test_invalid_authorization_code() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
     let _env = setup_env().await;
 
     let client = build_client();
@@ -431,7 +412,8 @@ async fn test_invalid_authorization_code() {
 
 #[tokio::test]
 async fn test_pkce_s256_validation() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
     let _env = setup_env().await;
 
     let client = build_client();
@@ -469,7 +451,8 @@ async fn test_pkce_s256_validation() {
 
 #[tokio::test]
 async fn test_pkce_wrong_verifier() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
     let _env = setup_env().await;
 
     let client = build_client();
@@ -507,7 +490,8 @@ async fn test_pkce_wrong_verifier() {
 
 #[tokio::test]
 async fn test_refresh_token_rotation() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
     let _env = setup_env().await;
 
     let client = build_client();
@@ -537,7 +521,8 @@ async fn test_refresh_token_rotation() {
 
 #[tokio::test]
 async fn test_refresh_token_reuse_detection() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
     let _env = setup_env().await;
 
     let client = build_client();
@@ -597,7 +582,8 @@ async fn test_refresh_token_reuse_detection() {
 
 #[tokio::test]
 async fn test_userinfo_without_token() {
-    let _lock = TEST_MUTEX.lock().unwrap();
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
     let _env = setup_env().await;
 
     let client = build_client();
