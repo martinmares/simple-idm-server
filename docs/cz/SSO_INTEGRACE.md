@@ -42,6 +42,7 @@ server {
 ### Konfigurace .env:
 ```env
 JWT_ISSUER=https://sso.cloud-app.cz
+PASSWORD_RESET_TOKEN_EXPIRY_SECONDS=3600
 ```
 
 ---

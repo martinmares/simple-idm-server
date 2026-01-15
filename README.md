@@ -150,6 +150,29 @@ On success, redirects to:
 https://your-app.com/callback?code=AUTHORIZATION_CODE&state=random_state
 ```
 
+### Password Reset (Admin-Initiated)
+
+1. Create reset link (Admin API):
+```
+POST /admin/users/{id}/password-reset
+Authorization: Bearer <ADMIN_TOKEN>
+```
+
+Response includes a one-time `reset_url` and `reset_token`.
+
+2. User opens reset page:
+```
+GET /password/reset?token=RESET_TOKEN
+```
+
+3. User submits new password (HTML form):
+```
+POST /password/reset
+Content-Type: application/x-www-form-urlencoded
+
+token=RESET_TOKEN&password=NewPass123&password_confirm=NewPass123
+```
+
 #### 3. Token Exchange (exchange code for token)
 ```
 POST /oauth2/token
@@ -261,7 +284,6 @@ cargo test
 ```bash
 cargo build --release
 ```
-
 ## TODO
 
 - [x] Admin API for managing users, groups and clients
@@ -274,6 +296,7 @@ cargo build --release
 - [x] JWT audience validation
 - [x] Introspection endpoint
 - [x] Revocation endpoint
+- [x] Admin-initiated password reset flow
 - [ ] Publish Docker image
 - [ ] Expand integration documentation
 
