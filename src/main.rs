@@ -85,7 +85,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Vytvoř Admin auth state
-    let admin_auth = admin::AdminAuth::new(&config, jwt_service.clone());
+    let admin_auth = admin::AdminAuth::new(&config, jwt_service.clone(), db_pool.clone());
 
     // Admin API routes (protected by middleware)
     let admin_routes = Router::new()

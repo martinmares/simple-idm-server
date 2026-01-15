@@ -115,6 +115,7 @@ pub async fn handle_client_credentials(
         client.client_id.clone(),
         None, // žádný email
         None, // žádné preferred_username
+        Some(scope.clone()),
         vec![], // žádné skupiny
         HashMap::new(), // žádné custom claims
         state.access_token_expiry,

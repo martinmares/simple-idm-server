@@ -27,6 +27,8 @@ pub struct Claims {
     pub aud: Vec<String>,      // Audience (client IDs)
     pub exp: i64,              // Expiration time
     pub iat: i64,              // Issued at
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<String>,
     pub email: Option<String>, // User email
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_username: Option<String>,
@@ -72,6 +74,7 @@ impl JwtService {
         client_id: String,
         email: Option<String>,
         preferred_username: Option<String>,
+        scope: Option<String>,
         groups: Vec<String>,
         custom_claims: HashMap<String, serde_json::Value>,
         expiry_seconds: i64,
@@ -85,6 +88,7 @@ impl JwtService {
             aud: vec![client_id],
             exp: exp.timestamp(),
             iat: now.timestamp(),
+            scope,
             email,
             preferred_username,
             groups,

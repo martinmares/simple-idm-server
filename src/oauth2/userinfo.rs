@@ -93,11 +93,41 @@ pub async fn handle_userinfo(
                     .into_response();
             }
 
+            let scope = claims.scope.as_deref().unwrap_or("");
+            if !has_scope(scope, "openid") {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(ErrorResponse {
+                        error: "insufficient_scope".to_string(),
+                        error_description: "Missing required scope: openid".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+
+            let email = if has_scope(scope, "email") {
+                claims.email
+            } else {
+                None
+            };
+
+            let preferred_username = if has_scope(scope, "profile") {
+                claims.preferred_username
+            } else {
+                None
+            };
+
+            let groups = if has_scope(scope, "groups") {
+                Some(claims.groups)
+            } else {
+                None
+            };
+
             let userinfo = UserinfoResponse {
                 sub: claims.sub,
-                email: claims.email,
-                preferred_username: claims.preferred_username,
-                groups: Some(claims.groups),
+                email,
+                preferred_username,
+                groups,
                 custom_claims: claims.custom_claims,
             };
 
@@ -123,4 +153,10 @@ async fn has_valid_audience(pool: &DbPool, audiences: &[String]) -> Result<bool,
     .await?;
 
     Ok(count > 0)
+}
+
+fn has_scope(scope: &str, expected: &str) -> bool {
+    scope
+        .split_whitespace()
+        .any(|value| value == expected)
 }
