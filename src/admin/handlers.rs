@@ -403,12 +403,8 @@ pub async fn update_user(
     Path(user_id): Path<Uuid>,
     Json(req): Json<UpdateUserRequest>,
 ) -> impl IntoResponse {
-    // Build dynamic update query
-    let mut query_parts = vec![];
-    let mut params: Vec<String> = vec![];
-    let mut param_idx = 1;
-
-    if let Some(email) = &req.email {
+    let email = req.email.clone();
+    if let Some(email) = &email {
         let conflict = sqlx::query_scalar::<_, i64>(
             "SELECT 1 FROM users WHERE username = $1 AND id <> $2 LIMIT 1",
         )
@@ -427,15 +423,11 @@ pub async fn update_user(
             )
                 .into_response();
         }
-
-        query_parts.push(format!("email = ${}", param_idx));
-        params.push(email.clone());
-        param_idx += 1;
     }
 
-    if let Some(password) = &req.password {
-        let password_hash = match hash_password(password) {
-            Ok(hash) => hash,
+    let password_hash = if let Some(password) = &req.password {
+        match hash_password(password) {
+            Ok(hash) => Some(hash),
             Err(e) => {
                 tracing::error!("Failed to hash password: {:?}", e);
                 return (
@@ -447,19 +439,12 @@ pub async fn update_user(
                 )
                     .into_response();
             }
-        };
-        query_parts.push(format!("password_hash = ${}", param_idx));
-        params.push(password_hash);
-        param_idx += 1;
-    }
+        }
+    } else {
+        None
+    };
 
-    if let Some(is_active) = req.is_active {
-        query_parts.push(format!("is_active = ${}", param_idx));
-        params.push(is_active.to_string());
-        param_idx += 1;
-    }
-
-    if query_parts.is_empty() {
+    if email.is_none() && password_hash.is_none() && req.is_active.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -470,40 +455,51 @@ pub async fn update_user(
             .into_response();
     }
 
-    // Update timestamp
-    query_parts.push("updated_at = NOW()".to_string());
+    let result = sqlx::query!(
+        r#"
+        UPDATE users
+        SET
+            email = COALESCE($1, email),
+            password_hash = COALESCE($2, password_hash),
+            is_active = COALESCE($3, is_active),
+            updated_at = NOW()
+        WHERE id = $4
+        RETURNING id, username, email, is_active
+        "#,
+        email,
+        password_hash,
+        req.is_active,
+        user_id
+    )
+    .fetch_optional(&db_pool)
+    .await;
 
-    let query = format!(
-        "UPDATE users SET {} WHERE id = ${} RETURNING id, username, email, is_active",
-        query_parts.join(", "),
-        param_idx
-    );
-
-    // Build query with sqlx
-    let mut query_builder = sqlx::query_as::<_, (Uuid, String, String, bool)>(&query);
-    for param in params {
-        query_builder = query_builder.bind(param);
-    }
-    query_builder = query_builder.bind(user_id);
-
-    match query_builder.fetch_one(&db_pool).await {
-        Ok((id, username, email, is_active)) => (
+    match result {
+        Ok(Some(user)) => (
             StatusCode::OK,
             Json(UserResponse {
-                id,
-                username,
-                email,
-                is_active,
+                id: user.id,
+                username: user.username,
+                email: user.email,
+                is_active: user.is_active,
+            }),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".to_string(),
+                error_description: "User not found".to_string(),
             }),
         )
             .into_response(),
         Err(e) => {
             tracing::error!("Failed to update user: {:?}", e);
             (
-                StatusCode::NOT_FOUND,
+                StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ErrorResponse {
-                    error: "not_found".to_string(),
-                    error_description: "User not found".to_string(),
+                    error: "server_error".to_string(),
+                    error_description: "Failed to update user".to_string(),
                 }),
             )
                 .into_response()
