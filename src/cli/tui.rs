@@ -693,18 +693,23 @@ async fn event_loop(
         let event = event::read()?;
         if app.mode == Mode::RelationEditor {
             let handled = handle_relation_event(app, event, http).await?;
-            if handled == RelationResult::Applied || handled == RelationResult::Cancelled {
+            if handled == RelationResult::Applied {
                 app.mode = Mode::Normal;
                 refresh_active_tab(app, http).await?;
+            } else if handled == RelationResult::Cancelled {
+                app.mode = Mode::Normal;
             }
             continue;
         }
         if app.mode == Mode::ClaimEditor {
             let handled = handle_claim_editor_event(app, event, http).await?;
-            if handled == ClaimEditorResult::Applied || handled == ClaimEditorResult::Cancelled {
+            if handled == ClaimEditorResult::Applied {
                 app.mode = Mode::Normal;
                 app.claim_editor = None;
                 refresh_active_tab(app, http).await?;
+            } else if handled == ClaimEditorResult::Cancelled {
+                app.mode = Mode::Normal;
+                app.claim_editor = None;
             }
             continue;
         }
@@ -743,10 +748,13 @@ async fn event_loop(
 
         if app.mode == Mode::Form {
             let handled = handle_form_event(app, event, http).await?;
-            if handled == FormResult::Submitted || handled == FormResult::Cancelled {
+            if handled == FormResult::Submitted {
                 app.mode = Mode::Normal;
                 app.form = None;
                 refresh_active_tab(app, http).await?;
+            } else if handled == FormResult::Cancelled {
+                app.mode = Mode::Normal;
+                app.form = None;
             }
             continue;
         }
@@ -772,8 +780,10 @@ async fn handle_normal_key(app: &mut App, key: KeyEvent, http: &HttpClient) -> R
         KeyCode::Char('[') => page_prev(app, http).await?,
         KeyCode::Char(']') => page_next(app, http).await?,
         KeyCode::Char('n') => {
-            if let Err(err) = open_create_form(app) {
-                app.set_status(err.to_string());
+            if app.tab != Tab::ClientClaims && app.tab != Tab::GroupClaims {
+                if let Err(err) = open_create_form(app) {
+                    app.set_status(err.to_string());
+                }
             }
         }
         KeyCode::Char('e') => {
@@ -1099,7 +1109,9 @@ async fn handle_claim_entry_event(
             return Ok(ClaimEntryResult::Applied);
         }
         KeyCode::Char('g') => {
-            if matches!(mode, Some(ClaimEditorMode::ClientClaims { .. })) {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(mode, Some(ClaimEditorMode::ClientClaims { .. }))
+            {
                 entry.index = 2;
                 open_selector(app, http, SelectorKind::Groups, SelectorTarget::ClaimEntryOther)
                     .await?;
@@ -1112,7 +1124,9 @@ async fn handle_claim_entry_event(
             }
         }
         KeyCode::Char('c') => {
-            if matches!(mode, Some(ClaimEditorMode::GroupClaims { .. })) {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(mode, Some(ClaimEditorMode::GroupClaims { .. }))
+            {
                 entry.index = 2;
                 open_selector(app, http, SelectorKind::Clients, SelectorTarget::ClaimEntryOther)
                     .await?;
@@ -2039,22 +2053,22 @@ async fn handle_form_event(
             }
         }
         KeyCode::Char('g') => {
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
                 if is_add_remove && label == Some("group_id") {
                     request_selector = Some((
                         SelectorKind::Groups,
                         SelectorTarget::FormField("group_id"),
                     ));
-                } else if label == Some("grant_types") {
-                    let values = split_csv(Some(form.fields[form.index].value()));
-                    app.picker = Some(PickerState::new_grant_types(&values));
-                    app.mode = Mode::Picker;
-                    return Ok(FormResult::Continue);
                 }
+            } else if label == Some("grant_types") {
+                let values = split_csv(Some(form.fields[form.index].value()));
+                app.picker = Some(PickerState::new_grant_types(&values));
+                app.mode = Mode::Picker;
+                return Ok(FormResult::Continue);
             }
         }
         KeyCode::Char('u') => {
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
                 if is_add_remove && label == Some("user_id") {
                     request_selector =
                         Some((SelectorKind::Users, SelectorTarget::FormField("user_id")));
@@ -2452,6 +2466,13 @@ fn aggregate_client_claims(
 
     let mut map: std::collections::BTreeMap<String, ClientClaimsRow> =
         std::collections::BTreeMap::new();
+    for (id, name) in client_meta.iter() {
+        map.entry(id.clone()).or_insert_with(|| ClientClaimsRow {
+            client_id: id.clone(),
+            client_name: name.clone(),
+            claims: Vec::new(),
+        });
+    }
     for row in rows {
         let client_name = client_meta
             .get(&row.client_id)
@@ -2496,6 +2517,14 @@ fn aggregate_group_claims(
 
     let mut map: std::collections::BTreeMap<String, GroupClaimsRow> =
         std::collections::BTreeMap::new();
+    for (id, (name, description)) in group_meta.iter() {
+        map.entry(id.clone()).or_insert_with(|| GroupClaimsRow {
+            group_id: id.clone(),
+            group_name: name.clone(),
+            description: description.clone(),
+            claims: Vec::new(),
+        });
+    }
     for row in rows {
         let (group_name, description) = group_meta
             .get(&row.group_id)
@@ -2787,9 +2816,9 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 .collect::<Vec<_>>(),
             &mut app.users.state,
             vec![
+                Constraint::Percentage(20),
                 Constraint::Percentage(30),
                 Constraint::Percentage(50),
-                Constraint::Percentage(20),
             ],
         ),
         Tab::Groups => (
@@ -2805,7 +2834,7 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 })
                 .collect::<Vec<_>>(),
             &mut app.groups.state,
-            vec![Constraint::Percentage(35), Constraint::Percentage(65)],
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
         ),
         Tab::Clients => (
             Row::new(vec!["Client ID", "Name", "Grants"]),
@@ -2822,9 +2851,9 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 .collect::<Vec<_>>(),
             &mut app.clients.state,
             vec![
-                Constraint::Percentage(35),
-                Constraint::Percentage(35),
+                Constraint::Percentage(20),
                 Constraint::Percentage(30),
+                Constraint::Percentage(50),
             ],
         ),
         Tab::ClientClaims => (
@@ -2846,7 +2875,7 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 })
                 .collect::<Vec<_>>(),
             &mut app.client_claims.state,
-            vec![Constraint::Percentage(30), Constraint::Percentage(70)],
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
         ),
         Tab::GroupClaims => (
             Row::new(vec!["Group", "Claims"]),
@@ -2867,7 +2896,7 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 })
                 .collect::<Vec<_>>(),
             &mut app.group_claims.state,
-            vec![Constraint::Percentage(30), Constraint::Percentage(70)],
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
         ),
         Tab::UserGroups => (
             Row::new(vec!["User", "Groups"]),
@@ -2888,7 +2917,7 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 })
                 .collect::<Vec<_>>(),
             &mut app.user_groups.state,
-            vec![Constraint::Percentage(35), Constraint::Percentage(65)],
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
         ),
         Tab::GroupUsers => (
             Row::new(vec!["Group", "Users"]),
@@ -2909,7 +2938,7 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 })
                 .collect::<Vec<_>>(),
             &mut app.group_users.state,
-            vec![Constraint::Percentage(35), Constraint::Percentage(65)],
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
         ),
     };
 
@@ -3037,13 +3066,13 @@ fn draw_form(
         }
         if field.label == "user_id" {
             spans.push(Span::styled(
-                " (u select)",
+                " (Ctrl+U select)",
                 Style::default().fg(Color::DarkGray),
             ));
         }
         if field.label == "group_id" {
             spans.push(Span::styled(
-                " (g select)",
+                " (Ctrl+G select)",
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -3079,7 +3108,7 @@ fn draw_form(
         }
     }
 
-    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | g grant types | u user select | g group select | Ctrl+G secret | Ctrl+V reveal")
+    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | g grant types | Ctrl+U user select | Ctrl+G group select | Ctrl+G secret | Ctrl+V reveal")
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 
@@ -3673,8 +3702,8 @@ fn draw_claim_entry(
         .as_ref()
         .map(|editor| editor.mode.clone());
     let other_hint = match mode {
-        Some(ClaimEditorMode::ClientClaims { .. }) => " (g select)",
-        Some(ClaimEditorMode::GroupClaims { .. }) => " (c select)",
+        Some(ClaimEditorMode::ClientClaims { .. }) => " (Ctrl+G select group)",
+        Some(ClaimEditorMode::GroupClaims { .. }) => " (Ctrl+C select client)",
         None => "",
     };
 
