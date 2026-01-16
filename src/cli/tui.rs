@@ -15,7 +15,7 @@ use ratatui::{
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::RngCore;
 use serde_json::json;
-use std::{io, time::Duration};
+use std::{collections::HashSet, io, time::Duration};
 use tui_input::{backend::crossterm::EventHandler, Input};
 use url::Url;
 
@@ -30,6 +30,7 @@ enum Tab {
     Clients,
     ClaimMaps,
     UserGroups,
+    GroupUsers,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,6 +38,9 @@ enum Mode {
     Normal,
     Form,
     Picker,
+    Selector,
+    PasswordGen,
+    RelationEditor,
 }
 
 #[derive(Clone, Debug)]
@@ -200,12 +204,17 @@ struct App {
     groups: EntityState<GroupRow>,
     clients: EntityState<ClientRow>,
     claim_maps: EntityState<ClaimMapRow>,
-    user_groups: EntityState<UserGroupRow>,
+    user_groups: EntityState<UserGroupsRow>,
+    group_users: EntityState<GroupUsersRow>,
     mode: Mode,
     form: Option<FormState>,
     status: String,
     pending_select: Option<SelectHint>,
     picker: Option<PickerState>,
+    selector: Option<SelectorState>,
+    password_gen: Option<PasswordGenState>,
+    relation_editor: Option<RelationEditorState>,
+    cursor_visible: bool,
 }
 
 impl App {
@@ -217,11 +226,16 @@ impl App {
             clients: EntityState::new(),
             claim_maps: EntityState::new(),
             user_groups: EntityState::new(),
+            group_users: EntityState::new(),
             mode: Mode::Normal,
             form: None,
             status: String::new(),
             pending_select: None,
             picker: None,
+            selector: None,
+            password_gen: None,
+            relation_editor: None,
+            cursor_visible: false,
         }
     }
 
@@ -232,6 +246,7 @@ impl App {
             (Tab::Clients, "Clients"),
             (Tab::ClaimMaps, "Claim maps"),
             (Tab::UserGroups, "User groups"),
+            (Tab::GroupUsers, "Group users"),
         ]
     }
 
@@ -283,6 +298,207 @@ impl PickerState {
     }
 }
 
+#[derive(Clone, Debug)]
+struct PasswordGenState {
+    title: String,
+    length: Input,
+    include_upper: bool,
+    include_lower: bool,
+    include_digits: bool,
+    include_special_safe: bool,
+    include_special_full: bool,
+    index: usize,
+    error: Option<String>,
+    target_field: &'static str,
+}
+
+impl PasswordGenState {
+    fn new(target_field: &'static str) -> Self {
+        Self {
+            title: "Generator hesla".to_string(),
+            length: input_with_value("16".to_string()),
+            include_upper: true,
+            include_lower: true,
+            include_digits: true,
+            include_special_safe: false,
+            include_special_full: false,
+            index: 0,
+            error: None,
+            target_field,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct GroupSummary {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Debug)]
+struct UserSummary {
+    id: String,
+    username: String,
+    email: String,
+}
+
+#[derive(Clone, Debug)]
+struct UserGroupsRow {
+    user_id: String,
+    username: String,
+    email: String,
+    groups: Vec<GroupSummary>,
+}
+
+#[derive(Clone, Debug)]
+struct GroupUsersRow {
+    group_id: String,
+    name: String,
+    description: Option<String>,
+    users: Vec<UserSummary>,
+}
+
+#[derive(Debug)]
+enum SelectorItems {
+    Users(Vec<UserRow>),
+    Groups(Vec<GroupRow>),
+}
+
+#[derive(Debug)]
+struct SelectorState {
+    title: String,
+    items: SelectorItems,
+    filter: Input,
+    filter_active: bool,
+    index: usize,
+    filtered: Vec<usize>,
+    target_field: &'static str,
+}
+
+impl SelectorState {
+    fn new_users(items: Vec<UserRow>, target_field: &'static str) -> Self {
+        let mut state = Self {
+            title: "Vyber uživatele".to_string(),
+            items: SelectorItems::Users(items),
+            filter: Input::default(),
+            filter_active: false,
+            index: 0,
+            filtered: Vec::new(),
+            target_field,
+        };
+        state.apply_filter();
+        state
+    }
+
+    fn new_groups(items: Vec<GroupRow>, target_field: &'static str) -> Self {
+        let mut state = Self {
+            title: "Vyber skupinu".to_string(),
+            items: SelectorItems::Groups(items),
+            filter: Input::default(),
+            filter_active: false,
+            index: 0,
+            filtered: Vec::new(),
+            target_field,
+        };
+        state.apply_filter();
+        state
+    }
+
+    fn apply_filter(&mut self) {
+        let needle = self.filter.value().to_lowercase();
+        self.filtered.clear();
+        match &self.items {
+            SelectorItems::Users(items) => {
+                for (idx, user) in items.iter().enumerate() {
+                    if needle.is_empty()
+                        || user.username.to_lowercase().contains(&needle)
+                        || user.email.to_lowercase().contains(&needle)
+                    {
+                        self.filtered.push(idx);
+                    }
+                }
+            }
+            SelectorItems::Groups(items) => {
+                for (idx, group) in items.iter().enumerate() {
+                    let desc = group.description.clone().unwrap_or_default();
+                    if needle.is_empty()
+                        || group.name.to_lowercase().contains(&needle)
+                        || desc.to_lowercase().contains(&needle)
+                    {
+                        self.filtered.push(idx);
+                    }
+                }
+            }
+        }
+
+        if self.filtered.is_empty() {
+            self.index = 0;
+        } else {
+            self.index = self.index.min(self.filtered.len() - 1);
+        }
+    }
+
+    fn selected_index(&self) -> Option<usize> {
+        self.filtered.get(self.index).copied()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RelationOption {
+    id: String,
+    label: String,
+    selected: bool,
+}
+
+#[derive(Clone, Debug)]
+enum RelationMode {
+    UserGroups { user_id: String, username: String },
+    GroupUsers { group_id: String, group_name: String },
+}
+
+#[derive(Clone, Debug)]
+struct RelationEditorState {
+    title: String,
+    mode: RelationMode,
+    options: Vec<RelationOption>,
+    index: usize,
+    error: Option<String>,
+    original_selected: HashSet<String>,
+}
+
+impl RelationEditorState {
+    fn new(mode: RelationMode, options: Vec<RelationOption>) -> Self {
+        let original_selected = options
+            .iter()
+            .filter(|opt| opt.selected)
+            .map(|opt| opt.id.clone())
+            .collect();
+        let title = match &mode {
+            RelationMode::UserGroups { username, .. } => {
+                format!("Skupiny pro uživatele {username}")
+            }
+            RelationMode::GroupUsers { group_name, .. } => {
+                format!("Uživatelé ve skupině {group_name}")
+            }
+        };
+        Self {
+            title,
+            mode,
+            options,
+            index: 0,
+            error: None,
+            original_selected,
+        }
+    }
+
+    fn selected_ids(&self) -> HashSet<String> {
+        self.options
+            .iter()
+            .filter(|opt| opt.selected)
+            .map(|opt| opt.id.clone())
+            .collect()
+    }
+}
 fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
     vec![
         ("authorization_code", "authorization_code"),
@@ -295,6 +511,7 @@ fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
 struct SelectHint {
     tab: Tab,
     id: String,
+    label: Option<String>,
 }
 
 pub async fn run_tui(http: &HttpClient) -> Result<()> {
@@ -323,12 +540,39 @@ async fn event_loop(
 ) -> Result<()> {
     loop {
         terminal.draw(|frame| draw_ui(frame, app))?;
+        if app.cursor_visible {
+            terminal.show_cursor()?;
+        } else {
+            terminal.hide_cursor()?;
+        }
 
         if !event::poll(Duration::from_millis(200))? {
             continue;
         }
 
         let event = event::read()?;
+        if app.mode == Mode::RelationEditor {
+            let handled = handle_relation_event(app, event, http).await?;
+            if handled == RelationResult::Applied || handled == RelationResult::Cancelled {
+                app.mode = Mode::Normal;
+                refresh_active_tab(app, http).await?;
+            }
+            continue;
+        }
+        if app.mode == Mode::PasswordGen {
+            let handled = handle_password_gen_event(app, event)?;
+            if handled == PasswordGenResult::Applied || handled == PasswordGenResult::Cancelled {
+                app.mode = Mode::Form;
+            }
+            continue;
+        }
+        if app.mode == Mode::Selector {
+            let handled = handle_selector_event(app, event)?;
+            if handled == SelectorResult::Applied || handled == SelectorResult::Cancelled {
+                app.mode = Mode::Form;
+            }
+            continue;
+        }
         if app.mode == Mode::Picker {
             let handled = handle_picker_event(app, event)?;
             if handled == PickerResult::Applied || handled == PickerResult::Cancelled {
@@ -373,7 +617,7 @@ async fn handle_normal_key(app: &mut App, key: KeyEvent, http: &HttpClient) -> R
             }
         }
         KeyCode::Char('e') => {
-            if let Err(err) = open_edit_form(app) {
+            if let Err(err) = open_edit_form(app, http).await {
                 app.set_status(err.to_string());
             }
         }
@@ -399,6 +643,27 @@ async fn handle_normal_key(app: &mut App, key: KeyEvent, http: &HttpClient) -> R
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PickerResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasswordGenResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelationResult {
     Continue,
     Applied,
     Cancelled,
@@ -443,6 +708,184 @@ fn handle_picker_event(app: &mut App, event: Event) -> Result<PickerResult> {
     Ok(PickerResult::Continue)
 }
 
+async fn handle_relation_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<RelationResult> {
+    let Some(editor) = app.relation_editor.as_mut() else {
+        return Ok(RelationResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(RelationResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.relation_editor = None;
+            return Ok(RelationResult::Cancelled);
+        }
+        KeyCode::Up => {
+            editor.index = editor.index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            editor.index = (editor.index + 1).min(editor.options.len().saturating_sub(1));
+        }
+        KeyCode::Char(' ') => {
+            if let Some(option) = editor.options.get_mut(editor.index) {
+                option.selected = !option.selected;
+            }
+        }
+        KeyCode::Enter => {
+            if let Err(err) = apply_relation_changes(editor, http).await {
+                editor.error = Some(err.to_string());
+                return Ok(RelationResult::Continue);
+            }
+            let (tab, id, label) = match &editor.mode {
+                RelationMode::UserGroups { user_id, username } => {
+                    (Tab::UserGroups, user_id.clone(), Some(username.clone()))
+                }
+                RelationMode::GroupUsers { group_id, group_name } => {
+                    (Tab::GroupUsers, group_id.clone(), Some(group_name.clone()))
+                }
+            };
+            app.pending_select = Some(SelectHint { tab, id, label });
+            app.relation_editor = None;
+            return Ok(RelationResult::Applied);
+        }
+        _ => {}
+    }
+
+    Ok(RelationResult::Continue)
+}
+
+fn handle_selector_event(app: &mut App, event: Event) -> Result<SelectorResult> {
+    let Some(selector) = app.selector.as_mut() else {
+        return Ok(SelectorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(SelectorResult::Continue);
+    };
+
+    if selector.filter_active {
+        match key.code {
+            KeyCode::Esc => {
+                selector.filter_active = false;
+                return Ok(SelectorResult::Continue);
+            }
+            KeyCode::Enter => {
+                selector.filter_active = false;
+                return Ok(SelectorResult::Continue);
+            }
+            _ => {
+                selector.filter.handle_event(&event);
+                selector.apply_filter();
+                return Ok(SelectorResult::Continue);
+            }
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.selector = None;
+            return Ok(SelectorResult::Cancelled);
+        }
+        KeyCode::Up => {
+            selector.index = selector.index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            selector.index = (selector.index + 1).min(selector.filtered.len().saturating_sub(1));
+        }
+        KeyCode::Char('/') => {
+            selector.filter_active = true;
+            selector.filter = Input::default();
+        }
+        KeyCode::Enter => {
+            let Some(selected_idx) = selector.selected_index() else {
+                return Ok(SelectorResult::Continue);
+            };
+            let value = match &selector.items {
+                SelectorItems::Users(items) => items[selected_idx].id.clone(),
+                SelectorItems::Groups(items) => items[selected_idx].id.clone(),
+            };
+            if let Some(form) = app.form.as_mut() {
+                set_field_value(form, selector.target_field, value);
+            }
+            app.selector = None;
+            return Ok(SelectorResult::Applied);
+        }
+        _ => {}
+    }
+
+    Ok(SelectorResult::Continue)
+}
+
+fn handle_password_gen_event(app: &mut App, event: Event) -> Result<PasswordGenResult> {
+    let Some(gen) = app.password_gen.as_mut() else {
+        return Ok(PasswordGenResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(PasswordGenResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.password_gen = None;
+            return Ok(PasswordGenResult::Cancelled);
+        }
+        KeyCode::Tab => gen.index = (gen.index + 1) % 7,
+        KeyCode::BackTab => {
+            if gen.index == 0 {
+                gen.index = 6;
+            } else {
+                gen.index -= 1;
+            }
+        }
+        KeyCode::Char(' ') => {
+            match gen.index {
+                1 => gen.include_upper = !gen.include_upper,
+                2 => gen.include_lower = !gen.include_lower,
+                3 => gen.include_digits = !gen.include_digits,
+                4 => gen.include_special_safe = !gen.include_special_safe,
+                5 => gen.include_special_full = !gen.include_special_full,
+                _ => {}
+            }
+        }
+        KeyCode::Enter => {
+            if gen.index == 6 {
+                match generate_password(gen) {
+                    Ok(value) => {
+                        if let Some(form) = app.form.as_mut() {
+                            set_field_value(form, gen.target_field, value);
+                        }
+                        app.password_gen = None;
+                        return Ok(PasswordGenResult::Applied);
+                    }
+                    Err(err) => gen.error = Some(err.to_string()),
+                }
+            } else if gen.index == 0 {
+                let mut length = gen.length.value().to_string();
+                if length.is_empty() {
+                    length = "16".to_string();
+                }
+                gen.length = input_with_value(length);
+            } else {
+                gen.index = 6;
+            }
+        }
+        _ => {}
+    }
+
+    if gen.index == 0 {
+        gen.length.handle_event(&event);
+    }
+
+    Ok(PasswordGenResult::Continue)
+}
+
 fn select_next(app: &mut App) {
     match app.tab {
         Tab::Users => app.users.select_next(),
@@ -450,6 +893,7 @@ fn select_next(app: &mut App) {
         Tab::Clients => app.clients.select_next(),
         Tab::ClaimMaps => app.claim_maps.select_next(),
         Tab::UserGroups => app.user_groups.select_next(),
+        Tab::GroupUsers => app.group_users.select_next(),
     }
 }
 
@@ -460,6 +904,7 @@ fn select_prev(app: &mut App) {
         Tab::Clients => app.clients.select_prev(),
         Tab::ClaimMaps => app.claim_maps.select_prev(),
         Tab::UserGroups => app.user_groups.select_prev(),
+        Tab::GroupUsers => app.group_users.select_prev(),
     }
 }
 
@@ -492,6 +937,7 @@ async fn page_next(app: &mut App, http: &HttpClient) -> Result<()> {
         Tab::Clients => app.clients.page += 1,
         Tab::ClaimMaps => app.claim_maps.page += 1,
         Tab::UserGroups => app.user_groups.page += 1,
+        Tab::GroupUsers => app.group_users.page += 1,
     }
     refresh_active_tab(app, http).await
 }
@@ -503,6 +949,7 @@ async fn page_prev(app: &mut App, http: &HttpClient) -> Result<()> {
         Tab::Clients => app.clients.page = app.clients.page.saturating_sub(1).max(1),
         Tab::ClaimMaps => app.claim_maps.page = app.claim_maps.page.saturating_sub(1).max(1),
         Tab::UserGroups => app.user_groups.page = app.user_groups.page.saturating_sub(1).max(1),
+        Tab::GroupUsers => app.group_users.page = app.group_users.page.saturating_sub(1).max(1),
     }
     refresh_active_tab(app, http).await
 }
@@ -546,10 +993,19 @@ async fn refresh_active_tab(app: &mut App, http: &HttpClient) -> Result<()> {
             }
         }
         Tab::UserGroups => {
-            match fetch_user_groups(http, app.user_groups.page).await {
+            match fetch_user_groups(http).await {
                 Ok(rows) => {
                     app.user_groups.items = rows;
                     apply_selection(app, EntityKind::UserGroups);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::GroupUsers => {
+            match fetch_group_users(http).await {
+                Ok(rows) => {
+                    app.group_users.items = rows;
+                    apply_selection(app, EntityKind::GroupUsers);
                 }
                 Err(err) => app.set_status(err.to_string()),
             }
@@ -565,6 +1021,7 @@ enum EntityKind {
     Clients,
     ClaimMaps,
     UserGroups,
+    GroupUsers,
 }
 
 fn apply_selection(app: &mut App, kind: EntityKind) {
@@ -611,6 +1068,37 @@ fn apply_selection(app: &mut App, kind: EntityKind) {
                 {
                     app.user_groups.state.select(Some(idx));
                     matched = true;
+                } else if let Some(label) = &hint.label {
+                    if let Some(idx) = app
+                        .user_groups
+                        .items
+                        .iter()
+                        .position(|row| row.username == *label)
+                    {
+                        app.user_groups.state.select(Some(idx));
+                        matched = true;
+                    }
+                }
+            }
+            EntityKind::GroupUsers if hint.tab == Tab::GroupUsers => {
+                if let Some(idx) = app
+                    .group_users
+                    .items
+                    .iter()
+                    .position(|row| row.group_id == hint.id)
+                {
+                    app.group_users.state.select(Some(idx));
+                    matched = true;
+                } else if let Some(label) = &hint.label {
+                    if let Some(idx) = app
+                        .group_users
+                        .items
+                        .iter()
+                        .position(|row| row.name == *label)
+                    {
+                        app.group_users.state.select(Some(idx));
+                        matched = true;
+                    }
                 }
             }
             _ => {}
@@ -625,6 +1113,7 @@ fn apply_selection(app: &mut App, kind: EntityKind) {
             EntityKind::Clients => app.clients.select_first(),
             EntityKind::ClaimMaps => app.claim_maps.select_first(),
             EntityKind::UserGroups => app.user_groups.select_first(),
+            EntityKind::GroupUsers => app.group_users.select_first(),
         }
     }
 }
@@ -641,6 +1130,16 @@ async fn fetch_groups(http: &HttpClient, page: usize) -> Result<Vec<GroupRow>> {
     serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse groups: {e}"))
 }
 
+async fn fetch_users_for_selector(http: &HttpClient) -> Result<Vec<UserRow>> {
+    let body = http.get("/admin/users?page=1&limit=1000").await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse users: {e}"))
+}
+
+async fn fetch_groups_for_selector(http: &HttpClient) -> Result<Vec<GroupRow>> {
+    let body = http.get("/admin/groups?page=1&limit=1000").await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse groups: {e}"))
+}
+
 async fn fetch_clients(http: &HttpClient, page: usize) -> Result<Vec<ClientRow>> {
     let path = format!("/admin/oauth-clients?page={page}&limit={PAGE_SIZE}");
     let body = http.get(&path).await?;
@@ -653,9 +1152,19 @@ async fn fetch_claim_maps(http: &HttpClient, page: usize) -> Result<Vec<ClaimMap
     serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse claim maps: {e}"))
 }
 
-async fn fetch_user_groups(http: &HttpClient, page: usize) -> Result<Vec<UserGroupRow>> {
-    let path = format!("/admin/user-groups?page={page}&limit={PAGE_SIZE}");
-    let body = http.get(&path).await?;
+async fn fetch_user_groups(http: &HttpClient) -> Result<Vec<UserGroupsRow>> {
+    let rows = fetch_user_groups_flat(http).await?;
+    Ok(aggregate_user_groups(rows))
+}
+
+async fn fetch_group_users(http: &HttpClient) -> Result<Vec<GroupUsersRow>> {
+    let rows = fetch_user_groups_flat(http).await?;
+    let groups = fetch_groups_for_selector(http).await?;
+    Ok(aggregate_group_users(rows, groups))
+}
+
+async fn fetch_user_groups_flat(http: &HttpClient) -> Result<Vec<UserGroupRow>> {
+    let body = http.get("/admin/user-groups?page=1&limit=2000").await?;
     serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse user groups: {e}"))
 }
 
@@ -720,13 +1229,33 @@ fn open_create_form(app: &mut App) -> Result<()> {
             index: 0,
             error: None,
         },
+        Tab::GroupUsers => {
+            let mut fields = vec![
+                FormField::new("user_id", String::new()),
+                FormField::new("group_id", String::new()),
+            ];
+            if let Some(row) = app
+                .group_users
+                .selected()
+                .and_then(|idx| app.group_users.items.get(idx))
+            {
+                fields[1] = FormField::new("group_id", row.group_id.clone());
+            }
+            FormState {
+                title: "Add user to group".to_string(),
+                action: FormAction::AddUserGroup,
+                fields,
+                index: 0,
+                error: None,
+            }
+        }
     };
     app.mode = Mode::Form;
     app.form = Some(form);
     Ok(())
 }
 
-fn open_edit_form(app: &mut App) -> Result<()> {
+async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
     let form = match app.tab {
         Tab::Users => {
             let user = selected_item(&app.users.items, app.users.selected())?;
@@ -777,7 +1306,46 @@ fn open_edit_form(app: &mut App) -> Result<()> {
             return Err(anyhow!("Claim maps cannot be updated"));
         }
         Tab::UserGroups => {
-            return Err(anyhow!("User groups cannot be edited"));
+            let row = selected_item(&app.user_groups.items, app.user_groups.selected())?;
+            let groups = fetch_groups_for_selector(http).await?;
+            let options = groups
+                .into_iter()
+                .map(|group| RelationOption {
+                    id: group.id.clone(),
+                    label: format!("{} ({})", group.name, group.id),
+                    selected: row.groups.iter().any(|g| g.id == group.id),
+                })
+                .collect::<Vec<_>>();
+            app.relation_editor = Some(RelationEditorState::new(
+                RelationMode::UserGroups {
+                    user_id: row.user_id.clone(),
+                    username: row.username.clone(),
+                },
+                options,
+            ));
+            app.mode = Mode::RelationEditor;
+            return Ok(());
+        }
+        Tab::GroupUsers => {
+            let row = selected_item(&app.group_users.items, app.group_users.selected())?;
+            let users = fetch_users_for_selector(http).await?;
+            let options = users
+                .into_iter()
+                .map(|user| RelationOption {
+                    id: user.id.clone(),
+                    label: format!("{} <{}>", user.username, user.email),
+                    selected: row.users.iter().any(|u| u.id == user.id),
+                })
+                .collect::<Vec<_>>();
+            app.relation_editor = Some(RelationEditorState::new(
+                RelationMode::GroupUsers {
+                    group_id: row.group_id.clone(),
+                    group_name: row.name.clone(),
+                },
+                options,
+            ));
+            app.mode = Mode::RelationEditor;
+            return Ok(());
         }
     };
     app.mode = Mode::Form;
@@ -830,6 +1398,9 @@ fn open_delete_form(app: &mut App) -> Result<()> {
         Tab::UserGroups => {
             return Err(anyhow!("Use remove to delete user-group mappings"));
         }
+        Tab::GroupUsers => {
+            return Err(anyhow!("Use remove to delete user-group mappings"));
+        }
     };
     app.mode = Mode::Form;
     app.form = Some(form);
@@ -837,16 +1408,35 @@ fn open_delete_form(app: &mut App) -> Result<()> {
 }
 
 fn open_add_user_group(app: &mut App) -> Result<()> {
-    if app.tab != Tab::UserGroups {
+    if app.tab != Tab::UserGroups && app.tab != Tab::GroupUsers {
         return Ok(());
+    }
+    let mut fields = vec![
+        FormField::new("user_id", String::new()),
+        FormField::new("group_id", String::new()),
+    ];
+    if app.tab == Tab::UserGroups {
+        if let Some(row) = app
+            .user_groups
+            .selected()
+            .and_then(|idx| app.user_groups.items.get(idx))
+        {
+            fields[0] = FormField::new("user_id", row.user_id.clone());
+        }
+    }
+    if app.tab == Tab::GroupUsers {
+        if let Some(row) = app
+            .group_users
+            .selected()
+            .and_then(|idx| app.group_users.items.get(idx))
+        {
+            fields[1] = FormField::new("group_id", row.group_id.clone());
+        }
     }
     let form = FormState {
         title: "Add user to group".to_string(),
         action: FormAction::AddUserGroup,
-        fields: vec![
-            FormField::new("user_id", String::new()),
-            FormField::new("group_id", String::new()),
-        ],
+        fields,
         index: 0,
         error: None,
     };
@@ -856,16 +1446,35 @@ fn open_add_user_group(app: &mut App) -> Result<()> {
 }
 
 fn open_remove_user_group(app: &mut App) -> Result<()> {
-    if app.tab != Tab::UserGroups {
+    if app.tab != Tab::UserGroups && app.tab != Tab::GroupUsers {
         return Ok(());
+    }
+    let mut fields = vec![
+        FormField::new("user_id", String::new()),
+        FormField::new("group_id", String::new()),
+    ];
+    if app.tab == Tab::UserGroups {
+        if let Some(row) = app
+            .user_groups
+            .selected()
+            .and_then(|idx| app.user_groups.items.get(idx))
+        {
+            fields[0] = FormField::new("user_id", row.user_id.clone());
+        }
+    }
+    if app.tab == Tab::GroupUsers {
+        if let Some(row) = app
+            .group_users
+            .selected()
+            .and_then(|idx| app.group_users.items.get(idx))
+        {
+            fields[1] = FormField::new("group_id", row.group_id.clone());
+        }
     }
     let form = FormState {
         title: "Remove user from group".to_string(),
         action: FormAction::RemoveUserGroup,
-        fields: vec![
-            FormField::new("user_id", String::new()),
-            FormField::new("group_id", String::new()),
-        ],
+        fields,
         index: 0,
         error: None,
     };
@@ -891,13 +1500,19 @@ async fn handle_form_event(
     event: Event,
     http: &HttpClient,
 ) -> Result<FormResult> {
-    let Some(form) = app.form.as_mut() else {
-        return Ok(FormResult::Cancelled);
-    };
-
     let Event::Key(key) = event else {
         return Ok(FormResult::Continue);
     };
+
+    let Some(form) = app.form.as_mut() else {
+        return Ok(FormResult::Cancelled);
+    };
+    let label = form.fields.get(form.index).map(|field| field.label);
+    let is_add_remove = matches!(
+        form.action,
+        FormAction::AddUserGroup | FormAction::RemoveUserGroup
+    );
+    let mut request_selector: Option<&'static str> = None;
 
     match key.code {
         KeyCode::Esc => return Ok(FormResult::Cancelled),
@@ -935,16 +1550,34 @@ async fn handle_form_event(
         }
         KeyCode::Char('g') => {
             if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                if let Some(field) = form.fields.get(form.index) {
-                    if field.label == "grant_types" {
-                        let values = split_csv(Some(field.value()));
-                        app.picker = Some(PickerState::new_grant_types(&values));
-                        app.mode = Mode::Picker;
-                    }
+                if is_add_remove && label == Some("group_id") {
+                    request_selector = Some("group_id");
+                } else if label == Some("grant_types") {
+                    let values = split_csv(Some(form.fields[form.index].value()));
+                    app.picker = Some(PickerState::new_grant_types(&values));
+                    app.mode = Mode::Picker;
+                    return Ok(FormResult::Continue);
+                }
+            }
+        }
+        KeyCode::Char('u') => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                if is_add_remove && label == Some("user_id") {
+                    request_selector = Some("user_id");
                 }
             }
         }
         _ => {}
+    }
+
+    if let Some(target) = request_selector {
+        let _ = form;
+        if let Err(err) = open_selector(app, http, target).await {
+            if let Some(form) = app.form.as_mut() {
+                form.error = Some(err.to_string());
+            }
+        }
+        return Ok(FormResult::Continue);
     }
 
     if key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -952,6 +1585,11 @@ async fn handle_form_event(
             if field.label == "client_secret" && key.code == KeyCode::Char('g') {
                 let secret = generate_secret();
                 field.input = input_with_value(secret);
+            }
+            if field.label == "password" && key.code == KeyCode::Char('g') {
+                app.password_gen = Some(PasswordGenState::new(field.label));
+                app.mode = Mode::PasswordGen;
+                return Ok(FormResult::Continue);
             }
             if matches!(field.kind, FieldKind::Secret) && key.code == KeyCode::Char('v') {
                 field.reveal = !field.reveal;
@@ -991,6 +1629,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 select_id: Some(SelectHint {
                     tab: Tab::Users,
                     id: created.id,
+                    label: Some(created.username.clone()),
                 }),
             })
         }
@@ -1009,6 +1648,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 select_id: Some(SelectHint {
                     tab: Tab::Users,
                     id: id.clone(),
+                    label: None,
                 }),
             })
         }
@@ -1033,6 +1673,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 select_id: Some(SelectHint {
                     tab: Tab::Groups,
                     id: created.id,
+                    label: Some(created.name.clone()),
                 }),
             })
         }
@@ -1048,6 +1689,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 select_id: Some(SelectHint {
                     tab: Tab::Groups,
                     id: id.clone(),
+                    label: None,
                 }),
             })
         }
@@ -1079,6 +1721,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 select_id: Some(SelectHint {
                     tab: Tab::Clients,
                     id: created.id,
+                    label: Some(created.client_id.clone()),
                 }),
             })
         }
@@ -1100,6 +1743,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 select_id: Some(SelectHint {
                     tab: Tab::Clients,
                     id: id.clone(),
+                    label: None,
                 }),
             })
         }
@@ -1126,6 +1770,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 select_id: Some(SelectHint {
                     tab: Tab::ClaimMaps,
                     id: created.id,
+                    label: Some(created.claim_name.clone()),
                 }),
             })
         }
@@ -1198,6 +1843,23 @@ fn set_field_value(form: &mut FormState, name: &str, value: String) {
     }
 }
 
+async fn open_selector(app: &mut App, http: &HttpClient, target_field: &'static str) -> Result<()> {
+    match target_field {
+        "user_id" => {
+            let users = fetch_users_for_selector(http).await?;
+            app.selector = Some(SelectorState::new_users(users, target_field));
+            app.mode = Mode::Selector;
+        }
+        "group_id" => {
+            let groups = fetch_groups_for_selector(http).await?;
+            app.selector = Some(SelectorState::new_groups(groups, target_field));
+            app.mode = Mode::Selector;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 fn split_csv(input: Option<String>) -> Vec<String> {
     input
         .unwrap_or_default()
@@ -1251,7 +1913,136 @@ fn parse_grant_types(input: Option<String>) -> Result<Vec<String>> {
     Ok(values)
 }
 
+fn aggregate_user_groups(rows: Vec<UserGroupRow>) -> Vec<UserGroupsRow> {
+    let mut map: std::collections::BTreeMap<String, UserGroupsRow> = std::collections::BTreeMap::new();
+    for row in rows {
+        let entry = map.entry(row.user_id.clone()).or_insert_with(|| UserGroupsRow {
+            user_id: row.user_id.clone(),
+            username: row.username.clone(),
+            email: row.email.clone(),
+            groups: Vec::new(),
+        });
+        entry.groups.push(GroupSummary {
+            id: row.group_id.clone(),
+            name: row.group_name.clone(),
+        });
+    }
+    let mut values: Vec<UserGroupsRow> = map.into_values().collect();
+    values.sort_by(|a, b| a.username.cmp(&b.username));
+    values
+}
+
+fn aggregate_group_users(rows: Vec<UserGroupRow>, groups: Vec<GroupRow>) -> Vec<GroupUsersRow> {
+    let mut group_meta: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
+    for group in groups {
+        group_meta.insert(group.id.clone(), (group.name.clone(), group.description.clone()));
+    }
+
+    let mut map: std::collections::BTreeMap<String, GroupUsersRow> = std::collections::BTreeMap::new();
+    for row in rows {
+        let (name, description) = group_meta
+            .get(&row.group_id)
+            .cloned()
+            .unwrap_or((row.group_name.clone(), None));
+        let entry = map.entry(row.group_id.clone()).or_insert_with(|| GroupUsersRow {
+            group_id: row.group_id.clone(),
+            name,
+            description,
+            users: Vec::new(),
+        });
+        entry.users.push(UserSummary {
+            id: row.user_id.clone(),
+            username: row.username.clone(),
+            email: row.email.clone(),
+        });
+    }
+    let mut values: Vec<GroupUsersRow> = map.into_values().collect();
+    values.sort_by(|a, b| a.name.cmp(&b.name));
+    values
+}
+
+fn generate_password(gen: &PasswordGenState) -> Result<String> {
+    let length: usize = gen
+        .length
+        .value()
+        .parse()
+        .unwrap_or(16)
+        .max(8)
+        .min(128);
+
+    let mut charset = String::new();
+    if gen.include_upper {
+        charset.push_str("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    }
+    if gen.include_lower {
+        charset.push_str("abcdefghijklmnopqrstuvwxyz");
+    }
+    if gen.include_digits {
+        charset.push_str("0123456789");
+    }
+    if gen.include_special_safe {
+        charset.push_str("-_.:;@+");
+    }
+    if gen.include_special_full {
+        charset.push_str("!@#$%^&*()[]{}<>?/\\\\|`~'\"");
+    }
+
+    if charset.is_empty() {
+        return Err(anyhow!("Vyber alespoň jednu sadu znaků."));
+    }
+
+    let bytes = charset.as_bytes();
+    let mut rng = rand::rng();
+    let mut password = String::with_capacity(length);
+    for _ in 0..length {
+        let idx = (rng.next_u32() as usize) % bytes.len();
+        password.push(bytes[idx] as char);
+    }
+
+    Ok(password)
+}
+
+async fn apply_relation_changes(
+    editor: &RelationEditorState,
+    http: &HttpClient,
+) -> Result<()> {
+    let desired = editor.selected_ids();
+    let original = editor.original_selected.clone();
+
+    let to_add: Vec<String> = desired.difference(&original).cloned().collect();
+    let to_remove: Vec<String> = original.difference(&desired).cloned().collect();
+
+    match &editor.mode {
+        RelationMode::UserGroups { user_id, .. } => {
+            for group_id in to_add {
+                let payload = json!({ "group_id": group_id });
+                http.post_json(&format!("/admin/users/{user_id}/groups"), payload)
+                    .await?;
+            }
+            for group_id in to_remove {
+                http.delete(&format!("/admin/users/{user_id}/groups/{group_id}"))
+                    .await?;
+            }
+        }
+        RelationMode::GroupUsers { group_id, .. } => {
+            for user_id in to_add {
+                let payload = json!({ "group_id": group_id });
+                http.post_json(&format!("/admin/users/{user_id}/groups"), payload)
+                    .await?;
+            }
+            for user_id in to_remove {
+                http.delete(&format!("/admin/users/{user_id}/groups/{group_id}"))
+                    .await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
+    let mut cursor_visible = false;
     let size = frame.size();
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1263,8 +2054,13 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     draw_status(frame, layout[2], app);
 
     if app.form.is_some() {
-        draw_form(frame, size, app);
+        draw_form(frame, size, app, &mut cursor_visible);
     }
+    if let Some(editor) = &app.relation_editor {
+        draw_relation_editor(frame, size, editor);
+    }
+
+    app.cursor_visible = cursor_visible;
 }
 
 fn draw_tabs(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -1372,19 +2168,46 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
             ],
         ),
         Tab::UserGroups => (
-            Row::new(vec!["User", "Group"]),
+            Row::new(vec!["User", "Groups"]),
             app.user_groups
                 .items
                 .iter()
                 .map(|ug| {
                     Row::new(vec![
                         Cell::from(ug.username.clone()),
-                        Cell::from(ug.group_name.clone()),
+                        Cell::from(
+                            ug.groups
+                                .iter()
+                                .map(|g| g.name.clone())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
                     ])
                 })
                 .collect::<Vec<_>>(),
             &mut app.user_groups.state,
-            vec![Constraint::Percentage(50), Constraint::Percentage(50)],
+            vec![Constraint::Percentage(35), Constraint::Percentage(65)],
+        ),
+        Tab::GroupUsers => (
+            Row::new(vec!["Group", "Users"]),
+            app.group_users
+                .items
+                .iter()
+                .map(|gu| {
+                    Row::new(vec![
+                        Cell::from(gu.name.clone()),
+                        Cell::from(
+                            gu.users
+                                .iter()
+                                .map(|u| u.username.clone())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.group_users.state,
+            vec![Constraint::Percentage(35), Constraint::Percentage(65)],
         ),
     };
 
@@ -1409,6 +2232,7 @@ fn draw_details(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Tab::Clients => detail_clients(app),
         Tab::ClaimMaps => detail_claim_maps(app),
         Tab::UserGroups => detail_user_groups(app),
+        Tab::GroupUsers => detail_group_users(app),
     };
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL).title("Details"))
@@ -1428,7 +2252,12 @@ fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_form(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+fn draw_form(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &App,
+    cursor_visible: &mut bool,
+) {
     let form = match &app.form {
         Some(form) => form,
         None => return,
@@ -1491,9 +2320,27 @@ fn draw_form(frame: &mut ratatui::Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::DarkGray),
             ));
         }
+        if field.label == "password" {
+            spans.push(Span::styled(
+                " (Ctrl+G generate)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         if field.label == "grant_types" {
             spans.push(Span::styled(
                 " (g picker)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "user_id" {
+            spans.push(Span::styled(
+                " (u select)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "group_id" {
+            spans.push(Span::styled(
+                " (g select)",
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -1516,16 +2363,29 @@ fn draw_form(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
     frame.render_widget(paragraph, inner[0]);
-    if let Some((x, y)) = cursor {
-        frame.set_cursor(x, y);
+    if app.selector.is_none()
+        && app.picker.is_none()
+        && app.password_gen.is_none()
+        && app.relation_editor.is_none()
+    {
+        if let Some((x, y)) = cursor {
+            frame.set_cursor(x, y);
+            *cursor_visible = true;
+        }
     }
 
-    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | g grant types | Ctrl+G secret | Ctrl+V reveal")
+    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | g grant types | u user select | g group select | Ctrl+G secret | Ctrl+V reveal")
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 
     if let Some(picker) = &app.picker {
         draw_picker(frame, area, picker);
+    }
+    if let Some(selector) = &app.selector {
+        draw_selector(frame, area, selector, cursor_visible);
+    }
+    if let Some(gen) = &app.password_gen {
+        draw_password_gen(frame, area, gen, cursor_visible);
     }
 }
 
@@ -1536,6 +2396,7 @@ fn tab_title(tab: Tab) -> &'static str {
         Tab::Clients => "Clients",
         Tab::ClaimMaps => "Claim maps",
         Tab::UserGroups => "User groups",
+        Tab::GroupUsers => "Group users",
     }
 }
 
@@ -1546,6 +2407,7 @@ fn active_page(app: &App) -> usize {
         Tab::Clients => app.clients.page,
         Tab::ClaimMaps => app.claim_maps.page,
         Tab::UserGroups => app.user_groups.page,
+        Tab::GroupUsers => app.group_users.page,
     }
 }
 
@@ -1615,12 +2477,42 @@ fn detail_user_groups(app: &App) -> Vec<Line<'static>> {
     else {
         return vec![Line::from("No entry selected")];
     };
+    let groups = row
+        .groups
+        .iter()
+        .map(|g| g.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
     vec![
         line_kv("user_id", &row.user_id),
         line_kv("username", &row.username),
         line_kv("email", &row.email),
+        line_kv("groups", &groups),
+    ]
+}
+
+fn detail_group_users(app: &App) -> Vec<Line<'static>> {
+    let Some(row) = app
+        .group_users
+        .selected()
+        .and_then(|idx| app.group_users.items.get(idx))
+    else {
+        return vec![Line::from("No entry selected")];
+    };
+    let users = row
+        .users
+        .iter()
+        .map(|u| format!("{} <{}>", u.username, u.email))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
         line_kv("group_id", &row.group_id),
-        line_kv("group_name", &row.group_name),
+        line_kv("name", &row.name),
+        line_kv(
+            "description",
+            row.description.as_deref().unwrap_or(""),
+        ),
+        line_kv("users", &users),
     ]
 }
 
@@ -1686,4 +2578,235 @@ fn draw_picker(frame: &mut ratatui::Frame, area: Rect, picker: &PickerState) {
     let footer = Paragraph::new("Space toggle | Enter apply | Esc cancel")
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
+}
+
+fn draw_selector(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    selector: &SelectorState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(selector.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let filter_line = if selector.filter_active {
+        format!("/ {}", selector.filter.value())
+    } else if selector.filter.value().is_empty() {
+        "/ (filtr: napiš a potvrď Enter)".to_string()
+    } else {
+        format!("/ {}", selector.filter.value())
+    };
+    let filter = Paragraph::new(filter_line)
+        .block(Block::default().borders(Borders::ALL).title("Filter"));
+    frame.render_widget(filter, inner[0]);
+
+    match &selector.items {
+        SelectorItems::Users(items) => {
+            let rows = selector
+                .filtered
+                .iter()
+                .map(|idx| {
+                    let user = &items[*idx];
+                    Row::new(vec![
+                        Cell::from(user.username.clone()),
+                        Cell::from(user.email.clone()),
+                        Cell::from(user.is_active.to_string()),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let table = Table::new(
+                rows,
+                vec![
+                    Constraint::Percentage(35),
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(15),
+                ],
+            )
+            .header(
+                Row::new(vec!["Username", "Email", "Active"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(Block::default().borders(Borders::ALL))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+            let mut state = TableState::default();
+            if !selector.filtered.is_empty() {
+                state.select(Some(selector.index));
+            }
+            frame.render_stateful_widget(table, inner[1], &mut state);
+        }
+        SelectorItems::Groups(items) => {
+            let rows = selector
+                .filtered
+                .iter()
+                .map(|idx| {
+                    let group = &items[*idx];
+                    Row::new(vec![
+                        Cell::from(group.name.clone()),
+                        Cell::from(group.description.clone().unwrap_or_default()),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let table = Table::new(
+                rows,
+                vec![Constraint::Percentage(35), Constraint::Percentage(65)],
+            )
+            .header(
+                Row::new(vec!["Name", "Description"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(Block::default().borders(Borders::ALL))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+            let mut state = TableState::default();
+            if !selector.filtered.is_empty() {
+                state.select(Some(selector.index));
+            }
+            frame.render_stateful_widget(table, inner[1], &mut state);
+        }
+    }
+
+    let footer = Paragraph::new("↑↓ select | Enter apply | / filter | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[2]);
+
+    if selector.filter_active {
+        let cursor_x = inner[0].x + 3 + selector.filter.cursor() as u16;
+        let cursor_y = inner[0].y + 1;
+        frame.set_cursor(cursor_x, cursor_y);
+        *cursor_visible = true;
+    }
+}
+
+fn draw_password_gen(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    gen: &PasswordGenState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(60, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(gen.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let rows = vec![
+        format!("Length: {}", gen.length.value()),
+        format!("[{}] Uppercase (A-Z)", mark(gen.include_upper)),
+        format!("[{}] Lowercase (a-z)", mark(gen.include_lower)),
+        format!("[{}] Digits (0-9)", mark(gen.include_digits)),
+        format!(
+            "[{}] Special safe (- _ . , : ; @ +)",
+            mark(gen.include_special_safe)
+        ),
+        format!("[{}] Special full (! @ # $ % ...)", mark(gen.include_special_full)),
+        "Generate".to_string(),
+    ];
+
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let prefix = if idx == gen.index { "> " } else { "  " };
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                Span::raw(text),
+            ])
+        })
+        .collect();
+
+    let mut lines = lines;
+    if let Some(error) = &gen.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    let footer = Paragraph::new("Tab move | Space toggle | Enter apply | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+
+    if gen.index == 0 {
+        let prefix = "Length: ";
+        let cursor_x = inner[0].x + 2 + prefix.len() as u16 + gen.length.cursor() as u16;
+        let cursor_y = inner[0].y;
+        frame.set_cursor(cursor_x, cursor_y);
+        *cursor_visible = true;
+    }
+}
+
+fn draw_relation_editor(frame: &mut ratatui::Frame, area: Rect, editor: &RelationEditorState) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(editor.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let mut lines: Vec<Line> = editor
+        .options
+        .iter()
+        .enumerate()
+        .map(|(idx, option)| {
+            let marker = if option.selected { "[x]" } else { "[ ]" };
+            let prefix = if idx == editor.index { "> " } else { "  " };
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{marker} {}", option.label)),
+            ])
+        })
+        .collect();
+
+    if let Some(error) = &editor.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    let footer = Paragraph::new("Space toggle | Enter apply | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn mark(value: bool) -> char {
+    if value { 'x' } else { ' ' }
 }
