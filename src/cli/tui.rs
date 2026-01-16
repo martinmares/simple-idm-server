@@ -9,7 +9,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs},
+    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap},
     Terminal,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -28,7 +28,8 @@ enum Tab {
     Users,
     Groups,
     Clients,
-    ClaimMaps,
+    ClientClaims,
+    GroupClaims,
     UserGroups,
     GroupUsers,
 }
@@ -41,6 +42,8 @@ enum Mode {
     Selector,
     PasswordGen,
     RelationEditor,
+    ClaimEditor,
+    ClaimEntry,
 }
 
 #[derive(Clone, Debug)]
@@ -131,8 +134,6 @@ enum FormAction {
     CreateClient,
     UpdateClient(String),
     DeleteClient(String),
-    CreateClaimMap,
-    DeleteClaimMap(String),
     AddUserGroup,
     RemoveUserGroup,
 }
@@ -203,7 +204,8 @@ struct App {
     users: EntityState<UserRow>,
     groups: EntityState<GroupRow>,
     clients: EntityState<ClientRow>,
-    claim_maps: EntityState<ClaimMapRow>,
+    client_claims: EntityState<ClientClaimsRow>,
+    group_claims: EntityState<GroupClaimsRow>,
     user_groups: EntityState<UserGroupsRow>,
     group_users: EntityState<GroupUsersRow>,
     mode: Mode,
@@ -214,6 +216,8 @@ struct App {
     selector: Option<SelectorState>,
     password_gen: Option<PasswordGenState>,
     relation_editor: Option<RelationEditorState>,
+    claim_editor: Option<ClaimEditorState>,
+    claim_entry: Option<ClaimEntryState>,
     cursor_visible: bool,
 }
 
@@ -224,7 +228,8 @@ impl App {
             users: EntityState::new(),
             groups: EntityState::new(),
             clients: EntityState::new(),
-            claim_maps: EntityState::new(),
+            client_claims: EntityState::new(),
+            group_claims: EntityState::new(),
             user_groups: EntityState::new(),
             group_users: EntityState::new(),
             mode: Mode::Normal,
@@ -235,6 +240,8 @@ impl App {
             selector: None,
             password_gen: None,
             relation_editor: None,
+            claim_editor: None,
+            claim_entry: None,
             cursor_visible: false,
         }
     }
@@ -244,7 +251,8 @@ impl App {
             (Tab::Users, "Users"),
             (Tab::Groups, "Groups"),
             (Tab::Clients, "Clients"),
-            (Tab::ClaimMaps, "Claim maps"),
+            (Tab::ClientClaims, "Client claims"),
+            (Tab::GroupClaims, "Group claims"),
             (Tab::UserGroups, "User groups"),
             (Tab::GroupUsers, "Group users"),
         ]
@@ -358,10 +366,48 @@ struct GroupUsersRow {
     users: Vec<UserSummary>,
 }
 
+#[derive(Clone, Debug)]
+struct ClaimSummary {
+    id: String,
+    claim_name: String,
+    claim_value: Option<String>,
+    other_id: String,
+    other_label: String,
+}
+
+#[derive(Clone, Debug)]
+struct ClientClaimsRow {
+    client_id: String,
+    client_name: String,
+    claims: Vec<ClaimSummary>,
+}
+
+#[derive(Clone, Debug)]
+struct GroupClaimsRow {
+    group_id: String,
+    group_name: String,
+    description: Option<String>,
+    claims: Vec<ClaimSummary>,
+}
+
 #[derive(Debug)]
 enum SelectorItems {
     Users(Vec<UserRow>),
     Groups(Vec<GroupRow>),
+    Clients(Vec<ClientRow>),
+}
+
+#[derive(Debug)]
+enum SelectorKind {
+    Users,
+    Groups,
+    Clients,
+}
+
+#[derive(Debug)]
+enum SelectorTarget {
+    FormField(&'static str),
+    ClaimEntryOther,
 }
 
 #[derive(Debug)]
@@ -372,11 +418,11 @@ struct SelectorState {
     filter_active: bool,
     index: usize,
     filtered: Vec<usize>,
-    target_field: &'static str,
+    target: SelectorTarget,
 }
 
 impl SelectorState {
-    fn new_users(items: Vec<UserRow>, target_field: &'static str) -> Self {
+    fn new_users(items: Vec<UserRow>, target: SelectorTarget) -> Self {
         let mut state = Self {
             title: "Vyber uživatele".to_string(),
             items: SelectorItems::Users(items),
@@ -384,13 +430,13 @@ impl SelectorState {
             filter_active: false,
             index: 0,
             filtered: Vec::new(),
-            target_field,
+            target,
         };
         state.apply_filter();
         state
     }
 
-    fn new_groups(items: Vec<GroupRow>, target_field: &'static str) -> Self {
+    fn new_groups(items: Vec<GroupRow>, target: SelectorTarget) -> Self {
         let mut state = Self {
             title: "Vyber skupinu".to_string(),
             items: SelectorItems::Groups(items),
@@ -398,7 +444,21 @@ impl SelectorState {
             filter_active: false,
             index: 0,
             filtered: Vec::new(),
-            target_field,
+            target,
+        };
+        state.apply_filter();
+        state
+    }
+
+    fn new_clients(items: Vec<ClientRow>, target: SelectorTarget) -> Self {
+        let mut state = Self {
+            title: "Vyber klienta".to_string(),
+            items: SelectorItems::Clients(items),
+            filter: Input::default(),
+            filter_active: false,
+            index: 0,
+            filtered: Vec::new(),
+            target,
         };
         state.apply_filter();
         state
@@ -424,6 +484,16 @@ impl SelectorState {
                     if needle.is_empty()
                         || group.name.to_lowercase().contains(&needle)
                         || desc.to_lowercase().contains(&needle)
+                    {
+                        self.filtered.push(idx);
+                    }
+                }
+            }
+            SelectorItems::Clients(items) => {
+                for (idx, client) in items.iter().enumerate() {
+                    if needle.is_empty()
+                        || client.client_id.to_lowercase().contains(&needle)
+                        || client.name.to_lowercase().contains(&needle)
                     {
                         self.filtered.push(idx);
                     }
@@ -499,6 +569,76 @@ impl RelationEditorState {
             .collect()
     }
 }
+
+#[derive(Clone, Debug)]
+enum ClaimEditorMode {
+    ClientClaims {
+        client_id: String,
+        client_label: String,
+    },
+    GroupClaims {
+        group_id: String,
+        group_label: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ClaimEditorItem {
+    id: Option<String>,
+    claim_name: String,
+    claim_value: Option<String>,
+    other_id: String,
+    other_label: String,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimEditorState {
+    title: String,
+    mode: ClaimEditorMode,
+    items: Vec<ClaimEditorItem>,
+    original: Vec<ClaimEditorItem>,
+    index: usize,
+    error: Option<String>,
+}
+
+impl ClaimEditorState {
+    fn new(mode: ClaimEditorMode, items: Vec<ClaimEditorItem>) -> Self {
+        let title = match &mode {
+            ClaimEditorMode::ClientClaims { client_label, .. } => {
+                format!("Claim maps pro klienta {client_label}")
+            }
+            ClaimEditorMode::GroupClaims { group_label, .. } => {
+                format!("Claim maps pro skupinu {group_label}")
+            }
+        };
+        Self {
+            title,
+            mode,
+            original: items.clone(),
+            items,
+            index: 0,
+            error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ClaimEntryMode {
+    Add,
+    Edit(usize),
+}
+
+#[derive(Clone, Debug)]
+struct ClaimEntryState {
+    title: String,
+    mode: ClaimEntryMode,
+    claim_name: Input,
+    claim_value: Input,
+    other_id: Option<String>,
+    other_label: Option<String>,
+    index: usize,
+    error: Option<String>,
+}
 fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
     vec![
         ("authorization_code", "authorization_code"),
@@ -559,6 +699,22 @@ async fn event_loop(
             }
             continue;
         }
+        if app.mode == Mode::ClaimEditor {
+            let handled = handle_claim_editor_event(app, event, http).await?;
+            if handled == ClaimEditorResult::Applied || handled == ClaimEditorResult::Cancelled {
+                app.mode = Mode::Normal;
+                app.claim_editor = None;
+                refresh_active_tab(app, http).await?;
+            }
+            continue;
+        }
+        if app.mode == Mode::ClaimEntry {
+            let handled = handle_claim_entry_event(app, event, http).await?;
+            if handled == ClaimEntryResult::Applied || handled == ClaimEntryResult::Cancelled {
+                app.mode = Mode::ClaimEditor;
+            }
+            continue;
+        }
         if app.mode == Mode::PasswordGen {
             let handled = handle_password_gen_event(app, event)?;
             if handled == PasswordGenResult::Applied || handled == PasswordGenResult::Cancelled {
@@ -569,7 +725,11 @@ async fn event_loop(
         if app.mode == Mode::Selector {
             let handled = handle_selector_event(app, event)?;
             if handled == SelectorResult::Applied || handled == SelectorResult::Cancelled {
-                app.mode = Mode::Form;
+                if app.claim_entry.is_some() {
+                    app.mode = Mode::ClaimEntry;
+                } else {
+                    app.mode = Mode::Form;
+                }
             }
             continue;
         }
@@ -669,6 +829,20 @@ enum RelationResult {
     Cancelled,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimEditorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimEntryResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
 fn handle_picker_event(app: &mut App, event: Event) -> Result<PickerResult> {
     let Some(picker) = app.picker.as_mut() else {
         return Ok(PickerResult::Cancelled);
@@ -723,6 +897,7 @@ async fn handle_relation_event(
 
     match key.code {
         KeyCode::Esc => {
+            app.pending_select = Some(relation_hint(&editor.mode));
             app.relation_editor = None;
             return Ok(RelationResult::Cancelled);
         }
@@ -758,6 +933,207 @@ async fn handle_relation_event(
     }
 
     Ok(RelationResult::Continue)
+}
+
+async fn handle_claim_editor_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClaimEditorResult> {
+    let Some(editor) = app.claim_editor.as_mut() else {
+        return Ok(ClaimEditorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimEditorResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.pending_select = Some(claim_editor_hint(&editor.mode));
+            return Ok(ClaimEditorResult::Cancelled);
+        }
+        KeyCode::Up => {
+            editor.index = editor.index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            editor.index = (editor.index + 1).min(editor.items.len().saturating_sub(1));
+        }
+        KeyCode::Char('a') => {
+            app.claim_entry = Some(ClaimEntryState {
+                title: "Přidat claim map".to_string(),
+                mode: ClaimEntryMode::Add,
+                claim_name: Input::default(),
+                claim_value: Input::default(),
+                other_id: None,
+                other_label: None,
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::ClaimEntry;
+            return Ok(ClaimEditorResult::Continue);
+        }
+        KeyCode::Char('e') => {
+            if let Some(item) = editor.items.get(editor.index).cloned() {
+                app.claim_entry = Some(ClaimEntryState {
+                    title: "Upravit claim map".to_string(),
+                    mode: ClaimEntryMode::Edit(editor.index),
+                    claim_name: input_with_value(item.claim_name),
+                    claim_value: input_with_value(item.claim_value.unwrap_or_default()),
+                    other_id: Some(item.other_id),
+                    other_label: Some(item.other_label),
+                    index: 0,
+                    error: None,
+                });
+                app.mode = Mode::ClaimEntry;
+            }
+            return Ok(ClaimEditorResult::Continue);
+        }
+        KeyCode::Char('d') => {
+            if !editor.items.is_empty() {
+                editor.items.remove(editor.index);
+                if editor.index >= editor.items.len() && !editor.items.is_empty() {
+                    editor.index = editor.items.len() - 1;
+                }
+            }
+        }
+        KeyCode::Enter => {
+            if let Err(err) = apply_claim_changes(editor, http).await {
+                editor.error = Some(err.to_string());
+                return Ok(ClaimEditorResult::Continue);
+            }
+            app.pending_select = Some(claim_editor_hint(&editor.mode));
+            app.claim_editor = None;
+            return Ok(ClaimEditorResult::Applied);
+        }
+        _ => {}
+    }
+
+    Ok(ClaimEditorResult::Continue)
+}
+
+async fn handle_claim_entry_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClaimEntryResult> {
+    let Some(entry) = app.claim_entry.as_mut() else {
+        return Ok(ClaimEntryResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimEntryResult::Continue);
+    };
+
+    let mode = app
+        .claim_editor
+        .as_ref()
+        .map(|editor| editor.mode.clone());
+
+    match key.code {
+        KeyCode::Esc => {
+            app.claim_entry = None;
+            return Ok(ClaimEntryResult::Cancelled);
+        }
+        KeyCode::Tab => {
+            entry.index = (entry.index + 1) % 3;
+            return Ok(ClaimEntryResult::Continue);
+        }
+        KeyCode::BackTab => {
+            if entry.index == 0 {
+                entry.index = 2;
+            } else {
+                entry.index -= 1;
+            }
+            return Ok(ClaimEntryResult::Continue);
+        }
+        KeyCode::Enter => {
+            if entry.index < 2 {
+                entry.index += 1;
+                return Ok(ClaimEntryResult::Continue);
+            }
+            let claim_name = entry.claim_name.value().trim().to_string();
+            if claim_name.is_empty() {
+                entry.error = Some("claim_name je povinný".to_string());
+                return Ok(ClaimEntryResult::Continue);
+            }
+            let Some(other_id) = entry.other_id.clone() else {
+                entry.error = Some("Vyber klienta nebo skupinu".to_string());
+                return Ok(ClaimEntryResult::Continue);
+            };
+            let claim_value = entry.claim_value.value().trim().to_string();
+            let claim_value = if claim_value.is_empty() {
+                None
+            } else {
+                Some(claim_value)
+            };
+            let other_label = entry
+                .other_label
+                .clone()
+                .unwrap_or_else(|| other_id.clone());
+
+            if let Some(editor) = app.claim_editor.as_mut() {
+                match entry.mode {
+                    ClaimEntryMode::Add => {
+                        editor.items.push(ClaimEditorItem {
+                            id: None,
+                            claim_name,
+                            claim_value,
+                            other_id,
+                            other_label,
+                        });
+                        editor.index = editor.items.len().saturating_sub(1);
+                    }
+                    ClaimEntryMode::Edit(idx) => {
+                        if let Some(item) = editor.items.get_mut(idx) {
+                            item.claim_name = claim_name;
+                            item.claim_value = claim_value;
+                            item.other_id = other_id;
+                            item.other_label = other_label;
+                        }
+                        editor.index = idx;
+                    }
+                }
+            }
+            app.claim_entry = None;
+            return Ok(ClaimEntryResult::Applied);
+        }
+        KeyCode::Char('g') => {
+            if matches!(mode, Some(ClaimEditorMode::ClientClaims { .. })) {
+                entry.index = 2;
+                open_selector(app, http, SelectorKind::Groups, SelectorTarget::ClaimEntryOther)
+                    .await?;
+                return Ok(ClaimEntryResult::Continue);
+            }
+            if entry.index == 0 {
+                entry.claim_name.handle_event(&event);
+            } else if entry.index == 1 {
+                entry.claim_value.handle_event(&event);
+            }
+        }
+        KeyCode::Char('c') => {
+            if matches!(mode, Some(ClaimEditorMode::GroupClaims { .. })) {
+                entry.index = 2;
+                open_selector(app, http, SelectorKind::Clients, SelectorTarget::ClaimEntryOther)
+                    .await?;
+                return Ok(ClaimEntryResult::Continue);
+            }
+            if entry.index == 0 {
+                entry.claim_name.handle_event(&event);
+            } else if entry.index == 1 {
+                entry.claim_value.handle_event(&event);
+            }
+        }
+        _ => {
+            if entry.index == 0 {
+                entry.claim_name.handle_event(&event);
+            } else if entry.index == 1 {
+                entry.claim_value.handle_event(&event);
+            }
+        }
+    }
+
+    Ok(ClaimEntryResult::Continue)
 }
 
 fn handle_selector_event(app: &mut App, event: Event) -> Result<SelectorResult> {
@@ -806,12 +1182,32 @@ fn handle_selector_event(app: &mut App, event: Event) -> Result<SelectorResult> 
             let Some(selected_idx) = selector.selected_index() else {
                 return Ok(SelectorResult::Continue);
             };
-            let value = match &selector.items {
-                SelectorItems::Users(items) => items[selected_idx].id.clone(),
-                SelectorItems::Groups(items) => items[selected_idx].id.clone(),
+            let (value, label) = match &selector.items {
+                SelectorItems::Users(items) => (
+                    items[selected_idx].id.clone(),
+                    items[selected_idx].username.clone(),
+                ),
+                SelectorItems::Groups(items) => (
+                    items[selected_idx].id.clone(),
+                    items[selected_idx].name.clone(),
+                ),
+                SelectorItems::Clients(items) => (
+                    items[selected_idx].id.clone(),
+                    items[selected_idx].client_id.clone(),
+                ),
             };
-            if let Some(form) = app.form.as_mut() {
-                set_field_value(form, selector.target_field, value);
+            match &selector.target {
+                SelectorTarget::FormField(field) => {
+                    if let Some(form) = app.form.as_mut() {
+                        set_field_value(form, field, value);
+                    }
+                }
+                SelectorTarget::ClaimEntryOther => {
+                    if let Some(entry) = app.claim_entry.as_mut() {
+                        entry.other_id = Some(value);
+                        entry.other_label = Some(label);
+                    }
+                }
             }
             app.selector = None;
             return Ok(SelectorResult::Applied);
@@ -891,7 +1287,8 @@ fn select_next(app: &mut App) {
         Tab::Users => app.users.select_next(),
         Tab::Groups => app.groups.select_next(),
         Tab::Clients => app.clients.select_next(),
-        Tab::ClaimMaps => app.claim_maps.select_next(),
+        Tab::ClientClaims => app.client_claims.select_next(),
+        Tab::GroupClaims => app.group_claims.select_next(),
         Tab::UserGroups => app.user_groups.select_next(),
         Tab::GroupUsers => app.group_users.select_next(),
     }
@@ -902,7 +1299,8 @@ fn select_prev(app: &mut App) {
         Tab::Users => app.users.select_prev(),
         Tab::Groups => app.groups.select_prev(),
         Tab::Clients => app.clients.select_prev(),
-        Tab::ClaimMaps => app.claim_maps.select_prev(),
+        Tab::ClientClaims => app.client_claims.select_prev(),
+        Tab::GroupClaims => app.group_claims.select_prev(),
         Tab::UserGroups => app.user_groups.select_prev(),
         Tab::GroupUsers => app.group_users.select_prev(),
     }
@@ -935,7 +1333,8 @@ async fn page_next(app: &mut App, http: &HttpClient) -> Result<()> {
         Tab::Users => app.users.page += 1,
         Tab::Groups => app.groups.page += 1,
         Tab::Clients => app.clients.page += 1,
-        Tab::ClaimMaps => app.claim_maps.page += 1,
+        Tab::ClientClaims => app.client_claims.page += 1,
+        Tab::GroupClaims => app.group_claims.page += 1,
         Tab::UserGroups => app.user_groups.page += 1,
         Tab::GroupUsers => app.group_users.page += 1,
     }
@@ -947,7 +1346,8 @@ async fn page_prev(app: &mut App, http: &HttpClient) -> Result<()> {
         Tab::Users => app.users.page = app.users.page.saturating_sub(1).max(1),
         Tab::Groups => app.groups.page = app.groups.page.saturating_sub(1).max(1),
         Tab::Clients => app.clients.page = app.clients.page.saturating_sub(1).max(1),
-        Tab::ClaimMaps => app.claim_maps.page = app.claim_maps.page.saturating_sub(1).max(1),
+        Tab::ClientClaims => app.client_claims.page = app.client_claims.page.saturating_sub(1).max(1),
+        Tab::GroupClaims => app.group_claims.page = app.group_claims.page.saturating_sub(1).max(1),
         Tab::UserGroups => app.user_groups.page = app.user_groups.page.saturating_sub(1).max(1),
         Tab::GroupUsers => app.group_users.page = app.group_users.page.saturating_sub(1).max(1),
     }
@@ -983,11 +1383,20 @@ async fn refresh_active_tab(app: &mut App, http: &HttpClient) -> Result<()> {
                 Err(err) => app.set_status(err.to_string()),
             }
         }
-        Tab::ClaimMaps => {
-            match fetch_claim_maps(http, app.claim_maps.page).await {
-                Ok(maps) => {
-                    app.claim_maps.items = maps;
-                    apply_selection(app, EntityKind::ClaimMaps);
+        Tab::ClientClaims => {
+            match fetch_client_claims(http).await {
+                Ok(rows) => {
+                    app.client_claims.items = rows;
+                    apply_selection(app, EntityKind::ClientClaims);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::GroupClaims => {
+            match fetch_group_claims(http).await {
+                Ok(rows) => {
+                    app.group_claims.items = rows;
+                    apply_selection(app, EntityKind::GroupClaims);
                 }
                 Err(err) => app.set_status(err.to_string()),
             }
@@ -1019,7 +1428,8 @@ enum EntityKind {
     Users,
     Groups,
     Clients,
-    ClaimMaps,
+    ClientClaims,
+    GroupClaims,
     UserGroups,
     GroupUsers,
 }
@@ -1045,17 +1455,6 @@ fn apply_selection(app: &mut App, kind: EntityKind) {
             EntityKind::Clients if hint.tab == Tab::Clients => {
                 if let Some(idx) = app.clients.items.iter().position(|c| c.id == hint.id) {
                     app.clients.state.select(Some(idx));
-                    matched = true;
-                }
-            }
-            EntityKind::ClaimMaps if hint.tab == Tab::ClaimMaps => {
-                if let Some(idx) = app
-                    .claim_maps
-                    .items
-                    .iter()
-                    .position(|c| c.id == hint.id)
-                {
-                    app.claim_maps.state.select(Some(idx));
                     matched = true;
                 }
             }
@@ -1101,6 +1500,48 @@ fn apply_selection(app: &mut App, kind: EntityKind) {
                     }
                 }
             }
+            EntityKind::ClientClaims if hint.tab == Tab::ClientClaims => {
+                if let Some(idx) = app
+                    .client_claims
+                    .items
+                    .iter()
+                    .position(|row| row.client_id == hint.id)
+                {
+                    app.client_claims.state.select(Some(idx));
+                    matched = true;
+                } else if let Some(label) = &hint.label {
+                    if let Some(idx) = app
+                        .client_claims
+                        .items
+                        .iter()
+                        .position(|row| row.client_name == *label)
+                    {
+                        app.client_claims.state.select(Some(idx));
+                        matched = true;
+                    }
+                }
+            }
+            EntityKind::GroupClaims if hint.tab == Tab::GroupClaims => {
+                if let Some(idx) = app
+                    .group_claims
+                    .items
+                    .iter()
+                    .position(|row| row.group_id == hint.id)
+                {
+                    app.group_claims.state.select(Some(idx));
+                    matched = true;
+                } else if let Some(label) = &hint.label {
+                    if let Some(idx) = app
+                        .group_claims
+                        .items
+                        .iter()
+                        .position(|row| row.group_name == *label)
+                    {
+                        app.group_claims.state.select(Some(idx));
+                        matched = true;
+                    }
+                }
+            }
             _ => {}
         }
         app.pending_select = None;
@@ -1111,7 +1552,8 @@ fn apply_selection(app: &mut App, kind: EntityKind) {
             EntityKind::Users => app.users.select_first(),
             EntityKind::Groups => app.groups.select_first(),
             EntityKind::Clients => app.clients.select_first(),
-            EntityKind::ClaimMaps => app.claim_maps.select_first(),
+            EntityKind::ClientClaims => app.client_claims.select_first(),
+            EntityKind::GroupClaims => app.group_claims.select_first(),
             EntityKind::UserGroups => app.user_groups.select_first(),
             EntityKind::GroupUsers => app.group_users.select_first(),
         }
@@ -1140,16 +1582,34 @@ async fn fetch_groups_for_selector(http: &HttpClient) -> Result<Vec<GroupRow>> {
     serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse groups: {e}"))
 }
 
+async fn fetch_clients_for_selector(http: &HttpClient) -> Result<Vec<ClientRow>> {
+    let body = http.get("/admin/oauth-clients?page=1&limit=1000").await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse clients: {e}"))
+}
+
 async fn fetch_clients(http: &HttpClient, page: usize) -> Result<Vec<ClientRow>> {
     let path = format!("/admin/oauth-clients?page={page}&limit={PAGE_SIZE}");
     let body = http.get(&path).await?;
     serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse clients: {e}"))
 }
 
-async fn fetch_claim_maps(http: &HttpClient, page: usize) -> Result<Vec<ClaimMapRow>> {
-    let path = format!("/admin/claim-maps?page={page}&limit={PAGE_SIZE}");
-    let body = http.get(&path).await?;
+async fn fetch_claim_maps_flat(http: &HttpClient) -> Result<Vec<ClaimMapRow>> {
+    let body = http.get("/admin/claim-maps?page=1&limit=2000").await?;
     serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse claim maps: {e}"))
+}
+
+async fn fetch_client_claims(http: &HttpClient) -> Result<Vec<ClientClaimsRow>> {
+    let claim_maps = fetch_claim_maps_flat(http).await?;
+    let clients = fetch_clients_for_selector(http).await?;
+    let groups = fetch_groups_for_selector(http).await?;
+    Ok(aggregate_client_claims(claim_maps, clients, groups))
+}
+
+async fn fetch_group_claims(http: &HttpClient) -> Result<Vec<GroupClaimsRow>> {
+    let claim_maps = fetch_claim_maps_flat(http).await?;
+    let clients = fetch_clients_for_selector(http).await?;
+    let groups = fetch_groups_for_selector(http).await?;
+    Ok(aggregate_group_claims(claim_maps, clients, groups))
 }
 
 async fn fetch_user_groups(http: &HttpClient) -> Result<Vec<UserGroupsRow>> {
@@ -1207,20 +1667,12 @@ fn open_create_form(app: &mut App) -> Result<()> {
             index: 0,
             error: None,
         },
-        Tab::ClaimMaps => FormState {
-            title: "Create claim map".to_string(),
-            action: FormAction::CreateClaimMap,
-            fields: vec![
-                FormField::new("client_id", String::new()),
-                FormField::new("group_id", String::new()),
-                FormField::new("claim_name", String::new()),
-                FormField::new("claim_value", String::new()).optional(),
-            ],
-            index: 0,
-            error: None,
-        },
+        Tab::ClientClaims | Tab::GroupClaims => {
+            open_claim_editor(app)?;
+            return Ok(());
+        }
         Tab::UserGroups => FormState {
-            title: "Add user to group".to_string(),
+            title: "Create new user-group".to_string(),
             action: FormAction::AddUserGroup,
             fields: vec![
                 FormField::new("user_id", String::new()),
@@ -1230,19 +1682,12 @@ fn open_create_form(app: &mut App) -> Result<()> {
             error: None,
         },
         Tab::GroupUsers => {
-            let mut fields = vec![
-                FormField::new("user_id", String::new()),
+            let fields = vec![
                 FormField::new("group_id", String::new()),
+                FormField::new("user_id", String::new()),
             ];
-            if let Some(row) = app
-                .group_users
-                .selected()
-                .and_then(|idx| app.group_users.items.get(idx))
-            {
-                fields[1] = FormField::new("group_id", row.group_id.clone());
-            }
             FormState {
-                title: "Add user to group".to_string(),
+                title: "Create new group-user".to_string(),
                 action: FormAction::AddUserGroup,
                 fields,
                 index: 0,
@@ -1302,8 +1747,9 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 error: None,
             }
         }
-        Tab::ClaimMaps => {
-            return Err(anyhow!("Claim maps cannot be updated"));
+        Tab::ClientClaims | Tab::GroupClaims => {
+            open_claim_editor(app)?;
+            return Ok(());
         }
         Tab::UserGroups => {
             let row = selected_item(&app.user_groups.items, app.user_groups.selected())?;
@@ -1385,15 +1831,8 @@ fn open_delete_form(app: &mut App) -> Result<()> {
                 error: None,
             }
         }
-        Tab::ClaimMaps => {
-            let map = selected_item(&app.claim_maps.items, app.claim_maps.selected())?;
-            FormState {
-                title: "Delete claim map".to_string(),
-                action: FormAction::DeleteClaimMap(map.id.clone()),
-                fields: vec![FormField::boolean("confirm", false)],
-                index: 0,
-                error: None,
-            }
+        Tab::ClientClaims | Tab::GroupClaims => {
+            return Err(anyhow!("Use edit to manage claim maps"));
         }
         Tab::UserGroups => {
             return Err(anyhow!("Use remove to delete user-group mappings"));
@@ -1483,6 +1922,57 @@ fn open_remove_user_group(app: &mut App) -> Result<()> {
     Ok(())
 }
 
+fn open_claim_editor(app: &mut App) -> Result<()> {
+    match app.tab {
+        Tab::ClientClaims => {
+            let row = selected_item(&app.client_claims.items, app.client_claims.selected())?;
+            let items = row
+                .claims
+                .iter()
+                .map(|claim| ClaimEditorItem {
+                    id: Some(claim.id.clone()),
+                    claim_name: claim.claim_name.clone(),
+                    claim_value: claim.claim_value.clone(),
+                    other_id: claim.other_id.clone(),
+                    other_label: claim.other_label.clone(),
+                })
+                .collect::<Vec<_>>();
+            app.claim_editor = Some(ClaimEditorState::new(
+                ClaimEditorMode::ClientClaims {
+                    client_id: row.client_id.clone(),
+                    client_label: row.client_name.clone(),
+                },
+                items,
+            ));
+            app.mode = Mode::ClaimEditor;
+        }
+        Tab::GroupClaims => {
+            let row = selected_item(&app.group_claims.items, app.group_claims.selected())?;
+            let items = row
+                .claims
+                .iter()
+                .map(|claim| ClaimEditorItem {
+                    id: Some(claim.id.clone()),
+                    claim_name: claim.claim_name.clone(),
+                    claim_value: claim.claim_value.clone(),
+                    other_id: claim.other_id.clone(),
+                    other_label: claim.other_label.clone(),
+                })
+                .collect::<Vec<_>>();
+            app.claim_editor = Some(ClaimEditorState::new(
+                ClaimEditorMode::GroupClaims {
+                    group_id: row.group_id.clone(),
+                    group_label: row.group_name.clone(),
+                },
+                items,
+            ));
+            app.mode = Mode::ClaimEditor;
+        }
+        _ => return Err(anyhow!("Claim editor is not available for this view")),
+    }
+    Ok(())
+}
+
 fn selected_item<'a, T>(items: &'a [T], idx: Option<usize>) -> Result<&'a T> {
     idx.and_then(|i| items.get(i))
         .ok_or_else(|| anyhow!("No row selected"))
@@ -1512,7 +2002,7 @@ async fn handle_form_event(
         form.action,
         FormAction::AddUserGroup | FormAction::RemoveUserGroup
     );
-    let mut request_selector: Option<&'static str> = None;
+    let mut request_selector: Option<(SelectorKind, SelectorTarget)> = None;
 
     match key.code {
         KeyCode::Esc => return Ok(FormResult::Cancelled),
@@ -1551,7 +2041,10 @@ async fn handle_form_event(
         KeyCode::Char('g') => {
             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                 if is_add_remove && label == Some("group_id") {
-                    request_selector = Some("group_id");
+                    request_selector = Some((
+                        SelectorKind::Groups,
+                        SelectorTarget::FormField("group_id"),
+                    ));
                 } else if label == Some("grant_types") {
                     let values = split_csv(Some(form.fields[form.index].value()));
                     app.picker = Some(PickerState::new_grant_types(&values));
@@ -1563,16 +2056,17 @@ async fn handle_form_event(
         KeyCode::Char('u') => {
             if !key.modifiers.contains(KeyModifiers::CONTROL) {
                 if is_add_remove && label == Some("user_id") {
-                    request_selector = Some("user_id");
+                    request_selector =
+                        Some((SelectorKind::Users, SelectorTarget::FormField("user_id")));
                 }
             }
         }
         _ => {}
     }
 
-    if let Some(target) = request_selector {
+    if let Some((kind, target)) = request_selector {
         let _ = form;
-        if let Err(err) = open_selector(app, http, target).await {
+        if let Err(err) = open_selector(app, http, kind, target).await {
             if let Some(form) = app.form.as_mut() {
                 form.error = Some(err.to_string());
             }
@@ -1755,33 +2249,6 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 select_id: None,
             })
         }
-        FormAction::CreateClaimMap => {
-            let payload = json!({
-                "client_id": field_value(form, "client_id")?,
-                "group_id": field_value(form, "group_id")?,
-                "claim_name": field_value(form, "claim_name")?,
-                "claim_value": field_optional(form, "claim_value"),
-            });
-            let body = http.post_json("/admin/claim-maps", payload).await?;
-            let created: ClaimMapRow =
-                serde_json::from_str(&body).context("Failed to parse claim map response")?;
-            Ok(SubmitResult {
-                message: "Claim map created".to_string(),
-                select_id: Some(SelectHint {
-                    tab: Tab::ClaimMaps,
-                    id: created.id,
-                    label: Some(created.claim_name.clone()),
-                }),
-            })
-        }
-        FormAction::DeleteClaimMap(id) => {
-            ensure_confirm(form)?;
-            http.delete(&format!("/admin/claim-maps/{id}")).await?;
-            Ok(SubmitResult {
-                message: "Claim map deleted".to_string(),
-                select_id: None,
-            })
-        }
         FormAction::AddUserGroup => {
             let user_id = field_value(form, "user_id")?;
             let group_id = field_value(form, "group_id")?;
@@ -1843,20 +2310,27 @@ fn set_field_value(form: &mut FormState, name: &str, value: String) {
     }
 }
 
-async fn open_selector(app: &mut App, http: &HttpClient, target_field: &'static str) -> Result<()> {
-    match target_field {
-        "user_id" => {
+async fn open_selector(
+    app: &mut App,
+    http: &HttpClient,
+    kind: SelectorKind,
+    target: SelectorTarget,
+) -> Result<()> {
+    match kind {
+        SelectorKind::Users => {
             let users = fetch_users_for_selector(http).await?;
-            app.selector = Some(SelectorState::new_users(users, target_field));
-            app.mode = Mode::Selector;
+            app.selector = Some(SelectorState::new_users(users, target));
         }
-        "group_id" => {
+        SelectorKind::Groups => {
             let groups = fetch_groups_for_selector(http).await?;
-            app.selector = Some(SelectorState::new_groups(groups, target_field));
-            app.mode = Mode::Selector;
+            app.selector = Some(SelectorState::new_groups(groups, target));
         }
-        _ => {}
+        SelectorKind::Clients => {
+            let clients = fetch_clients_for_selector(http).await?;
+            app.selector = Some(SelectorState::new_clients(clients, target));
+        }
     }
+    app.mode = Mode::Selector;
     Ok(())
 }
 
@@ -1962,6 +2436,94 @@ fn aggregate_group_users(rows: Vec<UserGroupRow>, groups: Vec<GroupRow>) -> Vec<
     values
 }
 
+fn aggregate_client_claims(
+    rows: Vec<ClaimMapRow>,
+    clients: Vec<ClientRow>,
+    groups: Vec<GroupRow>,
+) -> Vec<ClientClaimsRow> {
+    let mut client_meta: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for client in clients {
+        client_meta.insert(client.id.clone(), client.name.clone());
+    }
+    let mut group_meta: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for group in groups {
+        group_meta.insert(group.id.clone(), group.name.clone());
+    }
+
+    let mut map: std::collections::BTreeMap<String, ClientClaimsRow> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        let client_name = client_meta
+            .get(&row.client_id)
+            .cloned()
+            .unwrap_or_else(|| row.client_id.clone());
+        let group_name = group_meta
+            .get(&row.group_id)
+            .cloned()
+            .unwrap_or_else(|| row.group_id.clone());
+        let entry = map.entry(row.client_id.clone()).or_insert_with(|| ClientClaimsRow {
+            client_id: row.client_id.clone(),
+            client_name,
+            claims: Vec::new(),
+        });
+        entry.claims.push(ClaimSummary {
+            id: row.id.clone(),
+            claim_name: row.claim_name.clone(),
+            claim_value: row.claim_value.clone(),
+            other_id: row.group_id.clone(),
+            other_label: group_name,
+        });
+    }
+    let mut values: Vec<ClientClaimsRow> = map.into_values().collect();
+    values.sort_by(|a, b| a.client_name.cmp(&b.client_name));
+    values
+}
+
+fn aggregate_group_claims(
+    rows: Vec<ClaimMapRow>,
+    clients: Vec<ClientRow>,
+    groups: Vec<GroupRow>,
+) -> Vec<GroupClaimsRow> {
+    let mut client_meta: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for client in clients {
+        client_meta.insert(client.id.clone(), client.name.clone());
+    }
+    let mut group_meta: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
+    for group in groups {
+        group_meta.insert(group.id.clone(), (group.name.clone(), group.description.clone()));
+    }
+
+    let mut map: std::collections::BTreeMap<String, GroupClaimsRow> =
+        std::collections::BTreeMap::new();
+    for row in rows {
+        let (group_name, description) = group_meta
+            .get(&row.group_id)
+            .cloned()
+            .unwrap_or((row.group_id.clone(), None));
+        let client_name = client_meta
+            .get(&row.client_id)
+            .cloned()
+            .unwrap_or_else(|| row.client_id.clone());
+        let entry = map.entry(row.group_id.clone()).or_insert_with(|| GroupClaimsRow {
+            group_id: row.group_id.clone(),
+            group_name,
+            description,
+            claims: Vec::new(),
+        });
+        entry.claims.push(ClaimSummary {
+            id: row.id.clone(),
+            claim_name: row.claim_name.clone(),
+            claim_value: row.claim_value.clone(),
+            other_id: row.client_id.clone(),
+            other_label: client_name,
+        });
+    }
+    let mut values: Vec<GroupClaimsRow> = map.into_values().collect();
+    values.sort_by(|a, b| a.group_name.cmp(&b.group_name));
+    values
+}
+
 fn generate_password(gen: &PasswordGenState) -> Result<String> {
     let length: usize = gen
         .length
@@ -2041,6 +2603,112 @@ async fn apply_relation_changes(
     Ok(())
 }
 
+fn relation_hint(mode: &RelationMode) -> SelectHint {
+    match mode {
+        RelationMode::UserGroups { user_id, username } => SelectHint {
+            tab: Tab::UserGroups,
+            id: user_id.clone(),
+            label: Some(username.clone()),
+        },
+        RelationMode::GroupUsers { group_id, group_name } => SelectHint {
+            tab: Tab::GroupUsers,
+            id: group_id.clone(),
+            label: Some(group_name.clone()),
+        },
+    }
+}
+
+async fn apply_claim_changes(editor: &ClaimEditorState, http: &HttpClient) -> Result<()> {
+    let mut original_map: std::collections::HashMap<String, ClaimEditorItem> =
+        std::collections::HashMap::new();
+    for item in &editor.original {
+        if let Some(id) = &item.id {
+            original_map.insert(id.clone(), item.clone());
+        }
+    }
+
+    let mut current_map: std::collections::HashMap<String, ClaimEditorItem> =
+        std::collections::HashMap::new();
+    for item in &editor.items {
+        if let Some(id) = &item.id {
+            current_map.insert(id.clone(), item.clone());
+        }
+    }
+
+    let original_ids: std::collections::HashSet<String> = original_map.keys().cloned().collect();
+    let current_ids: std::collections::HashSet<String> = current_map.keys().cloned().collect();
+
+    let mut to_delete: Vec<String> = original_ids
+        .difference(&current_ids)
+        .cloned()
+        .collect();
+    let mut to_create: Vec<ClaimEditorItem> = Vec::new();
+
+    for item in &editor.items {
+        match &item.id {
+            None => to_create.push(item.clone()),
+            Some(id) => {
+                if let Some(original) = original_map.get(id) {
+                    let changed = original.claim_name != item.claim_name
+                        || original.claim_value != item.claim_value
+                        || original.other_id != item.other_id;
+                    if changed {
+                        to_delete.push(id.clone());
+                        to_create.push(item.clone());
+                    }
+                } else {
+                    to_create.push(item.clone());
+                }
+            }
+        }
+    }
+
+    for id in to_delete {
+        http.delete(&format!("/admin/claim-maps/{id}")).await?;
+    }
+
+    for item in to_create {
+        let payload = match &editor.mode {
+            ClaimEditorMode::ClientClaims { client_id, .. } => json!({
+                "client_id": client_id,
+                "group_id": item.other_id,
+                "claim_name": item.claim_name,
+                "claim_value": item.claim_value,
+            }),
+            ClaimEditorMode::GroupClaims { group_id, .. } => json!({
+                "client_id": item.other_id,
+                "group_id": group_id,
+                "claim_name": item.claim_name,
+                "claim_value": item.claim_value,
+            }),
+        };
+        http.post_json("/admin/claim-maps", payload).await?;
+    }
+
+    Ok(())
+}
+
+fn claim_editor_hint(mode: &ClaimEditorMode) -> SelectHint {
+    match mode {
+        ClaimEditorMode::ClientClaims {
+            client_id,
+            client_label,
+        } => SelectHint {
+            tab: Tab::ClientClaims,
+            id: client_id.clone(),
+            label: Some(client_label.clone()),
+        },
+        ClaimEditorMode::GroupClaims {
+            group_id,
+            group_label,
+        } => SelectHint {
+            tab: Tab::GroupClaims,
+            id: group_id.clone(),
+            label: Some(group_label.clone()),
+        },
+    }
+}
+
 fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     let mut cursor_visible = false;
     let size = frame.size();
@@ -2058,6 +2726,18 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     }
     if let Some(editor) = &app.relation_editor {
         draw_relation_editor(frame, size, editor);
+    }
+    if let Some(editor) = &app.claim_editor {
+        draw_claim_editor(frame, size, editor);
+    }
+    if let Some(entry) = &app.claim_entry {
+        draw_claim_entry(frame, size, app, entry, &mut cursor_visible);
+    }
+
+    if app.form.is_none() {
+        if let Some(selector) = &app.selector {
+            draw_selector(frame, size, selector, &mut cursor_visible);
+        }
     }
 
     app.cursor_visible = cursor_visible;
@@ -2147,25 +2827,47 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 Constraint::Percentage(30),
             ],
         ),
-        Tab::ClaimMaps => (
-            Row::new(vec!["Claim", "Client", "Group"]),
-            app.claim_maps
+        Tab::ClientClaims => (
+            Row::new(vec!["Client", "Claims"]),
+            app.client_claims
                 .items
                 .iter()
-                .map(|c| {
-                    Row::new(vec![
-                        Cell::from(c.claim_name.clone()),
-                        Cell::from(c.client_id.clone()),
-                        Cell::from(c.group_id.clone()),
-                    ])
+                .map(|row| {
+                    let claims = row
+                        .claims
+                        .iter()
+                        .map(|c| match &c.claim_value {
+                            Some(value) => format!("{}={} ({})", c.claim_name, value, c.other_label),
+                            None => format!("{} ({})", c.claim_name, c.other_label),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Row::new(vec![Cell::from(row.client_name.clone()), Cell::from(claims)])
                 })
                 .collect::<Vec<_>>(),
-            &mut app.claim_maps.state,
-            vec![
-                Constraint::Percentage(30),
-                Constraint::Percentage(35),
-                Constraint::Percentage(35),
-            ],
+            &mut app.client_claims.state,
+            vec![Constraint::Percentage(30), Constraint::Percentage(70)],
+        ),
+        Tab::GroupClaims => (
+            Row::new(vec!["Group", "Claims"]),
+            app.group_claims
+                .items
+                .iter()
+                .map(|row| {
+                    let claims = row
+                        .claims
+                        .iter()
+                        .map(|c| match &c.claim_value {
+                            Some(value) => format!("{}={} ({})", c.claim_name, value, c.other_label),
+                            None => format!("{} ({})", c.claim_name, c.other_label),
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Row::new(vec![Cell::from(row.group_name.clone()), Cell::from(claims)])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.group_claims.state,
+            vec![Constraint::Percentage(30), Constraint::Percentage(70)],
         ),
         Tab::UserGroups => (
             Row::new(vec!["User", "Groups"]),
@@ -2230,7 +2932,8 @@ fn draw_details(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         Tab::Users => detail_users(app),
         Tab::Groups => detail_groups(app),
         Tab::Clients => detail_clients(app),
-        Tab::ClaimMaps => detail_claim_maps(app),
+        Tab::ClientClaims => detail_client_claims(app),
+        Tab::GroupClaims => detail_group_claims(app),
         Tab::UserGroups => detail_user_groups(app),
         Tab::GroupUsers => detail_group_users(app),
     };
@@ -2271,7 +2974,7 @@ fn draw_form(
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .constraints([Constraint::Min(1), Constraint::Length(3), Constraint::Length(2)])
         .margin(1)
         .split(popup);
 
@@ -2367,6 +3070,8 @@ fn draw_form(
         && app.picker.is_none()
         && app.password_gen.is_none()
         && app.relation_editor.is_none()
+        && app.claim_editor.is_none()
+        && app.claim_entry.is_none()
     {
         if let Some((x, y)) = cursor {
             frame.set_cursor(x, y);
@@ -2394,7 +3099,8 @@ fn tab_title(tab: Tab) -> &'static str {
         Tab::Users => "Users",
         Tab::Groups => "Groups",
         Tab::Clients => "Clients",
-        Tab::ClaimMaps => "Claim maps",
+        Tab::ClientClaims => "Client claims",
+        Tab::GroupClaims => "Group claims",
         Tab::UserGroups => "User groups",
         Tab::GroupUsers => "Group users",
     }
@@ -2405,7 +3111,8 @@ fn active_page(app: &App) -> usize {
         Tab::Users => app.users.page,
         Tab::Groups => app.groups.page,
         Tab::Clients => app.clients.page,
-        Tab::ClaimMaps => app.claim_maps.page,
+        Tab::ClientClaims => app.client_claims.page,
+        Tab::GroupClaims => app.group_claims.page,
         Tab::UserGroups => app.user_groups.page,
         Tab::GroupUsers => app.group_users.page,
     }
@@ -2452,21 +3159,54 @@ fn detail_clients(app: &App) -> Vec<Line<'static>> {
     ]
 }
 
-fn detail_claim_maps(app: &App) -> Vec<Line<'static>> {
-    let Some(map) = app
-        .claim_maps
+fn detail_client_claims(app: &App) -> Vec<Line<'static>> {
+    let Some(row) = app
+        .client_claims
         .selected()
-        .and_then(|idx| app.claim_maps.items.get(idx))
+        .and_then(|idx| app.client_claims.items.get(idx))
     else {
-        return vec![Line::from("No claim map selected")];
+        return vec![Line::from("No client selected")];
     };
-    vec![
-        line_kv("id", &map.id),
-        line_kv("client_id", &map.client_id),
-        line_kv("group_id", &map.group_id),
-        line_kv("claim_name", &map.claim_name),
-        line_kv("claim_value", map.claim_value.as_deref().unwrap_or("")),
-    ]
+    let mut lines = vec![
+        line_kv("client_id", &row.client_id),
+        line_kv("client_name", &row.client_name),
+    ];
+    for claim in &row.claims {
+        let value = claim
+            .claim_value
+            .as_ref()
+            .map(|v| format!("{} ({})", v, claim.other_label))
+            .unwrap_or_else(|| claim.other_label.clone());
+        lines.push(line_kv(&claim.claim_name, &value));
+    }
+    lines
+}
+
+fn detail_group_claims(app: &App) -> Vec<Line<'static>> {
+    let Some(row) = app
+        .group_claims
+        .selected()
+        .and_then(|idx| app.group_claims.items.get(idx))
+    else {
+        return vec![Line::from("No group selected")];
+    };
+    let mut lines = vec![
+        line_kv("group_id", &row.group_id),
+        line_kv("group_name", &row.group_name),
+        line_kv(
+            "description",
+            row.description.as_deref().unwrap_or(""),
+        ),
+    ];
+    for claim in &row.claims {
+        let value = claim
+            .claim_value
+            .as_ref()
+            .map(|v| format!("{} ({})", v, claim.other_label))
+            .unwrap_or_else(|| claim.other_label.clone());
+        lines.push(line_kv(&claim.claim_name, &value));
+    }
+    lines
 }
 
 fn detail_user_groups(app: &App) -> Vec<Line<'static>> {
@@ -2554,7 +3294,7 @@ fn draw_picker(frame: &mut ratatui::Frame, area: Rect, picker: &PickerState) {
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
         .margin(1)
         .split(popup);
 
@@ -2682,6 +3422,39 @@ fn draw_selector(
             }
             frame.render_stateful_widget(table, inner[1], &mut state);
         }
+        SelectorItems::Clients(items) => {
+            let rows = selector
+                .filtered
+                .iter()
+                .map(|idx| {
+                    let client = &items[*idx];
+                    Row::new(vec![
+                        Cell::from(client.client_id.clone()),
+                        Cell::from(client.name.clone()),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let table = Table::new(
+                rows,
+                vec![Constraint::Percentage(45), Constraint::Percentage(55)],
+            )
+            .header(
+                Row::new(vec!["Client ID", "Name"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(Block::default().borders(Borders::ALL))
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+            let mut state = TableState::default();
+            if !selector.filtered.is_empty() {
+                state.select(Some(selector.index));
+            }
+            frame.render_stateful_widget(table, inner[1], &mut state);
+        }
     }
 
     let footer = Paragraph::new("↑↓ select | Enter apply | / filter | Esc cancel")
@@ -2711,7 +3484,7 @@ fn draw_password_gen(
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
         .margin(1)
         .split(popup);
 
@@ -2774,7 +3547,7 @@ fn draw_relation_editor(frame: &mut ratatui::Frame, area: Rect, editor: &Relatio
 
     let inner = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
         .margin(1)
         .split(popup);
 
@@ -2805,6 +3578,177 @@ fn draw_relation_editor(frame: &mut ratatui::Frame, area: Rect, editor: &Relatio
     let footer = Paragraph::new("Space toggle | Enter apply | Esc cancel")
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
+}
+
+fn draw_claim_editor(frame: &mut ratatui::Frame, area: Rect, editor: &ClaimEditorState) {
+    let popup = centered_rect(75, 70, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(editor.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let rows = editor
+        .items
+        .iter()
+        .map(|item| {
+            let value = item.claim_value.clone().unwrap_or_default();
+            let target = format_other_label(&item.other_label, &item.other_id);
+            Row::new(vec![item.claim_name.clone(), value, target])
+        })
+        .collect::<Vec<_>>();
+    let mut state = TableState::default();
+    if !editor.items.is_empty() {
+        state.select(Some(editor.index));
+    }
+    let table = Table::new(
+        rows,
+        vec![
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
+            Constraint::Percentage(40),
+        ],
+    )
+    .header(Row::new(vec!["Claim", "Value", "Target"]).style(Style::default().add_modifier(Modifier::BOLD)))
+    .highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(">> ");
+    frame.render_stateful_widget(table, inner[0], &mut state);
+
+    let error_lines = editor
+        .error
+        .as_ref()
+        .map(|err| {
+            err.lines()
+                .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Red))))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![Line::from("")]);
+    let error = Paragraph::new(error_lines).wrap(Wrap { trim: true });
+    frame.render_widget(error, inner[1]);
+
+    let footer = Paragraph::new("a add | e edit | d delete | Enter apply | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[2]);
+}
+
+fn draw_claim_entry(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &App,
+    entry: &ClaimEntryState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(65, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(entry.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let other_label = entry
+        .other_label
+        .clone()
+        .or_else(|| entry.other_id.clone())
+        .unwrap_or_else(|| "<select>".to_string());
+    let other_line = format_other_label(&other_label, entry.other_id.as_deref().unwrap_or(""));
+
+    let mode = app
+        .claim_editor
+        .as_ref()
+        .map(|editor| editor.mode.clone());
+    let other_hint = match mode {
+        Some(ClaimEditorMode::ClientClaims { .. }) => " (g select)",
+        Some(ClaimEditorMode::GroupClaims { .. }) => " (c select)",
+        None => "",
+    };
+
+    let fields = vec![
+        ("claim_name", entry.claim_name.value().to_string(), ""),
+        ("claim_value", entry.claim_value.value().to_string(), " (optional)"),
+        ("target", other_line, other_hint),
+    ];
+
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    for (idx, (label, value, hint)) in fields.into_iter().enumerate() {
+        let is_active = idx == entry.index;
+        let prefix = if is_active { "> " } else { "  " };
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{label}: "),
+                Style::default()
+                    .fg(if is_active { Color::Cyan } else { Color::White })
+                    .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+            Span::styled(
+                value.clone(),
+                Style::default()
+                    .fg(if is_active { Color::Cyan } else { Color::White })
+                    .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+        ];
+        if !hint.is_empty() {
+            spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+        }
+        lines.push(Line::from(spans));
+
+        if is_active && idx < 2 {
+            let cursor_offset = if idx == 0 {
+                entry.claim_name.cursor()
+            } else {
+                entry.claim_value.cursor()
+            };
+            let cursor_x =
+                inner[0].x + (prefix.len() + label.len() + 2 + cursor_offset) as u16;
+            let cursor_y = inner[0].y + idx as u16;
+            cursor = Some((cursor_x, cursor_y));
+        }
+    }
+
+    if let Some(error) = &entry.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+    if let Some((x, y)) = cursor {
+        frame.set_cursor(x, y);
+        *cursor_visible = true;
+    }
+
+    let footer = Paragraph::new("Tab move | Enter next/save | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn format_other_label(label: &str, id: &str) -> String {
+    if id.is_empty() {
+        label.to_string()
+    } else if label == id {
+        label.to_string()
+    } else {
+        format!("{label} ({id})")
+    }
 }
 
 fn mark(value: bool) -> char {
