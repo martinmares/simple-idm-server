@@ -63,6 +63,12 @@ echo "Client ID: gitlab"
 echo "Client Secret: ${CLIENT_SECRET}"
 ```
 
+## Volitelné: Claim maps
+
+GitLab pro standardní integraci využívá pouze základní `groups` claim, takže pro většinu konfigurací žádná `claim_map` není potřeba. Simple-idm-server už standardně přidává všechny skupiny do JWT, takže GitLabovi stačí jen správný scope (`openid profile email groups`).
+
+Claim mapy použij jen v případě, že chceš namapovat konkrétní skupinu na jiný claim nebo přidat vlastní claim jménem (např. `grafana_role`). V tom případě vytvoř přes `/admin/claim-maps` záznam s `client_id=gitlab`, `group_id=<id skupiny>` a případně nastav `claim_name`/`claim_value`.
+
 ## Krok 3: Konfigurace GitLab (omniauth)
 
 V `gitlab.rb`:

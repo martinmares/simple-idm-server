@@ -2054,17 +2054,18 @@ async fn handle_form_event(
         }
         KeyCode::Char('g') => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if label == Some("grant_types") {
+                    let values = split_csv(Some(form.fields[form.index].value()));
+                    app.picker = Some(PickerState::new_grant_types(&values));
+                    app.mode = Mode::Picker;
+                    return Ok(FormResult::Continue);
+                }
                 if is_add_remove && label == Some("group_id") {
                     request_selector = Some((
                         SelectorKind::Groups,
                         SelectorTarget::FormField("group_id"),
                     ));
                 }
-            } else if label == Some("grant_types") {
-                let values = split_csv(Some(form.fields[form.index].value()));
-                app.picker = Some(PickerState::new_grant_types(&values));
-                app.mode = Mode::Picker;
-                return Ok(FormResult::Continue);
             }
         }
         KeyCode::Char('u') => {
@@ -3060,7 +3061,7 @@ fn draw_form(
         }
         if field.label == "grant_types" {
             spans.push(Span::styled(
-                " (g picker)",
+                " (Ctrl+G picker)",
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -3108,7 +3109,7 @@ fn draw_form(
         }
     }
 
-    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | g grant types | Ctrl+U user select | Ctrl+G group select | Ctrl+G secret | Ctrl+V reveal")
+    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | Ctrl+G grant types | Ctrl+U user select | Ctrl+G group select | Ctrl+G secret | Ctrl+V reveal")
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 
