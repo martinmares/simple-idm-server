@@ -353,6 +353,7 @@ cargo build --release
 - [x] Admin TUI for management workflows
 - [ ] Publish Docker image
 - [ ] Expand integration documentation
+- [ ] Export/Import feature (backup/restore)
 
 ### Critical
 - [x] Enforce `openid` (and optional `email`/`profile`) scopes on `/oauth2/userinfo`
