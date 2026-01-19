@@ -388,6 +388,66 @@ JWT for this application will contain only:
 }
 ```
 
+## Nested Groups
+
+Groups can contain other groups, creating hierarchical structures. When a user is assigned to a parent group, they automatically inherit membership in all child groups (transitively).
+
+### Example: Team Bundles
+
+Create a "team bundle" that contains multiple application-specific groups:
+
+```bash
+# Create groups
+simple-idm-ctl groups create --name "gitlab:ns:o2" --description "GitLab namespace O2"
+simple-idm-ctl groups create --name "gitlab:role:maintainer" --description "GitLab maintainer role"
+simple-idm-ctl groups create --name "team:devops" --description "DevOps team bundle"
+
+# Create nested structure: team:devops contains both groups
+simple-idm-ctl groups add-child --parent "team:devops" --child "gitlab:ns:o2"
+simple-idm-ctl groups add-child --parent "team:devops" --child "gitlab:role:maintainer"
+
+# Assign user to parent group only
+simple-idm-ctl user-groups add --user-id <UUID> --group-id <team:devops_UUID>
+```
+
+The user's JWT will automatically include all effective groups:
+```json
+{
+  "groups": ["gitlab:ns:o2", "gitlab:role:maintainer", "team:devops"]
+}
+```
+
+### CLI Commands
+
+```bash
+# Add child group (supports both UUID and name)
+simple-idm-ctl groups add-child --parent "team:devops" --child "gitlab:ns:o2"
+
+# Remove child group
+simple-idm-ctl groups remove-child --parent "team:devops" --child "gitlab:ns:o2"
+
+# List direct children
+simple-idm-ctl groups list-children --parent "team:devops"
+
+# List all transitive children (recursive)
+simple-idm-ctl groups list-children --parent "team:devops" --expand
+```
+
+### Cycle Detection
+
+The system prevents circular dependencies:
+```bash
+# This will fail with "cycle_detected" error
+simple-idm-ctl groups add-child --parent "A" --child "B"
+simple-idm-ctl groups add-child --parent "B" --child "A"
+```
+
+### API Endpoints
+
+- `POST /admin/groups/{id}/children` - Add child group
+- `GET /admin/groups/{id}/children?expand=true` - List children (direct or transitive)
+- `DELETE /admin/groups/{parent_id}/children/{child_id}` - Remove relationship
+
 ## Development
 
 ### Running Tests
@@ -425,11 +485,13 @@ cargo build --release
 
 ### Important (CODEX - Big Changes)
 See `.tmp/CODEX_INSTRUCTIONS_BIG_simple-idm-server.md` for details:
-- [ ] **Nested groups** - groups can contain other groups
-  - [ ] Add `group_groups` table
-  - [ ] Implement cycle detection
-  - [ ] Transitive membership expansion
-  - [ ] CLI commands: `groups add-child`, `groups rm-child`
+- [x] **Nested groups** - groups can contain other groups
+  - [x] Add `group_groups` table
+  - [x] Implement cycle detection
+  - [x] Transitive membership expansion
+  - [x] CLI commands: `groups add-child`, `groups remove-child`, `groups list-children`
+  - [x] API endpoints for nested groups management
+  - [x] Integrate into token generation (effective groups)
 - [ ] **Array claim values** - explicit single vs array in JWT
   - [ ] Add `claim_value_kind` and `claim_value_json` to `claim_maps`
   - [ ] Migration for existing data
