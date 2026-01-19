@@ -1,4 +1,4 @@
-use crate::auth::{build_custom_claims, get_user_group_names, get_user_groups, verify_password, JwtService};
+use crate::auth::{build_custom_claims, get_effective_user_groups, get_user_group_names, verify_password, JwtService};
 use crate::db::models::{AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User};
 use axum::{
     body::Bytes,
@@ -580,7 +580,7 @@ async fn handle_authorization_code_token(
     };
 
     // Načti skupiny uživatele
-    let user_group_ids = match get_user_groups(&state.db_pool, user.id).await {
+    let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
         Ok(ids) => ids,
         Err(_) => {
             return Json(ErrorResponse {
@@ -825,7 +825,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     };
 
     // Načti skupiny
-    let user_group_ids = match get_user_groups(&state.db_pool, user.id).await {
+    let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
         Ok(ids) => ids,
         Err(_) => vec![],
     };

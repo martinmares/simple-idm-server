@@ -48,7 +48,7 @@ pub async fn build_custom_claims(
     Ok(custom_claims)
 }
 
-/// Načte skupiny uživatele
+/// Načte přímé skupiny uživatele (bez rozbalení nested groups)
 pub async fn get_user_groups(
     pool: &DbPool,
     user_id: Uuid,
@@ -65,20 +65,79 @@ pub async fn get_user_groups(
     Ok(group_ids)
 }
 
+/// Rozbalí nested groups tranzitivně
+/// Vrací všechny transitive child groups pro danou skupinu
+async fn expand_nested_groups(
+    pool: &DbPool,
+    group_id: Uuid,
+) -> Result<Vec<Uuid>, ClaimMapError> {
+    let mut all_groups = std::collections::HashSet::new();
+    let mut stack = vec![group_id];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(current) = stack.pop() {
+        if visited.contains(&current) {
+            continue;
+        }
+        visited.insert(current);
+        all_groups.insert(current);
+
+        // Načti child groups
+        let children = sqlx::query_scalar::<_, Uuid>(
+            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1"
+        )
+        .bind(current)
+        .fetch_all(pool)
+        .await?;
+
+        stack.extend(children);
+    }
+
+    Ok(all_groups.into_iter().collect())
+}
+
+/// Načte všechny effective groups uživatele (včetně rozbalených nested groups)
+pub async fn get_effective_user_groups(
+    pool: &DbPool,
+    user_id: Uuid,
+) -> Result<Vec<Uuid>, ClaimMapError> {
+    // Načti přímé skupiny uživatele
+    let direct_groups = get_user_groups(pool, user_id).await?;
+
+    // Rozbal nested groups pro každou přímou skupinu
+    let mut all_effective_groups = std::collections::HashSet::new();
+
+    for group_id in direct_groups {
+        let expanded = expand_nested_groups(pool, group_id).await?;
+        all_effective_groups.extend(expanded);
+    }
+
+    Ok(all_effective_groups.into_iter().collect())
+}
+
 /// Načte názvy skupin pro JWT (standardní claims)
+/// Vrací effective groups (včetně rozbalených nested groups), seřazené alfabeticky
 pub async fn get_user_group_names(
     pool: &DbPool,
     user_id: Uuid,
 ) -> Result<Vec<String>, ClaimMapError> {
+    // Získej effective group IDs (včetně nested)
+    let effective_group_ids = get_effective_user_groups(pool, user_id).await?;
+
+    if effective_group_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Načti názvy pro všechny effective groups
     let group_names = sqlx::query_scalar::<_, String>(
         r#"
-        SELECT g.name
-        FROM groups g
-        INNER JOIN user_groups ug ON g.id = ug.group_id
-        WHERE ug.user_id = $1
+        SELECT name
+        FROM groups
+        WHERE id = ANY($1)
+        ORDER BY name
         "#,
     )
-    .bind(user_id)
+    .bind(&effective_group_ids)
     .fetch_all(pool)
     .await?;
 

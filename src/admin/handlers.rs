@@ -1314,3 +1314,378 @@ pub async fn delete_claim_map(
         }
     }
 }
+
+// ============================================================================
+// Nested Groups Handlers
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct AddChildGroupRequest {
+    pub child_group_id: Uuid,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GroupChildResponse {
+    pub parent_group_id: Uuid,
+    pub child_group_id: Uuid,
+    pub child_group_name: String,
+    pub child_group_description: Option<String>,
+}
+
+// Helper function: Check if adding parent->child would create a cycle
+// Returns true if cycle would be created
+async fn would_create_cycle(
+    db_pool: &DbPool,
+    parent_id: Uuid,
+    child_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    // Strategy: Check if parent is (transitively) a child of child
+    // If yes, then adding child->parent would create a cycle
+
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![child_id];
+
+    while let Some(current) = stack.pop() {
+        if current == parent_id {
+            return Ok(true); // Cycle detected
+        }
+
+        if visited.contains(&current) {
+            continue;
+        }
+        visited.insert(current);
+
+        // Get all children of current group
+        let children = sqlx::query_scalar::<_, Uuid>(
+            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1"
+        )
+        .bind(current)
+        .fetch_all(db_pool)
+        .await?;
+
+        stack.extend(children);
+    }
+
+    Ok(false)
+}
+
+// Helper function: Get all transitive children (descendants) of a group
+pub async fn get_transitive_children(
+    db_pool: &DbPool,
+    group_id: Uuid,
+) -> Result<Vec<Uuid>, sqlx::Error> {
+    let mut all_children = std::collections::HashSet::new();
+    let mut stack = vec![group_id];
+    let mut visited = std::collections::HashSet::new();
+
+    while let Some(current) = stack.pop() {
+        if visited.contains(&current) {
+            continue;
+        }
+        visited.insert(current);
+
+        let children = sqlx::query_scalar::<_, Uuid>(
+            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1"
+        )
+        .bind(current)
+        .fetch_all(db_pool)
+        .await?;
+
+        for child in children {
+            if child != group_id {
+                all_children.insert(child);
+            }
+            stack.push(child);
+        }
+    }
+
+    Ok(all_children.into_iter().collect())
+}
+
+pub async fn add_child_group(
+    State(db_pool): State<DbPool>,
+    Path(parent_id): Path<Uuid>,
+    Json(req): Json<AddChildGroupRequest>,
+) -> impl IntoResponse {
+    let child_id = req.child_group_id;
+
+    // Validate that both groups exist
+    let parent_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1)"
+    )
+    .bind(parent_id)
+    .fetch_one(&db_pool)
+    .await;
+
+    let child_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1)"
+    )
+    .bind(child_id)
+    .fetch_one(&db_pool)
+    .await;
+
+    match (parent_exists, child_exists) {
+        (Ok(false), _) | (_, Ok(false)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "not_found".to_string(),
+                    error_description: "Parent or child group not found".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!("Failed to check group existence: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to validate groups".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        _ => {}
+    }
+
+    // Check for cycle
+    match would_create_cycle(&db_pool, parent_id, child_id).await {
+        Ok(true) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "cycle_detected".to_string(),
+                    error_description: "Adding this relationship would create a cycle in the group hierarchy".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to check for cycles: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to validate group hierarchy".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Ok(false) => {}
+    }
+
+    // Insert the relationship
+    let result = sqlx::query!(
+        "INSERT INTO group_groups (parent_group_id, child_group_id) VALUES ($1, $2)",
+        parent_id,
+        child_id
+    )
+    .execute(&db_pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            // Fetch child group details for response
+            let child = sqlx::query!(
+                "SELECT id, name, description FROM groups WHERE id = $1",
+                child_id
+            )
+            .fetch_one(&db_pool)
+            .await;
+
+            match child {
+                Ok(group) => (
+                    StatusCode::CREATED,
+                    Json(GroupChildResponse {
+                        parent_group_id: parent_id,
+                        child_group_id: group.id,
+                        child_group_name: group.name,
+                        child_group_description: group.description,
+                    }),
+                )
+                    .into_response(),
+                Err(e) => {
+                    tracing::error!("Failed to fetch child group: {:?}", e);
+                    (
+                        StatusCode::CREATED,
+                        Json(SuccessResponse {
+                            message: "Child group added successfully".to_string(),
+                        }),
+                    )
+                        .into_response()
+                }
+            }
+        }
+        Err(sqlx::Error::Database(ref db_err)) if db_err.constraint() == Some("group_groups_pkey") => {
+            (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "already_exists".to_string(),
+                    error_description: "This group relationship already exists".to_string(),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to add child group: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to add child group".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn remove_child_group(
+    State(db_pool): State<DbPool>,
+    Path((parent_id, child_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let result = sqlx::query(
+        "DELETE FROM group_groups WHERE parent_group_id = $1 AND child_group_id = $2"
+    )
+    .bind(parent_id)
+    .bind(child_id)
+    .execute(&db_pool)
+    .await;
+
+    match result {
+        Ok(res) => {
+            if res.rows_affected() == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: "not_found".to_string(),
+                        error_description: "Group relationship not found".to_string(),
+                    }),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::OK,
+                    Json(SuccessResponse {
+                        message: "Child group removed successfully".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to remove child group: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to remove child group".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn list_child_groups(
+    State(db_pool): State<DbPool>,
+    Path(parent_id): Path<Uuid>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
+    let expand = params.get("expand").map(|v| v == "true").unwrap_or(false);
+
+    if expand {
+        // Get all transitive children
+        match get_transitive_children(&db_pool, parent_id).await {
+            Ok(child_ids) => {
+                if child_ids.is_empty() {
+                    return (StatusCode::OK, Json(serde_json::json!([]))).into_response();
+                }
+
+                // Fetch group details for all children
+                let children = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+                    "SELECT id, name, description FROM groups WHERE id = ANY($1) ORDER BY name"
+                )
+                .bind(&child_ids)
+                .fetch_all(&db_pool)
+                .await;
+
+                match children {
+                    Ok(groups) => {
+                        let response: Vec<GroupResponse> = groups
+                            .into_iter()
+                            .map(|(id, name, description)| GroupResponse {
+                                id,
+                                name,
+                                description,
+                            })
+                            .collect();
+                        (StatusCode::OK, Json(response)).into_response()
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to fetch child groups: {:?}", e);
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: "server_error".to_string(),
+                                error_description: "Failed to fetch child groups".to_string(),
+                            }),
+                        )
+                            .into_response()
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to get transitive children: {:?}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Failed to expand child groups".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        }
+    } else {
+        // Get only direct children
+        let result = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+            r#"
+            SELECT g.id, g.name, g.description
+            FROM groups g
+            INNER JOIN group_groups gg ON g.id = gg.child_group_id
+            WHERE gg.parent_group_id = $1
+            ORDER BY g.name
+            "#
+        )
+        .bind(parent_id)
+        .fetch_all(&db_pool)
+        .await;
+
+        match result {
+            Ok(groups) => {
+                let response: Vec<GroupResponse> = groups
+                    .into_iter()
+                    .map(|(id, name, description)| GroupResponse {
+                        id,
+                        name,
+                        description,
+                    })
+                    .collect();
+                (StatusCode::OK, Json(response)).into_response()
+            }
+            Err(e) => {
+                tracing::error!("Failed to list child groups: {:?}", e);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Failed to list child groups".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        }
+    }
+}
