@@ -369,21 +369,91 @@ Custom claim mapping allows restricting which groups/permissions are included in
 1. **Reducing token size** - If you have hundreds of groups but the application needs only a few
 2. **Security** - Application sees only relevant permissions
 3. **Custom claim names** - You can map groups to custom claim names
+4. **Array vs Single values** - Choose whether claim is a single string or array of strings
+
+### Single String Claims
+
+For applications that expect single string values (like Grafana):
+
+```bash
+# Map group to single string claim
+curl -X POST http://localhost:8080/admin/claim-maps \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "<CLIENT_UUID>",
+    "group_id": "<GRAFANA_ADMIN_GROUP_UUID>",
+    "claim_name": "grafana_role",
+    "claim_value": "Admin"
+  }'
+```
+
+JWT output:
+```json
+{
+  "sub": "user-id",
+  "grafana_role": "Admin",
+  "groups": ["grafana:role:Admin"]
+}
+```
+
+### Array Claims
+
+For applications that expect array of values:
+
+```bash
+# Map group to array claim
+curl -X POST http://localhost:8080/admin/claim-maps \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "client_id": "<CLIENT_UUID>",
+    "group_id": "<GROUP_UUID>",
+    "claim_name": "roles",
+    "claim_value": ["developer", "maintainer"]
+  }'
+```
+
+JWT output:
+```json
+{
+  "sub": "user-id",
+  "roles": ["developer", "maintainer"],
+  "groups": ["team:backend"]
+}
+```
+
+### Mixed Claims
+
+If any claim map for a given `claim_name` has `kind='array'`, the output will be an array (merging all values):
+
+```bash
+# User has two groups:
+# Group A → roles: ["developer"]
+# Group B → roles: ["maintainer", "reviewer"]
+
+# JWT will merge and deduplicate:
+{
+  "roles": ["developer", "maintainer", "reviewer"]
+}
+```
 
 ### Example
 
 User has groups: `admin`, `users`, `billing`, `reports`, `analytics`
 
 For the "Dashboard" application you set claim maps:
-- `admin` → `is_admin`
-- `reports` → `can_view_reports`
+- `admin` → `is_admin` (single, value: "true")
+- `reports` → `can_view_reports` (single, value: "true")
+- `admin` → `roles` (array, value: ["admin", "super-user"])
 
-JWT for this application will contain only:
+JWT for this application will contain:
 ```json
 {
   "sub": "user-id",
-  "is_admin": true,
-  "can_view_reports": true,
+  "is_admin": "true",
+  "can_view_reports": "true",
+  "roles": ["admin", "super-user"],
   "groups": ["admin", "reports"]
 }
 ```
@@ -492,11 +562,12 @@ See `.tmp/CODEX_INSTRUCTIONS_BIG_simple-idm-server.md` for details:
   - [x] CLI commands: `groups add-child`, `groups remove-child`, `groups list-children`
   - [x] API endpoints for nested groups management
   - [x] Integrate into token generation (effective groups)
-- [ ] **Array claim values** - explicit single vs array in JWT
-  - [ ] Add `claim_value_kind` and `claim_value_json` to `claim_maps`
-  - [ ] Migration for existing data
-  - [ ] Update token generation logic
-  - [ ] Update CLI to support array claims
+- [x] **Array claim values** - explicit single vs array in JWT
+  - [x] Add `claim_value_kind` and `claim_value_json` to `claim_maps`
+  - [x] Migration for existing data
+  - [x] Update token generation logic
+  - [x] API supports array input (backward compatible)
+  - [ ] Update CLI to support array claims (optional - API funguje)
 - [ ] **Naming conventions** - enforce `app:ns:X`, `app:role:Y`, `team:Z` pattern
 
 ### Nice to have
