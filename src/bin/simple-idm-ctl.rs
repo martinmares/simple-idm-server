@@ -265,6 +265,24 @@ enum GroupsCommand {
         #[arg(long)]
         id: String,
     },
+    AddChild {
+        #[arg(long, help = "Parent group ID or name")]
+        parent: String,
+        #[arg(long, help = "Child group ID or name")]
+        child: String,
+    },
+    RemoveChild {
+        #[arg(long, help = "Parent group ID or name")]
+        parent: String,
+        #[arg(long, help = "Child group ID or name")]
+        child: String,
+    },
+    ListChildren {
+        #[arg(long, help = "Parent group ID or name")]
+        parent: String,
+        #[arg(long, help = "Expand to show all transitive children")]
+        expand: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -778,8 +796,61 @@ async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsC
             let body = http.delete(&format!("/admin/groups/{id}")).await?;
             print_message(output, &body)?;
         }
+        GroupsCommand::AddChild { parent, child } => {
+            // Resolve parent and child IDs (support both UUID and name)
+            let parent_id = resolve_group_id(http, &parent).await?;
+            let child_id = resolve_group_id(http, &child).await?;
+
+            let payload = serde_json::json!({
+                "child_group_id": child_id,
+            });
+            let body = http.post_json(&format!("/admin/groups/{}/children", parent_id), payload).await?;
+            print_message(output, &body)?;
+        }
+        GroupsCommand::RemoveChild { parent, child } => {
+            let parent_id = resolve_group_id(http, &parent).await?;
+            let child_id = resolve_group_id(http, &child).await?;
+
+            let body = http.delete(&format!("/admin/groups/{}/children/{}", parent_id, child_id)).await?;
+            print_message(output, &body)?;
+        }
+        GroupsCommand::ListChildren { parent, expand } => {
+            let parent_id = resolve_group_id(http, &parent).await?;
+            let path = if expand {
+                format!("/admin/groups/{}/children?expand=true", parent_id)
+            } else {
+                format!("/admin/groups/{}/children", parent_id)
+            };
+            let body = http.get(&path).await?;
+            let rows: Vec<GroupRow> = serde_json::from_str(&body).context("Failed to parse child groups")?;
+            print_table_rows_vec(output, rows)?;
+        }
     }
     Ok(())
+}
+
+// Helper function to resolve group ID from either UUID or name
+async fn resolve_group_id(http: &HttpClient, id_or_name: &str) -> Result<String> {
+    // Try to parse as UUID first
+    if uuid::Uuid::parse_str(id_or_name).is_ok() {
+        return Ok(id_or_name.to_string());
+    }
+
+    // Otherwise, search by name
+    let body = http.get("/admin/groups").await?;
+    let groups: Vec<serde_json::Value> = serde_json::from_str(&body)?;
+
+    for group in groups {
+        if let Some(name) = group.get("name").and_then(|n| n.as_str()) {
+            if name == id_or_name {
+                if let Some(id) = group.get("id").and_then(|i| i.as_str()) {
+                    return Ok(id.to_string());
+                }
+            }
+        }
+    }
+
+    bail!("Group not found: {}", id_or_name);
 }
 
 async fn handle_clients(

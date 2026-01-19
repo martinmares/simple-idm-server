@@ -126,6 +126,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/admin/groups", get(admin::handlers::list_groups))
         .route("/admin/groups/{id}", put(admin::handlers::update_group))
         .route("/admin/groups/{id}", delete(admin::handlers::delete_group))
+        // Nested groups (group-group relationships)
+        .route(
+            "/admin/groups/{id}/children",
+            post(admin::handlers::add_child_group),
+        )
+        .route(
+            "/admin/groups/{id}/children",
+            get(admin::handlers::list_child_groups),
+        )
+        .route(
+            "/admin/groups/{parent_id}/children/{child_id}",
+            delete(admin::handlers::remove_child_group),
+        )
         // User-Group assignments
         .route(
             "/admin/users/{id}/groups",

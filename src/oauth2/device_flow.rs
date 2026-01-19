@@ -1,4 +1,4 @@
-use crate::auth::{build_custom_claims, get_user_group_names, get_user_groups};
+use crate::auth::{build_custom_claims, get_effective_user_groups, get_user_group_names};
 use crate::db::models::{DeviceCode, OAuthClient, User};
 use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, Utc};
@@ -388,7 +388,7 @@ pub async fn handle_device_token(
     };
 
     // Načti skupiny
-    let user_group_ids = match get_user_groups(&state.db_pool, user.id).await {
+    let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
         Ok(ids) => ids,
         Err(_) => vec![],
     };
