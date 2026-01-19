@@ -50,6 +50,8 @@ pub struct ClaimMap {
     pub group_id: Uuid,
     pub claim_name: String,
     pub claim_value: Option<String>,
+    pub claim_value_kind: String, // 'single' or 'array'
+    pub claim_value_json: Option<String>, // JSON array for array kind
 }
 
 #[derive(Debug, Clone, FromRow)]

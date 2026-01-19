@@ -12,6 +12,7 @@ pub enum ClaimMapError {
 
 /// Načte custom claim mapy pro daného klienta a vrátí HashMap s custom claims
 /// Tato funkce implementuje feature podobný Kanidm "group mapping"
+/// Podporuje jak single string values tak array values
 pub async fn build_custom_claims(
     pool: &DbPool,
     client_id: Uuid,
@@ -24,9 +25,10 @@ pub async fn build_custom_claims(
     // Načti claim mapy pro tohoto klienta a skupiny uživatele
     let claim_maps = sqlx::query_as::<_, ClaimMap>(
         r#"
-        SELECT id, client_id, group_id, claim_name, claim_value
+        SELECT id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json
         FROM claim_maps
         WHERE client_id = $1 AND group_id = ANY($2)
+        ORDER BY claim_name, group_id
         "#,
     )
     .bind(client_id)
@@ -34,15 +36,73 @@ pub async fn build_custom_claims(
     .fetch_all(pool)
     .await?;
 
+    // Group by claim_name
+    let mut claims_by_name: std::collections::HashMap<String, Vec<ClaimMap>> = std::collections::HashMap::new();
+    for map in claim_maps {
+        claims_by_name.entry(map.claim_name.clone()).or_default().push(map);
+    }
+
     let mut custom_claims: HashMap<String, Value> = HashMap::new();
 
-    // Seskup claim_names podle stejného jména (některé skupiny mohou mít stejný claim_name)
-    for map in claim_maps {
-        let value = match map.claim_value.as_deref() {
-            Some(v) if !v.trim().is_empty() => Value::String(v.to_string()),
-            _ => Value::Bool(true),
-        };
-        custom_claims.entry(map.claim_name.clone()).or_insert(value);
+    // Process each claim_name
+    for (claim_name, maps) in claims_by_name {
+        // Check if any map has array kind
+        let has_array = maps.iter().any(|m| m.claim_value_kind == "array");
+
+        if has_array {
+            // Output as array - collect all values
+            let mut all_values: Vec<String> = Vec::new();
+
+            for map in maps {
+                if map.claim_value_kind == "array" {
+                    // Parse JSON array
+                    if let Some(json_str) = &map.claim_value_json {
+                        if let Ok(arr) = serde_json::from_str::<Vec<String>>(json_str) {
+                            all_values.extend(arr);
+                        }
+                    }
+                } else {
+                    // Single value - add to array
+                    if let Some(v) = &map.claim_value {
+                        if !v.trim().is_empty() {
+                            all_values.push(v.clone());
+                        }
+                    }
+                }
+            }
+
+            // Deduplicate and sort
+            all_values.sort();
+            all_values.dedup();
+
+            custom_claims.insert(claim_name.clone(), Value::Array(
+                all_values.into_iter().map(Value::String).collect()
+            ));
+        } else {
+            // Output as single string - take first value (deterministic due to ORDER BY)
+            if let Some(first_map) = maps.first() {
+                let value = match first_map.claim_value.as_deref() {
+                    Some(v) if !v.trim().is_empty() => Value::String(v.to_string()),
+                    _ => Value::Bool(true),
+                };
+
+                // Warn if there are multiple different single values
+                if maps.len() > 1 {
+                    let unique_values: std::collections::HashSet<_> = maps.iter()
+                        .filter_map(|m| m.claim_value.as_ref())
+                        .collect();
+                    if unique_values.len() > 1 {
+                        tracing::warn!(
+                            "Multiple different single values for claim '{}': {:?}. Using first value deterministically.",
+                            claim_name,
+                            unique_values
+                        );
+                    }
+                }
+
+                custom_claims.insert(claim_name, value);
+            }
+        }
     }
 
     Ok(custom_claims)
