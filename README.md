@@ -375,9 +375,9 @@ cargo build --release
 ```
 ## TODO
 
+### Core Features
 - [x] Admin API for managing users, groups and clients
 - [x] Web UI for login flow
-- [ ] Web UI for device verification
 - [x] OIDC Discovery endpoint
 - [x] UserInfo endpoint
 - [x] Validate redirect_uri and client_id during auth code exchange
@@ -387,24 +387,43 @@ cargo build --release
 - [x] Revocation endpoint
 - [x] Admin-initiated password reset flow
 - [x] Admin TUI for management workflows
-- [ ] Publish Docker image
-- [ ] Expand integration documentation
-- [ ] Export/Import feature (backup/restore)
+- [x] CLI tool OAuth2 login flow (authorization code + PKCE)
 
-### Critical
-- [x] Enforce `openid` (and optional `email`/`profile`) scopes on `/oauth2/userinfo`
-- [x] Validate `aud` in all access-token protected endpoints (not just userinfo)
+### Critical (In Progress)
+- [x] **Fix CLI tool authorization** (Contract 2026-01-19.01)
+  - [x] Change OAuth client from `simple-idm-ctl` to `cli-tools`
+  - [x] Create `simple-idm:role:admin` group and seed admin user
+  - [x] Update middleware to check `simple-idm:role:admin` group
+  - [x] Implement multi-server support in CLI
+  - [x] Make `--url` required parameter (no hardcoded defaults)
 
-### Important
-- [x] Add per-endpoint rate limit tuning (stricter for `/oauth2/token`)
-- [x] Add `kid` support + JWKS key rotation strategy
+### Important (CODEX - Big Changes)
+See `.tmp/CODEX_INSTRUCTIONS_BIG_simple-idm-server.md` for details:
+- [ ] **Nested groups** - groups can contain other groups
+  - [ ] Add `group_groups` table
+  - [ ] Implement cycle detection
+  - [ ] Transitive membership expansion
+  - [ ] CLI commands: `groups add-child`, `groups rm-child`
+- [ ] **Array claim values** - explicit single vs array in JWT
+  - [ ] Add `claim_value_kind` and `claim_value_json` to `claim_maps`
+  - [ ] Migration for existing data
+  - [ ] Update token generation logic
+  - [ ] Update CLI to support array claims
+- [ ] **Naming conventions** - enforce `app:ns:X`, `app:role:Y`, `team:Z` pattern
 
 ### Nice to have
 - [ ] Web UI for device verification
 - [ ] Publish Docker image
 - [ ] Expand integration documentation
+- [ ] Export/Import feature (backup/restore)
 - [ ] Enrich `user-groups` output with user and group names
 - [ ] Enrich `claim-maps` output with client and group names
+
+### Security & Standards
+- [x] Enforce `openid` (and optional `email`/`profile`) scopes on `/oauth2/userinfo`
+- [x] Validate `aud` in all access-token protected endpoints (not just userinfo)
+- [x] Add per-endpoint rate limit tuning (stricter for `/oauth2/token`)
+- [x] Add `kid` support + JWKS key rotation strategy
 
 ## License
 

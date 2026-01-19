@@ -3,19 +3,116 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use tabled::{settings::Style, Table, Tabled};
 use std::process::Command;
+use dirs::config_dir;
+use chrono::{DateTime, Utc, Duration};
+use tokio::sync::oneshot;
+use std::fs;
+use std::path::PathBuf;
+use std::collections::HashMap;
+use rand::Rng;
 
 #[path = "../cli/tui.rs"]
 mod tui;
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct Session {
+    access_token: String,
+    refresh_token: String,
+    expires_at: DateTime<Utc>,
+    base_url: String,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user_email: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    user_groups: Vec<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+struct SessionsConfig {
+    active: String,
+    servers: std::collections::HashMap<String, Session>,
+}
+
+fn sessions_file_path() -> Result<PathBuf> {
+    let config_dir = config_dir()
+        .ok_or_else(|| anyhow!("Could not determine config directory"))?;
+    Ok(config_dir.join("simple-idm-ctl").join("sessions.json"))
+}
+
+fn load_sessions() -> Result<SessionsConfig> {
+    let path = sessions_file_path()?;
+    if !path.exists() {
+        return Ok(SessionsConfig {
+            active: "default".to_string(),
+            servers: HashMap::new(),
+        });
+    }
+    let content = fs::read_to_string(&path)?;
+    let config = serde_json::from_str(&content)?;
+    Ok(config)
+}
+
+fn save_sessions(config: &SessionsConfig) -> Result<()> {
+    let path = sessions_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = serde_json::to_string_pretty(config)?;
+    fs::write(&path, content)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&path)?.permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&path, perms)?;
+    }
+
+    Ok(())
+}
+
+fn get_active_session() -> Result<Option<Session>> {
+    let config = load_sessions()?;
+    Ok(config.servers.get(&config.active).cloned())
+}
+
+fn save_session(server_name: &str, session: Session) -> Result<()> {
+    let mut config = load_sessions()?;
+    config.servers.insert(server_name.to_string(), session);
+    config.active = server_name.to_string();
+    save_sessions(&config)
+}
+
+fn delete_session(server_name: Option<&str>) -> Result<()> {
+    let mut config = load_sessions()?;
+
+    if let Some(name) = server_name {
+        config.servers.remove(name);
+        if config.active == name && !config.servers.is_empty() {
+            config.active = config.servers.keys().next().unwrap().clone();
+        }
+    } else {
+        config.servers.clear();
+    }
+
+    save_sessions(&config)
+}
+
+fn is_session_valid(session: &Session) -> bool {
+    session.expires_at > Utc::now() + Duration::seconds(60)
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "simple-idm-ctl", version, about = "Admin CLI for simple-idm-server")]
 struct Cli {
     #[arg(long)]
-    base_url: String,
+    base_url: Option<String>,
     #[arg(long)]
-    token: String,
+    token: Option<String>,
     #[arg(long, global = true)]
-    insecure: bool,
+    server: Option<String>,
+    #[arg(long, global = true)]
+    insecure: Option<bool>,
     #[arg(short = 'o', long, default_value = "table", global = true)]
     output: OutputFormat,
     #[arg(long, default_value = "sharp", global = true)]
@@ -70,7 +167,38 @@ enum Commands {
         #[command(subcommand)]
         command: OAuthCommand,
     },
+    Login {
+        #[arg(long, required = true)]
+        url: String,
+        #[arg(long, default_value = "cli-tools")]
+        client: String,
+        #[arg(long, default_value = "8888")]
+        port: u16,
+        #[arg(long, default_value = "default")]
+        server: String,
+    },
+    Logout {
+        #[arg(long)]
+        server: Option<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    Sessions {
+        #[command(subcommand)]
+        command: SessionsCommand,
+    },
+    Status,
     Ping,
+}
+
+#[derive(Subcommand, Debug)]
+enum SessionsCommand {
+    #[command(alias = "ls")]
+    List,
+    Use {
+        #[arg(value_name = "SERVER")]
+        server: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -377,10 +505,45 @@ struct OutputConfig {
     style: TableStyle,
 }
 
+fn generate_pkce_pair() -> (String, String) {
+    use sha2::{Sha256, Digest};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let code_verifier: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
+
+    let hash = Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = URL_SAFE_NO_PAD.encode(hash);
+
+    (code_verifier, code_challenge)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let http = HttpClient::new(cli.base_url, cli.token, cli.insecure)?;
+
+    match &cli.command {
+        Commands::Login { url, client, port, server } => {
+            return handle_login(url, client, *port, server, cli.insecure.unwrap_or(false)).await;
+        }
+        Commands::Logout { server, all } => {
+            return handle_logout(server.as_deref(), *all);
+        }
+        Commands::Sessions { command } => {
+            return handle_sessions(command);
+        }
+        Commands::Status => {
+            return handle_status();
+        }
+        _ => {}
+    }
+
+    let (base_url, token) = resolve_auth(&cli).await?;
+
+    let http = HttpClient::new(base_url, token, cli.insecure.unwrap_or(false))?;
     let output = OutputConfig {
         format: cli.output,
         style: cli.style,
@@ -395,7 +558,143 @@ async fn main() -> Result<()> {
         Commands::Tui => tui::run_tui(&http).await?,
         Commands::OAuth { command } => handle_oauth(&http, output, command).await?,
         Commands::Ping => handle_ping(&http).await?,
+        Commands::Login { .. } | Commands::Logout { .. } | Commands::Sessions { .. } | Commands::Status => unreachable!(),
     }
+
+    Ok(())
+}
+
+async fn resolve_auth(cli: &Cli) -> Result<(String, String)> {
+    if let Some(token) = &cli.token {
+        let base_url = cli.base_url.clone()
+            .ok_or_else(|| anyhow!("--base-url is required when using --token"))?;
+        return Ok((base_url, token.clone()));
+    }
+
+    let mut session = get_active_session()?
+        .ok_or_else(|| anyhow!("Not logged in. Run 'simple-idm-ctl login' first."))?;
+
+    if !is_session_valid(&session) || (session.expires_at - Utc::now()).num_seconds() < 300 {
+        let config = load_sessions()?;
+        session = refresh_session_async(session).await?;
+        save_session(&config.active, session.clone())?;
+    }
+
+    let base_url = cli.base_url.clone().unwrap_or(session.base_url);
+    Ok((base_url, session.access_token))
+}
+
+async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &str, insecure: bool) -> Result<()> {
+
+    let (code_verifier, code_challenge) = generate_pkce_pair();
+
+    let (tx, rx) = oneshot::channel::<String>();
+    let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
+
+    let callback_app = axum::Router::new().route(
+        "/callback",
+        axum::routing::get(|axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
+            let tx_clone = tx.clone();
+            if let Some(code) = params.get("code") {
+                if let Some(sender) = tx_clone.lock().await.take() {
+                    let _ = sender.send(code.clone());
+                }
+                return "✓ Login successful! You can close this window.";
+            }
+            "✗ Login failed: No authorization code received."
+        }),
+    );
+
+    let addr = format!("127.0.0.1:{}", port);
+    let listener = tokio::net::TcpListener::bind(&addr).await
+        .context(format!("Failed to bind to {}. Try different --port", addr))?;
+
+    tokio::spawn(async move {
+        axum::serve(listener, callback_app).await.ok();
+    });
+
+    let redirect_uri = format!("http://localhost:{}/callback", port);
+    let authorize_url = format!(
+        "{}/oauth2/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid%20profile%20email&code_challenge={}&code_challenge_method=S256",
+        base_url, client_id, urlencoding::encode(&redirect_uri), code_challenge
+    );
+
+    println!("Opening browser for login...");
+    println!("If browser doesn't open, visit: {}", authorize_url);
+
+    if let Err(e) = open_url(&authorize_url) {
+        eprintln!("Could not open browser: {}", e);
+    }
+
+    let code = tokio::time::timeout(
+        std::time::Duration::from_secs(120),
+        rx
+    ).await
+        .context("Login timeout after 2 minutes")??;
+
+    exchange_code_for_tokens(base_url, client_id, &code, &code_verifier, &redirect_uri, insecure, server_name).await
+}
+
+async fn exchange_code_for_tokens(
+    base_url: &str,
+    client_id: &str,
+    code: &str,
+    code_verifier: &str,
+    redirect_uri: &str,
+    insecure: bool,
+    server_name: &str,
+) -> Result<()> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(insecure)
+        .build()?;
+
+    let params = [
+        ("grant_type", "authorization_code"),
+        ("client_id", client_id),
+        ("client_secret", ""),
+        ("code", code),
+        ("redirect_uri", redirect_uri),
+        ("code_verifier", code_verifier),
+    ];
+
+    let response = client
+        .post(format!("{}/oauth2/token", base_url))
+        .form(&params)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let body_text = response.text().await?;
+
+    if !status.is_success() {
+        bail!("Token exchange failed (status {}): {}", status, body_text);
+    }
+
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_in: i64,
+    }
+
+    let token_data: TokenResponse = serde_json::from_str(&body_text)
+        .context(format!("Failed to parse token response: {}", body_text))?;
+
+    let session = Session {
+        access_token: token_data.access_token,
+        refresh_token: token_data.refresh_token.unwrap_or_default(),
+        expires_at: Utc::now() + Duration::seconds(token_data.expires_in),
+        base_url: base_url.to_string(),
+        created_at: Utc::now(),
+        user_email: None,
+        user_groups: vec![],
+    };
+
+    save_session(server_name, session)?;
+
+    println!("✓ Login successful!");
+    println!("Session saved to {}", sessions_file_path()?.display());
+    println!("Server: {}", server_name);
 
     Ok(())
 }
@@ -639,6 +938,79 @@ async fn handle_user_groups(
     Ok(())
 }
 
+fn handle_logout(server_name: Option<&str>, all: bool) -> Result<()> {
+    if all {
+        delete_session(None)?;
+        println!("✓ Logged out from all servers");
+    } else if let Some(name) = server_name {
+        delete_session(Some(name))?;
+        println!("✓ Logged out from server: {}", name);
+    } else {
+        let config = load_sessions()?;
+        delete_session(Some(&config.active))?;
+        println!("✓ Logged out from active server: {}", config.active);
+    }
+    Ok(())
+}
+
+fn handle_sessions(command: &SessionsCommand) -> Result<()> {
+    match command {
+        SessionsCommand::List => {
+            let config = load_sessions()?;
+            if config.servers.is_empty() {
+                println!("No sessions found. Run 'simple-idm-ctl login' first.");
+                return Ok(());
+            }
+
+            println!("Sessions:");
+            for (name, session) in &config.servers {
+                let marker = if name == &config.active { "*" } else { " " };
+                let valid = is_session_valid(session);
+                let status = if valid { "✓" } else { "✗" };
+                println!(
+                    "{} {} - {} {} ({})",
+                    marker,
+                    name,
+                    session.base_url,
+                    status,
+                    if valid { "valid" } else { "expired" }
+                );
+            }
+        }
+        SessionsCommand::Use { server } => {
+            let mut config = load_sessions()?;
+            if !config.servers.contains_key(server) {
+                bail!("Server '{}' not found. Available servers: {}", server, config.servers.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
+            }
+            config.active = server.clone();
+            save_sessions(&config)?;
+            println!("✓ Switched to server: {}", server);
+        }
+    }
+    Ok(())
+}
+
+fn handle_status() -> Result<()> {
+    let config = load_sessions()?;
+    let session = config.servers.get(&config.active)
+        .ok_or_else(|| anyhow!("Not logged in"))?;
+
+    let valid = is_session_valid(session);
+    let expires_in = (session.expires_at - Utc::now()).num_seconds();
+
+    println!("Status: {}", if valid { "✓ Logged in" } else { "✗ Token expired" });
+    println!("Active server: {}", config.active);
+    println!("Server URL: {}", session.base_url);
+    println!("Token expires in: {} seconds ({} minutes)", expires_in, expires_in / 60);
+    println!("Session created: {}", session.created_at.format("%Y-%m-%d %H:%M:%S"));
+
+    if !valid {
+        println!("\nToken expired. Run 'simple-idm-ctl login' to re-authenticate.");
+    }
+
+    Ok(())
+}
+
 async fn handle_oauth(http: &HttpClient, output: OutputConfig, command: OAuthCommand) -> Result<()> {
     match command {
         OAuthCommand::AuthorizeUrl {
@@ -765,6 +1137,46 @@ async fn handle_oauth(http: &HttpClient, output: OutputConfig, command: OAuthCom
     }
 
     Ok(())
+}
+
+async fn refresh_session_async(session: Session) -> Result<Session> {
+    let client = reqwest::Client::new();
+
+    let params = [
+        ("grant_type", "refresh_token"),
+        ("client_id", "cli-tools"),
+        ("client_secret", ""),
+        ("refresh_token", &session.refresh_token),
+    ];
+
+    let response = client
+        .post(format!("{}/oauth2/token", session.base_url))
+        .form(&params)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        bail!("Token refresh failed. Please login again with 'simple-idm-ctl login'");
+    }
+
+    #[derive(Deserialize)]
+    struct TokenResponse {
+        access_token: String,
+        refresh_token: Option<String>,
+        expires_in: i64,
+    }
+
+    let token_data: TokenResponse = response.json().await?;
+
+    Ok(Session {
+        access_token: token_data.access_token,
+        refresh_token: token_data.refresh_token.unwrap_or(session.refresh_token),
+        expires_at: Utc::now() + Duration::seconds(token_data.expires_in),
+        base_url: session.base_url,
+        created_at: session.created_at,
+        user_email: session.user_email,
+        user_groups: session.user_groups,
+    })
 }
 
 async fn handle_ping(http: &HttpClient) -> Result<()> {

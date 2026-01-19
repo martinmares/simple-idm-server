@@ -491,24 +491,30 @@ async fn handle_authorization_code_token(
         .into_response();
     }
 
-    // Ověř client secret
-    let client_secret = match req.client_secret {
-        Some(secret) => secret,
-        None => {
+    // Validace client credentials
+    // Pro PKCE public clients (code_verifier present) přeskočíme client_secret validaci
+    let has_pkce = req.code_verifier.is_some();
+
+    if !has_pkce {
+        // Confidential client - vyžaduje client_secret
+        let client_secret = match req.client_secret {
+            Some(secret) if !secret.is_empty() => secret,
+            _ => {
+                return Json(ErrorResponse {
+                    error: "invalid_client".to_string(),
+                    error_description: "Missing client_secret".to_string(),
+                })
+                .into_response()
+            }
+        };
+
+        if !verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
             return Json(ErrorResponse {
                 error: "invalid_client".to_string(),
-                error_description: "Missing client_secret".to_string(),
+                error_description: "Invalid client credentials".to_string(),
             })
-            .into_response()
+            .into_response();
         }
-    };
-
-    if !verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
-        return Json(ErrorResponse {
-            error: "invalid_client".to_string(),
-            error_description: "Invalid client credentials".to_string(),
-        })
-        .into_response();
     }
 
     // PKCE validace
