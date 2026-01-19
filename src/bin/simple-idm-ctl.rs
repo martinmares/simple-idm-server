@@ -105,10 +105,6 @@ fn is_session_valid(session: &Session) -> bool {
 #[derive(Parser, Debug)]
 #[command(name = "simple-idm-ctl", version, about = "Admin CLI for simple-idm-server")]
 struct Cli {
-    #[arg(long)]
-    base_url: Option<String>,
-    #[arg(long)]
-    token: Option<String>,
     #[arg(long, global = true)]
     server: Option<String>,
     #[arg(long, global = true)]
@@ -564,15 +560,9 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn resolve_auth(cli: &Cli) -> Result<(String, String)> {
-    if let Some(token) = &cli.token {
-        let base_url = cli.base_url.clone()
-            .ok_or_else(|| anyhow!("--base-url is required when using --token"))?;
-        return Ok((base_url, token.clone()));
-    }
-
+async fn resolve_auth(_cli: &Cli) -> Result<(String, String)> {
     let mut session = get_active_session()?
-        .ok_or_else(|| anyhow!("Not logged in. Run 'simple-idm-ctl login' first."))?;
+        .ok_or_else(|| anyhow!("Not logged in. Run 'simple-idm-ctl login --url <SERVER_URL>' first."))?;
 
     if !is_session_valid(&session) || (session.expires_at - Utc::now()).num_seconds() < 300 {
         let config = load_sessions()?;
@@ -580,8 +570,7 @@ async fn resolve_auth(cli: &Cli) -> Result<(String, String)> {
         save_session(&config.active, session.clone())?;
     }
 
-    let base_url = cli.base_url.clone().unwrap_or(session.base_url);
-    Ok((base_url, session.access_token))
+    Ok((session.base_url.clone(), session.access_token))
 }
 
 async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &str, insecure: bool) -> Result<()> {

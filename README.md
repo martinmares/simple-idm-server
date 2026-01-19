@@ -216,51 +216,77 @@ Build:
 cargo build --bin simple-idm-ctl
 ```
 
-Usage (flags are required):
+### Authentication
+
+First, login using OAuth2 (opens browser):
 ```bash
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> users list
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> users create \
-  --username admin --email admin@example.com --password 'Secret123!'
+./target/debug/simple-idm-ctl login --url http://localhost:8080
 ```
 
-Paging & style:
+The CLI will:
+1. Open your browser to the OAuth2 authorization page
+2. You login with your credentials (e.g., username: `admin`, password from seed data)
+3. After successful login, the session is saved locally
+4. All subsequent commands use this session automatically
+
+Session management:
 ```bash
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> \
-  --style sharp users ls --page 1 --limit 10
+# Check session status
+./target/debug/simple-idm-ctl status
+
+# List all saved sessions
+./target/debug/simple-idm-ctl sessions list
+
+# Switch between servers
+./target/debug/simple-idm-ctl sessions use production
+
+# Logout (delete session)
+./target/debug/simple-idm-ctl logout
 ```
 
-Insecure TLS (self-signed):
+### Usage Examples
+
+Once logged in, you can use all commands without authentication flags:
+
 ```bash
-./target/debug/simple-idm-ctl --base-url https://localhost:8443 --token <ADMIN_TOKEN> --insecure users ls
+# List users
+./target/debug/simple-idm-ctl users list
+
+# Create user
+./target/debug/simple-idm-ctl users create \
+  --username john --email john@example.com --password 'Secret123!'
+
+# Paging & style
+./target/debug/simple-idm-ctl --style sharp users ls --page 1 --limit 10
+
+# Health check
+./target/debug/simple-idm-ctl ping
+
+# Output format (JSON)
+./target/debug/simple-idm-ctl -o json users list
+
+# TUI (Text UI)
+./target/debug/simple-idm-ctl tui
 ```
 
-Health check:
+Insecure TLS for self-signed certificates:
 ```bash
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> ping
+./target/debug/simple-idm-ctl --insecure users ls
 ```
 
-Output format:
+OAuth helpers (for testing OAuth flows):
 ```bash
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> -o json users list
-```
+./target/debug/simple-idm-ctl oauth authorize-url \
+  --client-id webapp --redirect-uri http://localhost:3000/callback
 
-TUI:
-```bash
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> tui
-```
-
-OAuth helpers:
-```bash
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> \
-  oauth authorize-url --client-id webapp --redirect-uri http://localhost:3000/callback
-
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> \
-  oauth token --client-id webapp --client-secret <SECRET> \
+./target/debug/simple-idm-ctl oauth token \
+  --client-id webapp --client-secret <SECRET> \
   --code <AUTH_CODE> --redirect-uri http://localhost:3000/callback
 
-./target/debug/simple-idm-ctl --base-url http://localhost:8080 --token <ADMIN_TOKEN> \
-  oauth userinfo --access-token <ACCESS_TOKEN>
+./target/debug/simple-idm-ctl oauth userinfo --access-token <ACCESS_TOKEN>
 ```
+
+**Note:** CLI requires users to be members of the `simple-idm:role:admin` group.
 
 #### 3. Token Exchange (exchange code for token)
 ```
