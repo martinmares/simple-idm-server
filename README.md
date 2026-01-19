@@ -108,6 +108,42 @@ SQLX_OFFLINE=true cargo build
 
 ---
 
+## Configuration
+
+### Environment Variables
+
+#### JWT Configuration
+
+- `JWT_ISSUER` - JWT issuer URL (default: `http://localhost:8080`)
+- `JWT_PRIVATE_KEY_PATH` - Path to RSA private key (default: `./keys/private.pem`)
+- `JWT_PUBLIC_KEY_PATH` - Path to RSA public key (default: `./keys/public.pem`)
+- `JWT_KEY_ID` - Key ID (kid) for JWT header and JWKS (default: `default-key-2025`)
+  - Used for key rotation strategy
+  - Must be unique for each key pair
+  - Included in JWT header and JWKS response
+- `ACCESS_TOKEN_EXPIRY_SECONDS` - Access token expiry (default: `3600` = 1 hour)
+- `REFRESH_TOKEN_EXPIRY_SECONDS` - Refresh token expiry (default: `2592000` = 30 days)
+
+#### Rate Limiting
+
+The server supports per-endpoint rate limiting with different limits for sensitive endpoints.
+
+- `RATE_LIMIT_REQUESTS_PER_SECOND` - Global rate limit (default: `5`)
+- `RATE_LIMIT_BURST_SIZE` - Global burst size (default: `10`)
+- `RATE_LIMIT_TOKEN_ENDPOINT_REQUESTS_PER_SECOND` - Rate limit for `/oauth2/token` endpoint (default: `2`)
+- `RATE_LIMIT_TOKEN_ENDPOINT_BURST_SIZE` - Burst size for `/oauth2/token` endpoint (default: `5`)
+
+The `/oauth2/token` endpoint has stricter rate limiting by default to prevent brute-force attacks.
+
+#### Other Configuration
+
+- `SERVER_HOST` - Server host (default: `127.0.0.1`)
+- `SERVER_PORT` - Server port (default: `8080`)
+- `DATABASE_URL` - PostgreSQL connection string
+- `ADMIN_ROOT_TOKEN` - Admin API token (optional, for development only)
+
+---
+
 ## API Endpoints
 
 ### Health Check
@@ -360,8 +396,8 @@ cargo build --release
 - [x] Validate `aud` in all access-token protected endpoints (not just userinfo)
 
 ### Important
-- [ ] Add per-endpoint rate limit tuning (stricter for `/oauth2/token`)
-- [ ] Add `kid` support + JWKS key rotation strategy
+- [x] Add per-endpoint rate limit tuning (stricter for `/oauth2/token`)
+- [x] Add `kid` support + JWKS key rotation strategy
 
 ### Nice to have
 - [ ] Web UI for device verification

@@ -58,6 +58,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.jwt.private_key_path,
         &config.jwt.public_key_path,
         config.jwt.issuer.clone(),
+        config.jwt.key_id.clone(),
     )?);
 
     // Vytvoř OAuth2 state
@@ -182,23 +183,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(oidc_state);
 
     tracing::info!(
-        "Rate limiting enabled (rps={}, burst={})",
+        "Rate limiting enabled (default: rps={}, burst={}; token endpoint: rps={}, burst={})",
         config.rate_limit.requests_per_second,
-        config.rate_limit.burst_size
+        config.rate_limit.burst_size,
+        config.rate_limit.token_endpoint_requests_per_second,
+        config.rate_limit.token_endpoint_burst_size
     );
-    let governor = GovernorConfigBuilder::default()
+
+    // Globální rate limiter
+    let governor_global = GovernorConfigBuilder::default()
         .per_second(config.rate_limit.requests_per_second.into())
         .burst_size(config.rate_limit.burst_size)
         .key_extractor(SmartIpKeyExtractor)
         .finish()
-        .expect("Failed to build rate limiter");
+        .expect("Failed to build global rate limiter");
+
+    // Přísnější rate limiter pro token endpoint
+    let governor_token = GovernorConfigBuilder::default()
+        .per_second(config.rate_limit.token_endpoint_requests_per_second.into())
+        .burst_size(config.rate_limit.token_endpoint_burst_size)
+        .key_extractor(SmartIpKeyExtractor)
+        .finish()
+        .expect("Failed to build token endpoint rate limiter");
+
+    // Token endpoint s přísnějším rate limitingem
+    let token_routes = Router::new()
+        .route("/oauth2/token", post(oauth2::handle_token))
+        .layer(GovernorLayer::new(governor_token))
+        .with_state(oauth_state.clone());
 
     // Vytvoř routes
     let app = Router::new()
         // Health check
         .route("/health", get(health_check))
-        // OAuth2 endpoints
-        .route("/oauth2/token", post(oauth2::handle_token))
+        // OAuth2 endpoints (mimo /oauth2/token)
         .route("/oauth2/introspect", post(oauth2::handle_introspect))
         .route("/oauth2/revoke", post(oauth2::handle_revoke))
         .route("/oauth2/authorize", get(oauth2::handle_authorize))
@@ -224,8 +242,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         // Userinfo endpoint
         .route("/oauth2/userinfo", get(oauth2::handle_userinfo))
-        .layer(GovernorLayer::new(governor))
+        .layer(GovernorLayer::new(governor_global))
         .with_state(oauth_state)
+        // Merge token route s přísnějším rate limitingem
+        .merge(token_routes)
         // Merge well-known routes
         .merge(jwks_routes)
         .merge(discovery_routes)

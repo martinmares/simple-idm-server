@@ -42,6 +42,7 @@ pub struct JwtService {
     decoding_key: DecodingKey,
     pub issuer: String,
     public_key_path: String,
+    key_id: String,
 }
 
 impl JwtService {
@@ -49,6 +50,7 @@ impl JwtService {
         private_key_path: &str,
         public_key_path: &str,
         issuer: String,
+        key_id: String,
     ) -> Result<Self, JwtError> {
         let private_key = fs::read(private_key_path)
             .map_err(|e| JwtError::KeyFileError(format!("Private key: {}", e)))?;
@@ -65,6 +67,7 @@ impl JwtService {
             decoding_key,
             issuer,
             public_key_path: public_key_path.to_string(),
+            key_id,
         })
     }
 
@@ -95,7 +98,8 @@ impl JwtService {
             custom_claims,
         };
 
-        let header = Header::new(Algorithm::RS256);
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(self.key_id.clone());
         encode(&header, &claims, &self.encoding_key)
             .map_err(|e| JwtError::EncodeError(e.to_string()))
     }
@@ -130,8 +134,8 @@ impl JwtService {
         let n = public_key.n().to_bytes_be();
         let e = public_key.e().to_bytes_be();
 
-        // Convert to JWK
-        let jwk = crate::jwks::rsa_components_to_jwk(&n, &e, Some("default-key".to_string()));
+        // Convert to JWK with configured key_id
+        let jwk = crate::jwks::rsa_components_to_jwk(&n, &e, Some(self.key_id.clone()));
 
         Ok(crate::jwks::JsonWebKeySet { keys: vec![jwk] })
     }
