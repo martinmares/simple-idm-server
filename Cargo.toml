@@ -55,6 +55,8 @@ ratatui = "0.26"
 crossterm = "0.27"
 tui-input = "0.8"
 url = "2.5"
+dirs = "5.0"
+urlencoding = "2.1"
 
 [[bin]]
 name = "simple-idm-ctl"

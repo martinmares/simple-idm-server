@@ -121,12 +121,20 @@ pub async fn admin_auth_middleware(
             }
 
             // Check if token has admin permissions
-            // 1. Check groups for "admin" group
-            if claims.groups.contains(&"admin".to_string()) {
+            // 1. Check groups for "simple-idm:role:admin" group (naming convention)
+            if claims.groups.contains(&"simple-idm:role:admin".to_string()) {
                 return Ok(next.run(request).await);
             }
 
-            // 2. Check custom claims for admin-related claims
+            // 2. DEPRECATED: Backward compatibility for old "admin" group
+            if claims.groups.contains(&"admin".to_string()) {
+                tracing::warn!(
+                    "User has deprecated 'admin' group - please migrate to 'simple-idm:role:admin'"
+                );
+                return Ok(next.run(request).await);
+            }
+
+            // 3. Check custom claims for admin-related claims (fallback)
             for (key, _value) in &claims.custom_claims {
                 if key.starts_with("admin") || key.contains("admin") {
                     return Ok(next.run(request).await);
