@@ -155,7 +155,10 @@ pub struct CreateClaimMapRequest {
     pub client_id: Uuid,
     pub group_id: Uuid,
     pub claim_name: String,
-    pub claim_value: Option<String>,
+    // Backward compatible: if claim_value is a string, use 'single' kind
+    // If claim_value is an array, use 'array' kind
+    #[serde(default)]
+    pub claim_value: serde_json::Value, // Can be String or Array
 }
 
 #[derive(Debug, Serialize)]
@@ -164,8 +167,9 @@ pub struct ClaimMapResponse {
     pub client_id: Uuid,
     pub group_id: Uuid,
     pub claim_name: String,
+    pub claim_value_kind: String, // 'single' or 'array'
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub claim_value: Option<String>,
+    pub claim_value: Option<serde_json::Value>, // String for single, Array for array
 }
 
 #[derive(Debug, Serialize)]
@@ -1182,32 +1186,87 @@ pub async fn create_claim_map(
     State(db_pool): State<DbPool>,
     Json(req): Json<CreateClaimMapRequest>,
 ) -> impl IntoResponse {
+    // Determine kind and values based on input
+    let (kind, claim_value_str, claim_value_json) = match &req.claim_value {
+        serde_json::Value::String(s) => {
+            // Single string value
+            ("single", Some(s.clone()), None)
+        }
+        serde_json::Value::Array(arr) => {
+            // Array of strings
+            let strings: Vec<String> = arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+
+            if strings.is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: "claim_value array must contain at least one string".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+
+            let json_str = serde_json::to_string(&strings).unwrap();
+            ("array", None, Some(json_str))
+        }
+        serde_json::Value::Null => {
+            // Null value - use single with null
+            ("single", None, None)
+        }
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: "claim_value must be a string or array of strings".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
     let result = sqlx::query_as::<_, crate::db::models::ClaimMap>(
         r#"
-        INSERT INTO claim_maps (client_id, group_id, claim_name, claim_value)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, client_id, group_id, claim_name, claim_value
+        INSERT INTO claim_maps (client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json
         "#,
     )
     .bind(req.client_id)
     .bind(req.group_id)
     .bind(req.claim_name)
-    .bind(req.claim_value)
+    .bind(claim_value_str)
+    .bind(kind)
+    .bind(claim_value_json)
     .fetch_one(&db_pool)
     .await;
 
     match result {
-        Ok(claim_map) => (
-            StatusCode::CREATED,
-            Json(ClaimMapResponse {
-                id: claim_map.id,
-                client_id: claim_map.client_id,
-                group_id: claim_map.group_id,
-                claim_name: claim_map.claim_name,
-                claim_value: claim_map.claim_value,
-            }),
-        )
-            .into_response(),
+        Ok(claim_map) => {
+            // Build response value based on kind
+            let response_value = if claim_map.claim_value_kind == "array" {
+                claim_map.claim_value_json.as_ref()
+                    .and_then(|json| serde_json::from_str(json).ok())
+            } else {
+                claim_map.claim_value.as_ref().map(|s| serde_json::Value::String(s.clone()))
+            };
+
+            (
+                StatusCode::CREATED,
+                Json(ClaimMapResponse {
+                    id: claim_map.id,
+                    client_id: claim_map.client_id,
+                    group_id: claim_map.group_id,
+                    claim_name: claim_map.claim_name,
+                    claim_value_kind: claim_map.claim_value_kind,
+                    claim_value: response_value,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to create claim map: {:?}", e);
             (
@@ -1233,7 +1292,7 @@ pub async fn list_claim_maps(
 
     let result = sqlx::query_as::<_, crate::db::models::ClaimMap>(
         r#"
-        SELECT id, client_id, group_id, claim_name, claim_value
+        SELECT id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json
         FROM claim_maps
         ORDER BY claim_name
         LIMIT $1 OFFSET $2
@@ -1248,12 +1307,22 @@ pub async fn list_claim_maps(
         Ok(claim_maps) => {
             let claim_maps: Vec<ClaimMapResponse> = claim_maps
                 .into_iter()
-                .map(|cm| ClaimMapResponse {
-                    id: cm.id,
-                    client_id: cm.client_id,
-                    group_id: cm.group_id,
-                    claim_name: cm.claim_name,
-                    claim_value: cm.claim_value,
+                .map(|cm| {
+                    let response_value = if cm.claim_value_kind == "array" {
+                        cm.claim_value_json.as_ref()
+                            .and_then(|json| serde_json::from_str(json).ok())
+                    } else {
+                        cm.claim_value.as_ref().map(|s| serde_json::Value::String(s.clone()))
+                    };
+
+                    ClaimMapResponse {
+                        id: cm.id,
+                        client_id: cm.client_id,
+                        group_id: cm.group_id,
+                        claim_name: cm.claim_name,
+                        claim_value_kind: cm.claim_value_kind,
+                        claim_value: response_value,
+                    }
                 })
                 .collect();
             (StatusCode::OK, Json(claim_maps)).into_response()
