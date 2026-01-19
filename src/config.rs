@@ -29,12 +29,15 @@ pub struct JwtConfig {
     pub refresh_token_cleanup_interval_seconds: u64,
     pub private_key_path: String,
     pub public_key_path: String,
+    pub key_id: String, // kid for JWKS
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct RateLimitConfig {
     pub requests_per_second: u32,
     pub burst_size: u32,
+    pub token_endpoint_requests_per_second: u32,
+    pub token_endpoint_burst_size: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -71,6 +74,8 @@ impl Config {
             .unwrap_or_else(|_| "./keys/private.pem".to_string());
         let public_key_path = env::var("JWT_PUBLIC_KEY_PATH")
             .unwrap_or_else(|_| "./keys/public.pem".to_string());
+        let key_id = env::var("JWT_KEY_ID")
+            .unwrap_or_else(|_| "default-key-2025".to_string());
 
         let admin_root_token = env::var("ADMIN_ROOT_TOKEN").ok();
         let rate_limit_rps = env::var("RATE_LIMIT_REQUESTS_PER_SECOND")
@@ -81,6 +86,14 @@ impl Config {
             .unwrap_or_else(|_| "10".to_string())
             .parse()
             .unwrap_or(10);
+        let token_endpoint_rps = env::var("RATE_LIMIT_TOKEN_ENDPOINT_REQUESTS_PER_SECOND")
+            .unwrap_or_else(|_| "2".to_string())
+            .parse()
+            .unwrap_or(2);
+        let token_endpoint_burst = env::var("RATE_LIMIT_TOKEN_ENDPOINT_BURST_SIZE")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .unwrap_or(5);
 
         Ok(Config {
             server: ServerConfig {
@@ -95,10 +108,13 @@ impl Config {
                 refresh_token_cleanup_interval_seconds: refresh_token_cleanup_interval,
                 private_key_path,
                 public_key_path,
+                key_id,
             },
             rate_limit: RateLimitConfig {
                 requests_per_second: rate_limit_rps,
                 burst_size: rate_limit_burst,
+                token_endpoint_requests_per_second: token_endpoint_rps,
+                token_endpoint_burst_size: token_endpoint_burst,
             },
             admin: AdminConfig {
                 root_token: admin_root_token,
