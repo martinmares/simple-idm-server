@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, name, description\n        FROM groups\n        ORDER BY name\n        LIMIT $1 OFFSET $2\n        ",
+  "query": "\n        INSERT INTO groups (name, description, is_virtual)\n        VALUES ($1, $2, $3)\n        RETURNING id, name, description, is_virtual\n        ",
   "describe": {
     "columns": [
       {
@@ -17,19 +17,26 @@
         "ordinal": 2,
         "name": "description",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_virtual",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
-        "Int8",
-        "Int8"
+        "Varchar",
+        "Text",
+        "Bool"
       ]
     },
     "nullable": [
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "0662fc20586e4127430d4205834e0d15c7c47675efb435ac010598ff053538aa"
+  "hash": "2b93e965423da0cd7932bbb72561f9f5910f5ee5cb14503533408d5c4e325adc"
 }
