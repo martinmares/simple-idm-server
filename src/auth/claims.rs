@@ -180,6 +180,7 @@ pub async fn get_effective_user_groups(
 pub async fn get_user_group_names(
     pool: &DbPool,
     user_id: Uuid,
+    ignore_virtual: bool,
 ) -> Result<Vec<String>, ClaimMapError> {
     // Získej effective group IDs (včetně nested)
     let effective_group_ids = get_effective_user_groups(pool, user_id).await?;
@@ -189,17 +190,72 @@ pub async fn get_user_group_names(
     }
 
     // Načti názvy pro všechny effective groups
-    let group_names = sqlx::query_scalar::<_, String>(
-        r#"
-        SELECT name
-        FROM groups
-        WHERE id = ANY($1)
-        ORDER BY name
-        "#,
-    )
-    .bind(&effective_group_ids)
-    .fetch_all(pool)
-    .await?;
+    let group_names = if ignore_virtual {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT name
+            FROM groups
+            WHERE id = ANY($1) AND is_virtual = false
+            ORDER BY name
+            "#,
+        )
+        .bind(&effective_group_ids)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT name
+            FROM groups
+            WHERE id = ANY($1)
+            ORDER BY name
+            "#,
+        )
+        .bind(&effective_group_ids)
+        .fetch_all(pool)
+        .await?
+    };
+
+    Ok(group_names)
+}
+
+/// Načte názvy přímých skupin uživatele (bez nested groups), seřazené alfabeticky
+pub async fn get_direct_user_group_names(
+    pool: &DbPool,
+    user_id: Uuid,
+    ignore_virtual: bool,
+) -> Result<Vec<String>, ClaimMapError> {
+    let direct_group_ids = get_user_groups(pool, user_id).await?;
+
+    if direct_group_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let group_names = if ignore_virtual {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT name
+            FROM groups
+            WHERE id = ANY($1) AND is_virtual = false
+            ORDER BY name
+            "#,
+        )
+        .bind(&direct_group_ids)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT name
+            FROM groups
+            WHERE id = ANY($1)
+            ORDER BY name
+            "#,
+        )
+        .bind(&direct_group_ids)
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(group_names)
 }

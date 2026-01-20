@@ -1,4 +1,7 @@
-use crate::auth::{build_custom_claims, get_effective_user_groups, get_user_group_names, verify_password, JwtService};
+use crate::auth::{
+    build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
+    get_user_group_names, verify_password, JwtService,
+};
 use crate::db::models::{AuthenticationSession, AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User};
 use axum::{
     body::Bytes,
@@ -15,6 +18,9 @@ use sqlx;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
+
+const EMPTY_CLIENT_SECRET_HASH: &str =
+    "$argon2id$v=19$m=19456,t=2,p=1$cmFuZG9tc2FsdDEyMzQ1Njc4$XuNHV8S+FPZGCjrD8bqRHT5rCREu9xqhvWqmCFKaRRA";
 
 use super::client_credentials::{ErrorResponse, OAuth2State, TokenResponse};
 use super::cleanup::cleanup_refresh_tokens;
@@ -757,40 +763,54 @@ async fn handle_authorization_code_token(
         }
     };
 
-    // Načti skupiny uživatele
-    let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
-        Ok(ids) => ids,
-        Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Failed to fetch user groups".to_string(),
-            })
-            .into_response()
-        }
+    let user_group_names = match client.groups_claim_mode.as_str() {
+        "none" => vec![],
+        "direct" => match get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await {
+            Ok(names) => names,
+            Err(_) => {
+                return Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to fetch direct user group names".to_string(),
+                })
+                .into_response()
+            }
+        },
+        _ => match get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await {
+            Ok(names) => names,
+            Err(_) => {
+                return Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to fetch user group names".to_string(),
+                })
+                .into_response()
+            }
+        },
     };
 
-    let user_group_names = match get_user_group_names(&state.db_pool, user.id).await {
-        Ok(names) => names,
-        Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Failed to fetch user group names".to_string(),
-            })
-            .into_response()
+    // Vytvoř custom claims pomocí claim maps (pokud povoleno)
+    let custom_claims = if client.include_claim_maps {
+        let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
+            Ok(ids) => ids,
+            Err(_) => {
+                return Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to fetch user groups".to_string(),
+                })
+                .into_response()
+            }
+        };
+        match build_custom_claims(&state.db_pool, client.id, &user_group_ids).await {
+            Ok(claims) => claims,
+            Err(_) => {
+                return Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to build custom claims".to_string(),
+                })
+                .into_response()
+            }
         }
-    };
-
-    // Vytvoř custom claims pomocí claim maps
-    let custom_claims = match build_custom_claims(&state.db_pool, client.id, &user_group_ids).await
-    {
-        Ok(claims) => claims,
-        Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Failed to build custom claims".to_string(),
-            })
-            .into_response()
-        }
+    } else {
+        std::collections::HashMap::new()
     };
 
     // Log JWT claims and groups for debugging
@@ -991,18 +1011,21 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         }
     };
 
-    let client_secret = match req.client_secret {
-        Some(secret) => secret,
-        None => {
+    let client_secret = req.client_secret.unwrap_or_default();
+    let is_public = client.client_id == "cli-tools"
+        || client.client_secret_hash == EMPTY_CLIENT_SECRET_HASH
+        || client.client_secret_hash.contains("dummy-hash-not-used")
+        || verify_password("", &client.client_secret_hash).unwrap_or(false);
+
+    if client_secret.is_empty() {
+        if !is_public {
             return Json(ErrorResponse {
                 error: "invalid_client".to_string(),
                 error_description: "Missing client_secret".to_string(),
             })
-            .into_response()
+            .into_response();
         }
-    };
-
-    if !verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
+    } else if !verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
         return Json(ErrorResponse {
             error: "invalid_client".to_string(),
             error_description: "Invalid client credentials".to_string(),
@@ -1033,21 +1056,23 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         }
     };
 
-    // Načti skupiny
-    let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
-        Ok(ids) => ids,
-        Err(_) => vec![],
+    let user_group_names = match client.groups_claim_mode.as_str() {
+        "none" => vec![],
+        "direct" => get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+            .await
+            .unwrap_or_default(),
+        _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await.unwrap_or_default(),
     };
 
-    let user_group_names = match get_user_group_names(&state.db_pool, user.id).await {
-        Ok(names) => names,
-        Err(_) => vec![],
-    };
-
-    let custom_claims = match build_custom_claims(&state.db_pool, client.id, &user_group_ids).await
-    {
-        Ok(claims) => claims,
-        Err(_) => std::collections::HashMap::new(),
+    let custom_claims = if client.include_claim_maps {
+        let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
+            .await
+            .unwrap_or_default();
+        build_custom_claims(&state.db_pool, client.id, &user_group_ids)
+            .await
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
     };
 
     // Log JWT claims and groups for debugging
