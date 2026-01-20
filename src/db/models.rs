@@ -21,12 +21,14 @@ pub struct Group {
     pub name: String,
     pub description: Option<String>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow)]
 pub struct UserGroup {
     pub user_id: Uuid,
     pub group_id: Uuid,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -41,6 +43,7 @@ pub struct OAuthClient {
     pub scope: String,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
@@ -52,6 +55,7 @@ pub struct ClaimMap {
     pub claim_value: Option<String>,
     pub claim_value_kind: String, // 'single' or 'array'
     pub claim_value_json: Option<String>, // JSON array for array kind
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -97,4 +101,15 @@ pub struct DeviceCode {
     pub expires_at: DateTime<Utc>,
     pub is_authorized: bool,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct AuthenticationSession {
+    pub id: Uuid,
+    pub session_token: String,
+    pub user_id: Uuid,
+    pub client_id: Option<Uuid>, // Optional client-specific session expiry
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: DateTime<Utc>,
 }

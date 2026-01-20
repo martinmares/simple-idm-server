@@ -34,6 +34,7 @@ pub struct OAuth2State {
     pub jwt_service: Arc<JwtService>,
     pub access_token_expiry: i64,
     pub refresh_token_expiry: i64,
+    pub auth_session_expiry: i64,
 }
 
 pub async fn handle_client_credentials(
@@ -108,6 +109,13 @@ pub async fn handle_client_credentials(
 
     // Pro M2M flow nemáme uživatele, takže použijeme client_id jako subject
     let scope = req.scope.unwrap_or_else(|| client.scope.clone());
+
+    // Log JWT token issuance for M2M
+    tracing::debug!(
+        client_id = %client.client_id,
+        scope = %scope,
+        "Issuing JWT token (M2M)"
+    );
 
     // Vytvoř access token (bez custom claims pro M2M)
     let access_token = match state.jwt_service.create_access_token(
