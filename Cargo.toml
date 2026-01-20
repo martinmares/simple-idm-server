@@ -37,6 +37,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Config & Env
 dotenvy = "0.15"
 config = "0.15"
+toml = "0.8"
 
 # Logging
 tracing = "0.1"
@@ -51,6 +52,12 @@ validator = { version = "0.20", features = ["derive"] }
 
 # HTTP client (for OIDC discovery)
 reqwest = { version = "0.13", features = ["json", "form"] }
+
+# OIDC client
+openidconnect = "3.5"
+
+# In-memory storage
+dashmap = "6.1"
 ratatui = "0.26"
 crossterm = "0.27"
 tui-input = "0.8"
@@ -61,6 +68,10 @@ urlencoding = "2.1"
 [[bin]]
 name = "simple-idm-ctl"
 path = "src/bin/simple-idm-ctl.rs"
+
+[[bin]]
+name = "simple-idm-oauth2-proxy"
+path = "src/bin/simple-idm-oauth2-proxy.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"

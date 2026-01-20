@@ -7,6 +7,7 @@ A simple OAuth2/OIDC Identity Provider Server written in Rust.
 - **Machine-to-Machine (M2M)** - OAuth2 Client Credentials Grant
 - **User-to-Webserver** - OAuth2 Authorization Code Flow with PKCE + HTML Login Form
 - **TV/Device Flow** - OAuth2 Device Authorization Grant (RFC 8628) (experimental)
+- **OAuth2 Authentication Proxy** - Add OIDC to legacy applications (nginx auth_request)
 - **Custom Claim Mapping** - Similar to Kanidm, allows filtering groups/claims per application
 - **JWT tokens** - RS256 with asymmetric keys
 - **Refresh tokens** - For long-term sessions
@@ -287,6 +288,49 @@ OAuth helpers (for testing OAuth flows):
 ```
 
 **Note:** CLI requires users to be members of the `simple-idm:role:admin` group.
+
+---
+
+## OAuth2 Authentication Proxy
+
+`simple-idm-oauth2-proxy` is an edge authentication proxy that adds OIDC authentication to legacy applications that don't have their own OAuth2/OIDC support.
+
+### Features
+
+- **OIDC Authorization Code Flow + PKCE** - Secure OAuth2 flow
+- **Session Management** - In-memory or SQLite persistence
+- **Nginx auth_request Integration** - Standard integration with reverse proxy
+- **Header Injection** - Pass identity and groups to application
+- **Group Claim Support** - Parse groups from JWT (array or string)
+
+### Quick Start
+
+Build the proxy:
+```bash
+cargo build --release --bin simple-idm-oauth2-proxy
+```
+
+Create configuration:
+```bash
+cp config.example.oauth2-proxy.toml config.oauth2-proxy.toml
+# Edit config.oauth2-proxy.toml
+```
+
+Run:
+```bash
+./target/release/simple-idm-oauth2-proxy
+```
+
+### Documentation
+
+See detailed documentation in [docs/OAUTH2_PROXY.md](docs/OAUTH2_PROXY.md) including:
+- Full configuration options
+- Nginx integration example
+- Login flow explanation
+- Header formats
+- Legacy application integration examples
+
+---
 
 #### 3. Token Exchange (exchange code for token)
 ```
