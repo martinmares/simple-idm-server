@@ -48,6 +48,7 @@ enum Mode {
     RelationEditor,
     ClaimEditor,
     ClaimEntry,
+    ClaimValueEditor,
 }
 
 #[derive(Clone, Debug)]
@@ -223,6 +224,7 @@ struct App {
     relation_editor: Option<RelationEditorState>,
     claim_editor: Option<ClaimEditorState>,
     claim_entry: Option<ClaimEntryState>,
+    claim_value_editor: Option<ClaimValueEditorState>,
     cursor_visible: bool,
 }
 
@@ -248,6 +250,7 @@ impl App {
             relation_editor: None,
             claim_editor: None,
             claim_entry: None,
+            claim_value_editor: None,
             cursor_visible: false,
         }
     }
@@ -315,11 +318,40 @@ impl PickerState {
             })
             .collect();
 
+        let index = ["effective", "direct", "none"]
+            .iter()
+            .position(|value| *value == selected)
+            .unwrap_or(0);
+
         Self {
             title: "Select groups_claim_mode".to_string(),
             options,
-            index: 0,
+            index,
             target_field: "groups_claim_mode",
+            single_select: true,
+        }
+    }
+
+    fn new_claim_value_kind(selected: &str) -> Self {
+        let options = ["single", "array"]
+            .iter()
+            .map(|value| PickerOption {
+                label: value,
+                value,
+                selected: *value == selected,
+            })
+            .collect();
+
+        let index = ["single", "array"]
+            .iter()
+            .position(|value| *value == selected)
+            .unwrap_or(0);
+
+        Self {
+            title: "Select claim_value_kind".to_string(),
+            options,
+            index,
+            target_field: "claim_value_kind",
             single_select: true,
         }
     }
@@ -408,6 +440,7 @@ struct GroupUsersRow {
 struct ClaimSummary {
     id: String,
     claim_name: String,
+    claim_value_kind: String,
     claim_value: Option<Value>,
     other_id: String,
     other_label: String,
@@ -624,6 +657,7 @@ enum ClaimEditorMode {
 struct ClaimEditorItem {
     id: Option<String>,
     claim_name: String,
+    claim_value_kind: String,
     claim_value: Option<Value>,
     other_id: String,
     other_label: String,
@@ -671,11 +705,22 @@ struct ClaimEntryState {
     title: String,
     mode: ClaimEntryMode,
     claim_name: Input,
-    claim_value: Input,
+    claim_value_kind: String,
+    claim_values: Vec<Input>,
     other_id: Option<String>,
     other_label: Option<String>,
     index: usize,
     error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimValueEditorState {
+    title: String,
+    values: Vec<Input>,
+    index: usize,
+    editing: bool,
+    error: Option<String>,
+    allow_multiple: bool,
 }
 fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
     vec![
@@ -758,6 +803,28 @@ async fn event_loop(
             }
             continue;
         }
+        if app.mode == Mode::ClaimValueEditor {
+            let handled = handle_claim_value_editor_event(app, event)?;
+            if handled == ClaimValueEditorResult::Applied {
+                if let (Some(entry), Some(editor)) =
+                    (app.claim_entry.as_mut(), app.claim_value_editor.as_ref())
+                {
+                    if entry.claim_value_kind == "array" {
+                        entry.claim_values = editor.values.clone();
+                    } else if let Some(first) = editor.values.first().cloned() {
+                        entry.claim_values = vec![first];
+                    } else {
+                        entry.claim_values = vec![Input::default()];
+                    }
+                }
+                app.claim_value_editor = None;
+                app.mode = Mode::ClaimEntry;
+            } else if handled == ClaimValueEditorResult::Cancelled {
+                app.claim_value_editor = None;
+                app.mode = Mode::ClaimEntry;
+            }
+            continue;
+        }
         if app.mode == Mode::PasswordGen {
             let handled = handle_password_gen_event(app, event)?;
             if handled == PasswordGenResult::Applied || handled == PasswordGenResult::Cancelled {
@@ -779,7 +846,11 @@ async fn event_loop(
         if app.mode == Mode::Picker {
             let handled = handle_picker_event(app, event)?;
             if handled == PickerResult::Applied || handled == PickerResult::Cancelled {
-                app.mode = Mode::Form;
+                if app.claim_entry.is_some() {
+                    app.mode = Mode::ClaimEntry;
+                } else {
+                    app.mode = Mode::Form;
+                }
             }
             continue;
         }
@@ -929,8 +1000,22 @@ fn handle_picker_event(app: &mut App, event: Event) -> Result<PickerResult> {
                     option.selected = true;
                 }
             }
-            if let Some(form) = app.form.as_mut() {
-                let values = picker.selected_values();
+            let values = picker.selected_values();
+            if picker.target_field == "claim_value_kind" {
+                if let Some(entry) = app.claim_entry.as_mut() {
+                    let selected = values.first().cloned().unwrap_or_else(|| "single".to_string());
+                    entry.claim_value_kind = selected.clone();
+                    if selected == "single" {
+                        if let Some(first) = entry.claim_values.first().cloned() {
+                            entry.claim_values = vec![first];
+                        } else {
+                            entry.claim_values = vec![Input::default()];
+                        }
+                    } else if entry.claim_values.is_empty() {
+                        entry.claim_values = vec![Input::default()];
+                    }
+                }
+            } else if let Some(form) = app.form.as_mut() {
                 set_field_value(form, picker.target_field, values.join(", "));
             }
             app.picker = None;
@@ -1020,11 +1105,13 @@ async fn handle_claim_editor_event(
             editor.index = (editor.index + 1).min(editor.items.len().saturating_sub(1));
         }
         KeyCode::Char('a') => {
+            let claim_values = claim_value_to_entry_values_with_kind("single", &None);
             app.claim_entry = Some(ClaimEntryState {
                 title: "Přidat claim map".to_string(),
                 mode: ClaimEntryMode::Add,
                 claim_name: Input::default(),
-                claim_value: Input::default(),
+                claim_value_kind: "single".to_string(),
+                claim_values,
                 other_id: None,
                 other_label: None,
                 index: 0,
@@ -1035,11 +1122,14 @@ async fn handle_claim_editor_event(
         }
         KeyCode::Char('e') => {
             if let Some(item) = editor.items.get(editor.index).cloned() {
+                let claim_values =
+                    claim_value_to_entry_values_with_kind(&item.claim_value_kind, &item.claim_value);
                 app.claim_entry = Some(ClaimEntryState {
                     title: "Upravit claim map".to_string(),
                     mode: ClaimEntryMode::Edit(editor.index),
                     claim_name: input_with_value(item.claim_name),
-                    claim_value: input_with_value(claim_value_to_input(&item.claim_value)),
+                    claim_value_kind: item.claim_value_kind,
+                    claim_values,
                     other_id: Some(item.other_id),
                     other_label: Some(item.other_label),
                     index: 0,
@@ -1096,19 +1186,19 @@ async fn handle_claim_entry_event(
             return Ok(ClaimEntryResult::Cancelled);
         }
         KeyCode::Tab => {
-            entry.index = (entry.index + 1) % 3;
+            entry.index = (entry.index + 1) % 4;
             return Ok(ClaimEntryResult::Continue);
         }
         KeyCode::BackTab => {
             if entry.index == 0 {
-                entry.index = 2;
+                entry.index = 3;
             } else {
                 entry.index -= 1;
             }
             return Ok(ClaimEntryResult::Continue);
         }
         KeyCode::Enter => {
-            if entry.index < 2 {
+            if entry.index < 3 {
                 entry.index += 1;
                 return Ok(ClaimEntryResult::Continue);
             }
@@ -1121,8 +1211,7 @@ async fn handle_claim_entry_event(
                 entry.error = Some("Vyber klienta nebo skupinu".to_string());
                 return Ok(ClaimEntryResult::Continue);
             };
-            let claim_value_input = entry.claim_value.value().to_string();
-            let claim_value = match parse_claim_value_input(&claim_value_input) {
+            let claim_value = match build_claim_value(entry) {
                 Ok(value) => value,
                 Err(err) => {
                     entry.error = Some(err.to_string());
@@ -1140,6 +1229,7 @@ async fn handle_claim_entry_event(
                         editor.items.push(ClaimEditorItem {
                             id: None,
                             claim_name,
+                            claim_value_kind: entry.claim_value_kind.clone(),
                             claim_value,
                             other_id,
                             other_label,
@@ -1149,6 +1239,7 @@ async fn handle_claim_entry_event(
                     ClaimEntryMode::Edit(idx) => {
                         if let Some(item) = editor.items.get_mut(idx) {
                             item.claim_name = claim_name;
+                            item.claim_value_kind = entry.claim_value_kind.clone();
                             item.claim_value = claim_value;
                             item.other_id = other_id;
                             item.other_label = other_label;
@@ -1160,41 +1251,79 @@ async fn handle_claim_entry_event(
             app.claim_entry = None;
             return Ok(ClaimEntryResult::Applied);
         }
+        KeyCode::Char('t') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && entry.index == 2 {
+                app.claim_value_editor = Some(ClaimValueEditorState {
+                    title: "Upravit claim_value".to_string(),
+                    values: if entry.claim_value_kind == "array" {
+                        if entry.claim_values.is_empty() {
+                            vec![Input::default()]
+                        } else {
+                            entry.claim_values.clone()
+                        }
+                    } else if let Some(first) = entry.claim_values.first().cloned() {
+                        vec![first]
+                    } else {
+                        vec![Input::default()]
+                    },
+                    index: 0,
+                    editing: false,
+                    error: None,
+                    allow_multiple: entry.claim_value_kind == "array",
+                });
+                app.mode = Mode::ClaimValueEditor;
+                return Ok(ClaimEntryResult::Continue);
+            }
+            if entry.index == 0 {
+                entry.claim_name.handle_event(&event);
+            } else if entry.index == 2 {
+                handle_claim_value_input(entry, &event);
+            }
+        }
+        KeyCode::Char('k') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && entry.index == 1 {
+                app.picker = Some(PickerState::new_claim_value_kind(
+                    &entry.claim_value_kind,
+                ));
+                app.mode = Mode::Picker;
+                return Ok(ClaimEntryResult::Continue);
+            }
+        }
         KeyCode::Char('g') => {
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(mode, Some(ClaimEditorMode::ClientClaims { .. }))
             {
-                entry.index = 2;
+                entry.index = 3;
                 open_selector(app, http, SelectorKind::Groups, SelectorTarget::ClaimEntryOther)
                     .await?;
                 return Ok(ClaimEntryResult::Continue);
             }
             if entry.index == 0 {
                 entry.claim_name.handle_event(&event);
-            } else if entry.index == 1 {
-                entry.claim_value.handle_event(&event);
+            } else if entry.index == 2 {
+                handle_claim_value_input(entry, &event);
             }
         }
         KeyCode::Char('c') => {
             if key.modifiers.contains(KeyModifiers::CONTROL)
                 && matches!(mode, Some(ClaimEditorMode::GroupClaims { .. }))
             {
-                entry.index = 2;
+                entry.index = 3;
                 open_selector(app, http, SelectorKind::Clients, SelectorTarget::ClaimEntryOther)
                     .await?;
                 return Ok(ClaimEntryResult::Continue);
             }
             if entry.index == 0 {
                 entry.claim_name.handle_event(&event);
-            } else if entry.index == 1 {
-                entry.claim_value.handle_event(&event);
+            } else if entry.index == 2 {
+                handle_claim_value_input(entry, &event);
             }
         }
         _ => {
             if entry.index == 0 {
                 entry.claim_name.handle_event(&event);
-            } else if entry.index == 1 {
-                entry.claim_value.handle_event(&event);
+            } else if entry.index == 2 {
+                handle_claim_value_input(entry, &event);
             }
         }
     }
@@ -1282,6 +1411,82 @@ fn handle_selector_event(app: &mut App, event: Event) -> Result<SelectorResult> 
     }
 
     Ok(SelectorResult::Continue)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimValueEditorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+fn handle_claim_value_editor_event(
+    app: &mut App,
+    event: Event,
+) -> Result<ClaimValueEditorResult> {
+    let Some(editor) = app.claim_value_editor.as_mut() else {
+        return Ok(ClaimValueEditorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimValueEditorResult::Continue);
+    };
+
+    if editor.editing {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                editor.editing = false;
+                return Ok(ClaimValueEditorResult::Continue);
+            }
+            _ => {
+                if let Some(input) = editor.values.get_mut(editor.index) {
+                    input.handle_event(&event);
+                }
+                return Ok(ClaimValueEditorResult::Continue);
+            }
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => Ok(ClaimValueEditorResult::Cancelled),
+        KeyCode::Up => {
+            editor.index = editor.index.saturating_sub(1);
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Down => {
+            if !editor.values.is_empty() {
+                editor.index = (editor.index + 1).min(editor.values.len() - 1);
+            }
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Char('a') => {
+            if editor.allow_multiple {
+                let insert_at = editor.index + 1;
+                editor.values.insert(insert_at, Input::default());
+                editor.index = insert_at;
+            }
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            if editor.allow_multiple {
+                if editor.values.len() > 1 {
+                    editor.values.remove(editor.index);
+                    if editor.index >= editor.values.len() {
+                        editor.index = editor.values.len() - 1;
+                    }
+                } else if let Some(input) = editor.values.first_mut() {
+                    *input = Input::default();
+                }
+            }
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            editor.editing = true;
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Enter => Ok(ClaimValueEditorResult::Applied),
+        _ => Ok(ClaimValueEditorResult::Continue),
+    }
 }
 
 fn handle_password_gen_event(app: &mut App, event: Event) -> Result<PasswordGenResult> {
@@ -2118,6 +2323,7 @@ fn open_claim_editor(app: &mut App) -> Result<()> {
                 .map(|claim| ClaimEditorItem {
                     id: Some(claim.id.clone()),
                     claim_name: claim.claim_name.clone(),
+                    claim_value_kind: claim.claim_value_kind.clone(),
                     claim_value: claim.claim_value.clone(),
                     other_id: claim.other_id.clone(),
                     other_label: claim.other_label.clone(),
@@ -2140,6 +2346,7 @@ fn open_claim_editor(app: &mut App) -> Result<()> {
                 .map(|claim| ClaimEditorItem {
                     id: Some(claim.id.clone()),
                     claim_name: claim.claim_name.clone(),
+                    claim_value_kind: claim.claim_value_kind.clone(),
                     claim_value: claim.claim_value.clone(),
                     other_id: claim.other_id.clone(),
                     other_label: claim.other_label.clone(),
@@ -2715,6 +2922,7 @@ fn aggregate_client_claims(
         entry.claims.push(ClaimSummary {
             id: row.id.clone(),
             claim_name: row.claim_name.clone(),
+            claim_value_kind: row.claim_value_kind.clone(),
             claim_value: row.claim_value.clone(),
             other_id: row.group_id.clone(),
             other_label: group_name,
@@ -2768,6 +2976,7 @@ fn aggregate_group_claims(
         entry.claims.push(ClaimSummary {
             id: row.id.clone(),
             claim_name: row.claim_name.clone(),
+            claim_value_kind: row.claim_value_kind.clone(),
             claim_value: row.claim_value.clone(),
             other_id: row.client_id.clone(),
             other_label: client_name,
@@ -2904,6 +3113,7 @@ async fn apply_claim_changes(editor: &ClaimEditorState, http: &HttpClient) -> Re
             Some(id) => {
                 if let Some(original) = original_map.get(id) {
                     let changed = original.claim_name != item.claim_name
+                        || original.claim_value_kind != item.claim_value_kind
                         || original.claim_value != item.claim_value
                         || original.other_id != item.other_id;
                     if changed {
@@ -2985,7 +3195,14 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
         draw_claim_editor(frame, size, editor);
     }
     if let Some(entry) = &app.claim_entry {
-        draw_claim_entry(frame, size, app, entry, &mut cursor_visible);
+        let allow_cursor = app.claim_value_editor.is_none() && app.picker.is_none();
+        draw_claim_entry(frame, size, app, entry, &mut cursor_visible, allow_cursor);
+    }
+    if let Some(editor) = &app.claim_value_editor {
+        draw_claim_value_editor(frame, size, editor, &mut cursor_visible);
+    }
+    if let Some(picker) = &app.picker {
+        draw_picker(frame, size, picker);
     }
 
     if app.form.is_none() {
@@ -3366,9 +3583,6 @@ fn draw_form(
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 
-    if let Some(picker) = &app.picker {
-        draw_picker(frame, area, picker);
-    }
     if let Some(selector) = &app.selector {
         draw_selector(frame, area, selector, cursor_visible);
     }
@@ -3561,38 +3775,54 @@ fn claim_value_to_display(value: &Option<Value>) -> String {
     }
 }
 
-fn claim_value_to_input(value: &Option<Value>) -> String {
-    match value {
-        None => String::new(),
-        Some(Value::String(val)) => val.clone(),
-        Some(Value::Array(values)) => serde_json::to_string(values).unwrap_or_default(),
-        Some(other) => other.to_string(),
+fn claim_value_to_entry_values_with_kind(kind: &str, value: &Option<Value>) -> Vec<Input> {
+    let mut items = match value {
+        None => vec![Input::default()],
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_str().map(|value| input_with_value(value.to_string())))
+            .collect::<Vec<_>>(),
+        Some(Value::String(value)) => vec![input_with_value(value.to_string())],
+        Some(value) => vec![input_with_value(value.to_string())],
+    };
+    if items.is_empty() {
+        items.push(Input::default());
     }
+    if kind == "single" && items.len() > 1 {
+        items.truncate(1);
+    }
+    items
 }
 
-fn parse_claim_value_input(input: &str) -> Result<Option<Value>> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
+fn build_claim_value(entry: &ClaimEntryState) -> Result<Option<Value>> {
+    let mut values = Vec::new();
+    for input in &entry.claim_values {
+        let trimmed = input.value().trim();
+        if !trimmed.is_empty() {
+            values.push(Value::String(trimmed.to_string()));
+        }
     }
-
-    if trimmed.starts_with('[') {
-        let parsed: Value =
-            serde_json::from_str(trimmed).context("claim_value musí být JSON array")?;
-        let arr = parsed
-            .as_array()
-            .ok_or_else(|| anyhow!("claim_value musí být JSON array"))?;
-        let strings: Vec<Value> = arr
-            .iter()
-            .filter_map(|v| v.as_str().map(|s| Value::String(s.to_string())))
-            .collect();
-        if strings.is_empty() {
+    if entry.claim_value_kind == "array" {
+        if values.is_empty() {
             bail!("claim_value array musí obsahovat alespoň jeden string");
         }
-        return Ok(Some(Value::Array(strings)));
+        return Ok(Some(Value::Array(values)));
     }
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let Value::String(value) = values.remove(0) else {
+        bail!("claim_value musí být string");
+    };
+    Ok(Some(Value::String(value)))
+}
 
-    Ok(Some(Value::String(trimmed.to_string())))
+fn handle_claim_value_input(entry: &mut ClaimEntryState, event: &Event) {
+    if entry.claim_value_kind == "single" && entry.claim_values.len() == 1 {
+        if let Some(input) = entry.claim_values.first_mut() {
+            input.handle_event(event);
+        }
+    }
 }
 
 fn line_kv(key: &str, value: &str) -> Line<'static> {
@@ -3995,6 +4225,7 @@ fn draw_claim_entry(
     app: &App,
     entry: &ClaimEntryState,
     cursor_visible: &mut bool,
+    allow_cursor: bool,
 ) {
     let popup = centered_rect(65, 60, area);
     frame.render_widget(Clear, popup);
@@ -4026,20 +4257,16 @@ fn draw_claim_entry(
         None => "",
     };
 
-    let fields = vec![
-        ("claim_name", entry.claim_name.value().to_string(), ""),
-        (
-            "claim_value",
-            entry.claim_value.value().to_string(),
-            " (string nebo JSON array)",
-        ),
-        ("target", other_line, other_hint),
-    ];
-
     let mut lines = Vec::new();
     let mut cursor = None;
-    for (idx, (label, value, hint)) in fields.into_iter().enumerate() {
-        let is_active = idx == entry.index;
+    let mut line_idx = 0u16;
+
+    let render_field = |lines: &mut Vec<Line<'static>>,
+                        label: &str,
+                        value: String,
+                        hint: String,
+                        is_active: bool|
+     -> usize {
         let prefix = if is_active { "> " } else { "  " };
         let mut spans = vec![
             Span::styled(prefix, Style::default().fg(Color::Yellow)),
@@ -4050,29 +4277,82 @@ fn draw_claim_entry(
                     .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
             ),
             Span::styled(
-                value.clone(),
+                value,
                 Style::default()
                     .fg(if is_active { Color::Cyan } else { Color::White })
                     .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
             ),
         ];
         if !hint.is_empty() {
-            spans.push(Span::styled(hint, Style::default().fg(Color::DarkGray)));
+            spans.push(Span::styled(
+                hint,
+                Style::default().fg(Color::DarkGray),
+            ));
         }
         lines.push(Line::from(spans));
+        prefix.len() + label.len() + 2
+    };
 
-        if is_active && idx < 2 {
-            let cursor_offset = if idx == 0 {
-                entry.claim_name.cursor()
-            } else {
-                entry.claim_value.cursor()
-            };
-            let cursor_x =
-                inner[0].x + (prefix.len() + label.len() + 2 + cursor_offset) as u16;
-            let cursor_y = inner[0].y + idx as u16;
+    let claim_name_offset = render_field(
+        &mut lines,
+        "claim_name",
+        entry.claim_name.value().to_string(),
+        String::new(),
+        entry.index == 0,
+    );
+    if entry.index == 0 {
+        let cursor_x = inner[0].x + (claim_name_offset + entry.claim_name.cursor()) as u16;
+        let cursor_y = inner[0].y + line_idx;
+        cursor = Some((cursor_x, cursor_y));
+    }
+    line_idx += 1;
+
+    let _claim_kind_offset = render_field(
+        &mut lines,
+        "claim_value_kind",
+        entry.claim_value_kind.clone(),
+        " (Ctrl+K select)".to_string(),
+        entry.index == 1,
+    );
+    line_idx += 1;
+
+    let claim_value_hint = " (Ctrl+T edit values)".to_string();
+    let claim_value_display = if entry.claim_value_kind == "array" {
+        format!("[array: {}]", entry.claim_values.len())
+    } else if entry.claim_values.len() <= 1 {
+        entry
+            .claim_values
+            .first()
+            .map(|input| input.value().to_string())
+            .unwrap_or_default()
+    } else {
+        entry
+            .claim_values
+            .first()
+            .map(|input| input.value().to_string())
+            .unwrap_or_default()
+    };
+    let value_offset = render_field(
+        &mut lines,
+        "claim_value",
+        claim_value_display,
+        claim_value_hint,
+        entry.index == 2,
+    );
+    if entry.index == 2 && entry.claim_value_kind == "single" && entry.claim_values.len() == 1 {
+        if let Some(input) = entry.claim_values.first() {
+            let cursor_x = inner[0].x + (value_offset + input.cursor()) as u16;
+            let cursor_y = inner[0].y + line_idx;
             cursor = Some((cursor_x, cursor_y));
         }
     }
+    render_field(
+        &mut lines,
+        "target",
+        other_line,
+        other_hint.to_string(),
+        entry.index == 3,
+    );
 
     if let Some(error) = &entry.error {
         lines.push(Line::from(Span::styled(
@@ -4083,14 +4363,95 @@ fn draw_claim_entry(
 
     let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
     frame.render_widget(paragraph, inner[0]);
-    if let Some((x, y)) = cursor {
-        frame.set_cursor(x, y);
-        *cursor_visible = true;
+    if allow_cursor {
+        if let Some((x, y)) = cursor {
+            frame.set_cursor(x, y);
+            *cursor_visible = true;
+        }
     }
 
-    let footer = Paragraph::new("Tab move | Enter next/save | Esc cancel")
+    let footer = Paragraph::new(
+        "Tab move | Enter next/save | Esc cancel | Ctrl+K kind | Ctrl+T edit values",
+    )
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
+}
+
+fn draw_claim_value_editor(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &ClaimValueEditorState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(55, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(editor.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let rows = editor
+        .values
+        .iter()
+        .enumerate()
+        .map(|(idx, input)| {
+            let label = format!("[{}]", idx + 1);
+            Row::new(vec![label, input.value().to_string()])
+        })
+        .collect::<Vec<_>>();
+    let mut state = TableState::default();
+    if !editor.values.is_empty() {
+        state.select(Some(editor.index));
+    }
+    let table = Table::new(
+        rows,
+        vec![Constraint::Length(6), Constraint::Percentage(94)],
+    )
+    .header(Row::new(vec!["#", "Value"]).style(Style::default().add_modifier(Modifier::BOLD)))
+    .highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(">> ");
+    frame.render_stateful_widget(table, inner[0], &mut state);
+
+    let error_lines = editor
+        .error
+        .as_ref()
+        .map(|err| {
+            err.lines()
+                .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Red))))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![Line::from("")]);
+    let error = Paragraph::new(error_lines).wrap(Wrap { trim: true });
+    frame.render_widget(error, inner[1]);
+
+    let footer = if editor.editing {
+        "Enter done | Esc cancel edit"
+    } else if editor.allow_multiple {
+        "a add | d delete | e edit | Enter apply | Esc cancel"
+    } else {
+        "e edit | Enter apply | Esc cancel"
+    };
+    let footer = Paragraph::new(footer).alignment(Alignment::Center);
+    frame.render_widget(footer, inner[2]);
+
+    if editor.editing {
+        if let Some(input) = editor.values.get(editor.index) {
+            let cursor_x = inner[0].x + 3 + 6 + 1 + input.cursor() as u16;
+            let cursor_y = inner[0].y + editor.index as u16 + 1;
+            frame.set_cursor(cursor_x, cursor_y);
+            *cursor_visible = true;
+        }
+    }
 }
 
 fn format_other_label(label: &str, id: &str) -> String {

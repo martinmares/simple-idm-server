@@ -442,6 +442,7 @@ pub(crate) struct ClaimMapRow {
     client_id: String,
     group_id: String,
     claim_name: String,
+    claim_value_kind: String,
     #[tabled(display_with = "display_claim_value")]
     claim_value: Option<serde_json::Value>,
 }
