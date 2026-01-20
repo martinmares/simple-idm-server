@@ -6,6 +6,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
     let client_id = params.get("client_id").map(|s| s.as_str()).unwrap_or("");
     let redirect_uri = params.get("redirect_uri").map(|s| s.as_str()).unwrap_or("");
     let state = params.get("state").map(|s| s.as_str()).unwrap_or("");
+    let nonce = params.get("nonce").map(|s| s.as_str()).unwrap_or("");
     let scope = params.get("scope").map(|s| s.as_str()).unwrap_or("");
     let code_challenge = params.get("code_challenge").map(|s| s.as_str()).unwrap_or("");
     let code_challenge_method = params.get("code_challenge_method").map(|s| s.as_str()).unwrap_or("");
@@ -173,6 +174,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
                 <input type="hidden" name="client_id" value="{}">
                 <input type="hidden" name="redirect_uri" value="{}">
                 <input type="hidden" name="state" value="{}">
+                <input type="hidden" name="nonce" value="{}">
                 <input type="hidden" name="scope" value="{}">
                 <input type="hidden" name="code_challenge" value="{}">
                 <input type="hidden" name="code_challenge_method" value="{}">
@@ -222,6 +224,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
         client_id,
         redirect_uri,
         state,
+        nonce,
         scope,
         code_challenge,
         code_challenge_method

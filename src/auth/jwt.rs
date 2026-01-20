@@ -28,6 +28,8 @@ pub struct Claims {
     pub exp: i64,              // Expiration time
     pub iat: i64,              // Issued at
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonce: Option<String>, // OIDC nonce (ID token only)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
     pub email: Option<String>, // User email
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -91,7 +93,42 @@ impl JwtService {
             aud: vec![client_id],
             exp: exp.timestamp(),
             iat: now.timestamp(),
+            nonce: None,
             scope,
+            email,
+            preferred_username,
+            groups,
+            custom_claims,
+        };
+
+        let mut header = Header::new(Algorithm::RS256);
+        header.kid = Some(self.key_id.clone());
+        encode(&header, &claims, &self.encoding_key)
+            .map_err(|e| JwtError::EncodeError(e.to_string()))
+    }
+
+    pub fn create_id_token(
+        &self,
+        user_id: Uuid,
+        client_id: String,
+        email: Option<String>,
+        preferred_username: Option<String>,
+        groups: Vec<String>,
+        custom_claims: HashMap<String, serde_json::Value>,
+        nonce: Option<String>,
+        expiry_seconds: i64,
+    ) -> Result<String, JwtError> {
+        let now = Utc::now();
+        let exp = now + Duration::seconds(expiry_seconds);
+
+        let claims = Claims {
+            sub: user_id.to_string(),
+            iss: self.issuer.clone(),
+            aud: vec![client_id],
+            exp: exp.timestamp(),
+            iat: now.timestamp(),
+            nonce,
+            scope: None,
             email,
             preferred_username,
             groups,
