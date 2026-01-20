@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE groups\n        SET\n            name = COALESCE($1, name),\n            description = COALESCE($2, description)\n        WHERE id = $3\n        RETURNING id, name, description\n        ",
+  "query": "\n        UPDATE groups\n        SET\n            name = COALESCE($1, name),\n            description = COALESCE($2, description),\n            is_virtual = COALESCE($3, is_virtual)\n        WHERE id = $4\n        RETURNING id, name, description, is_virtual\n        ",
   "describe": {
     "columns": [
       {
@@ -17,20 +17,27 @@
         "ordinal": 2,
         "name": "description",
         "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_virtual",
+        "type_info": "Bool"
       }
     ],
     "parameters": {
       "Left": [
         "Varchar",
         "Text",
+        "Bool",
         "Uuid"
       ]
     },
     "nullable": [
       false,
       false,
-      true
+      true,
+      false
     ]
   },
-  "hash": "b769ba40870969280b6c8a491ae8cdd53f65f6365724461640bb65906cc87504"
+  "hash": "d4b05b8c4bd66760349c8c708e406cd031fffa89a6fc3db507369be47e5b6d61"
 }
