@@ -1,4 +1,7 @@
-use crate::auth::{build_custom_claims, get_effective_user_groups, get_user_group_names};
+use crate::auth::{
+    build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
+    get_user_group_names,
+};
 use crate::db::models::{DeviceCode, OAuthClient, User};
 use axum::{extract::State, response::IntoResponse, Json};
 use chrono::{Duration, Utc};
@@ -387,22 +390,24 @@ pub async fn handle_device_token(
         }
     };
 
-    // Načti skupiny
-    let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
-        Ok(ids) => ids,
-        Err(_) => vec![],
-    };
-
-    let user_group_names = match get_user_group_names(&state.db_pool, user.id).await {
-        Ok(names) => names,
-        Err(_) => vec![],
+    let user_group_names = match client.groups_claim_mode.as_str() {
+        "none" => vec![],
+        "direct" => get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+            .await
+            .unwrap_or_default(),
+        _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await.unwrap_or_default(),
     };
 
     // Vytvoř custom claims
-    let custom_claims = match build_custom_claims(&state.db_pool, client.id, &user_group_ids).await
-    {
-        Ok(claims) => claims,
-        Err(_) => std::collections::HashMap::new(),
+    let custom_claims = if client.include_claim_maps {
+        let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
+            .await
+            .unwrap_or_default();
+        build_custom_claims(&state.db_pool, client.id, &user_group_ids)
+            .await
+            .unwrap_or_default()
+    } else {
+        std::collections::HashMap::new()
     };
 
     // Log JWT claims and groups for debugging

@@ -20,6 +20,7 @@ pub struct Group {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    pub is_virtual: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -42,6 +43,9 @@ pub struct OAuthClient {
     pub grant_types: Vec<String>,
     pub scope: String,
     pub is_active: bool,
+    pub groups_claim_mode: String,
+    pub include_claim_maps: bool,
+    pub ignore_virtual_groups: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

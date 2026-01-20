@@ -87,12 +87,14 @@ pub struct UpdateUserRequest {
 pub struct CreateGroupRequest {
     pub name: String,
     pub description: Option<String>,
+    pub is_virtual: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateGroupRequest {
     pub name: Option<String>,
     pub description: Option<String>,
+    pub is_virtual: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,6 +102,7 @@ pub struct GroupResponse {
     pub id: Uuid,
     pub name: String,
     pub description: Option<String>,
+    pub is_virtual: bool,
 }
 
 // User-Group assignment
@@ -126,6 +129,9 @@ pub struct CreateOAuthClientRequest {
     pub redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
     pub scope: String,
+    pub groups_claim_mode: Option<String>,
+    pub include_claim_maps: Option<bool>,
+    pub ignore_virtual_groups: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -136,6 +142,9 @@ pub struct UpdateOAuthClientRequest {
     pub grant_types: Option<Vec<String>>,
     pub scope: Option<String>,
     pub is_active: Option<bool>,
+    pub groups_claim_mode: Option<String>,
+    pub include_claim_maps: Option<bool>,
+    pub ignore_virtual_groups: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -147,6 +156,9 @@ pub struct OAuthClientResponse {
     pub grant_types: Vec<String>,
     pub scope: String,
     pub is_active: bool,
+    pub groups_claim_mode: String,
+    pub include_claim_maps: bool,
+    pub ignore_virtual_groups: bool,
 }
 
 // Claim Map types
@@ -564,12 +576,13 @@ pub async fn create_group(
 ) -> impl IntoResponse {
     let result = sqlx::query!(
         r#"
-        INSERT INTO groups (name, description)
-        VALUES ($1, $2)
-        RETURNING id, name, description
+        INSERT INTO groups (name, description, is_virtual)
+        VALUES ($1, $2, $3)
+        RETURNING id, name, description, is_virtual
         "#,
         req.name,
-        req.description
+        req.description,
+        req.is_virtual.unwrap_or(false)
     )
     .fetch_one(&db_pool)
     .await;
@@ -581,6 +594,7 @@ pub async fn create_group(
                 id: group.id,
                 name: group.name,
                 description: group.description,
+                is_virtual: group.is_virtual,
             }),
         )
             .into_response(),
@@ -603,7 +617,7 @@ pub async fn update_group(
     Path(group_id): Path<Uuid>,
     Json(req): Json<UpdateGroupRequest>,
 ) -> impl IntoResponse {
-    if req.name.is_none() && req.description.is_none() {
+    if req.name.is_none() && req.description.is_none() && req.is_virtual.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -640,12 +654,14 @@ pub async fn update_group(
         UPDATE groups
         SET
             name = COALESCE($1, name),
-            description = COALESCE($2, description)
-        WHERE id = $3
-        RETURNING id, name, description
+            description = COALESCE($2, description),
+            is_virtual = COALESCE($3, is_virtual)
+        WHERE id = $4
+        RETURNING id, name, description, is_virtual
         "#,
         req.name,
         req.description,
+        req.is_virtual,
         group_id
     )
     .fetch_optional(&db_pool)
@@ -658,6 +674,7 @@ pub async fn update_group(
                 id: group.id,
                 name: group.name,
                 description: group.description,
+                is_virtual: group.is_virtual,
             }),
         )
             .into_response(),
@@ -694,7 +711,7 @@ pub async fn list_groups(
 
     let result = sqlx::query!(
         r#"
-        SELECT id, name, description
+        SELECT id, name, description, is_virtual
         FROM groups
         ORDER BY name
         LIMIT $1 OFFSET $2
@@ -713,6 +730,7 @@ pub async fn list_groups(
                     id: g.id,
                     name: g.name,
                     description: g.description,
+                    is_virtual: g.is_virtual,
                 })
                 .collect();
             (StatusCode::OK, Json(groups)).into_response()
@@ -925,6 +943,24 @@ pub async fn create_oauth_client(
     State(db_pool): State<DbPool>,
     Json(req): Json<CreateOAuthClientRequest>,
 ) -> impl IntoResponse {
+    let groups_claim_mode = match req.groups_claim_mode.as_deref() {
+        None | Some("effective") => "effective",
+        Some("direct") => "direct",
+        Some("none") => "none",
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: "groups_claim_mode must be one of: effective, direct, none".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let include_claim_maps = req.include_claim_maps.unwrap_or(true);
+    let ignore_virtual_groups = req.ignore_virtual_groups.unwrap_or(false);
+
     // Hash client secret
     let client_secret_hash = match hash_password(&req.client_secret) {
         Ok(hash) => hash,
@@ -943,16 +979,23 @@ pub async fn create_oauth_client(
 
     let result = sqlx::query!(
         r#"
-        INSERT INTO oauth_clients (client_id, client_secret_hash, name, redirect_uris, grant_types, scope, is_active)
-        VALUES ($1, $2, $3, $4, $5, $6, true)
-        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active
+        INSERT INTO oauth_clients (
+            client_id, client_secret_hash, name, redirect_uris, grant_types, scope, is_active,
+            groups_claim_mode, include_claim_maps, ignore_virtual_groups
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9)
+        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active,
+            groups_claim_mode, include_claim_maps, ignore_virtual_groups
         "#,
         req.client_id,
         client_secret_hash,
         req.name,
         &req.redirect_uris,
         &req.grant_types,
-        req.scope
+        req.scope,
+        groups_claim_mode,
+        include_claim_maps,
+        ignore_virtual_groups
     )
     .fetch_one(&db_pool)
     .await;
@@ -968,6 +1011,9 @@ pub async fn create_oauth_client(
                 grant_types: client.grant_types,
                 scope: client.scope,
                 is_active: client.is_active,
+                groups_claim_mode: client.groups_claim_mode,
+                include_claim_maps: client.include_claim_maps,
+                ignore_virtual_groups: client.ignore_virtual_groups,
             }),
         )
             .into_response(),
@@ -1014,6 +1060,9 @@ pub async fn list_oauth_clients(
                     grant_types: c.grant_types,
                     scope: c.scope,
                     is_active: c.is_active,
+                    groups_claim_mode: c.groups_claim_mode,
+                    include_claim_maps: c.include_claim_maps,
+                    ignore_virtual_groups: c.ignore_virtual_groups,
                 })
                 .collect();
             (StatusCode::OK, Json(clients)).into_response()
@@ -1086,6 +1135,9 @@ pub async fn update_oauth_client(
         && req.grant_types.is_none()
         && req.scope.is_none()
         && req.is_active.is_none()
+        && req.groups_claim_mode.is_none()
+        && req.include_claim_maps.is_none()
+        && req.ignore_virtual_groups.is_none()
     {
         return (
             StatusCode::BAD_REQUEST,
@@ -1096,6 +1148,24 @@ pub async fn update_oauth_client(
         )
             .into_response();
     }
+
+    let groups_claim_mode = match req.groups_claim_mode.as_deref() {
+        None => None,
+        Some("effective") => Some("effective"),
+        Some("direct") => Some("direct"),
+        Some("none") => Some("none"),
+        Some(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: "groups_claim_mode must be one of: effective, direct, none"
+                        .to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
 
     let secret_hash = if let Some(secret) = &req.client_secret {
         match hash_password(secret) {
@@ -1127,9 +1197,13 @@ pub async fn update_oauth_client(
             redirect_uris = COALESCE($3, redirect_uris),
             grant_types = COALESCE($4, grant_types),
             scope = COALESCE($5, scope),
-            is_active = COALESCE($6, is_active)
-        WHERE id = $7
-        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active
+            is_active = COALESCE($6, is_active),
+            groups_claim_mode = COALESCE($7, groups_claim_mode),
+            include_claim_maps = COALESCE($8, include_claim_maps),
+            ignore_virtual_groups = COALESCE($9, ignore_virtual_groups)
+        WHERE id = $10
+        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active,
+            groups_claim_mode, include_claim_maps, ignore_virtual_groups
         "#,
         req.name,
         secret_hash,
@@ -1137,6 +1211,9 @@ pub async fn update_oauth_client(
         grant_types,
         req.scope,
         req.is_active,
+        groups_claim_mode,
+        req.include_claim_maps,
+        req.ignore_virtual_groups,
         client_id
     )
     .fetch_optional(&db_pool)
@@ -1153,6 +1230,9 @@ pub async fn update_oauth_client(
                 grant_types: client.grant_types,
                 scope: client.scope,
                 is_active: client.is_active,
+                groups_claim_mode: client.groups_claim_mode,
+                include_claim_maps: client.include_claim_maps,
+                ignore_virtual_groups: client.ignore_virtual_groups,
             }),
         )
             .into_response(),
@@ -1232,7 +1312,7 @@ pub async fn create_claim_map(
         r#"
         INSERT INTO claim_maps (client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json)
         VALUES ($1, $2, $3, $4, $5, $6)
-        RETURNING id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json
+        RETURNING id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json, updated_at
         "#,
     )
     .bind(req.client_id)
@@ -1292,7 +1372,7 @@ pub async fn list_claim_maps(
 
     let result = sqlx::query_as::<_, crate::db::models::ClaimMap>(
         r#"
-        SELECT id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json
+        SELECT id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json, updated_at
         FROM claim_maps
         ORDER BY claim_name
         LIMIT $1 OFFSET $2
@@ -1673,21 +1753,22 @@ pub async fn list_child_groups(
                 }
 
                 // Fetch group details for all children
-                let children = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
-                    "SELECT id, name, description FROM groups WHERE id = ANY($1) ORDER BY name"
-                )
-                .bind(&child_ids)
-                .fetch_all(&db_pool)
-                .await;
+        let children = sqlx::query_as::<_, (Uuid, String, Option<String>, bool)>(
+            "SELECT id, name, description, is_virtual FROM groups WHERE id = ANY($1) ORDER BY name"
+        )
+        .bind(&child_ids)
+        .fetch_all(&db_pool)
+        .await;
 
                 match children {
                     Ok(groups) => {
                         let response: Vec<GroupResponse> = groups
                             .into_iter()
-                            .map(|(id, name, description)| GroupResponse {
+                            .map(|(id, name, description, is_virtual)| GroupResponse {
                                 id,
                                 name,
                                 description,
+                                is_virtual,
                             })
                             .collect();
                         (StatusCode::OK, Json(response)).into_response()
@@ -1719,9 +1800,9 @@ pub async fn list_child_groups(
         }
     } else {
         // Get only direct children
-        let result = sqlx::query_as::<_, (Uuid, String, Option<String>)>(
+        let result = sqlx::query_as::<_, (Uuid, String, Option<String>, bool)>(
             r#"
-            SELECT g.id, g.name, g.description
+            SELECT g.id, g.name, g.description, g.is_virtual
             FROM groups g
             INNER JOIN group_groups gg ON g.id = gg.child_group_id
             WHERE gg.parent_group_id = $1
@@ -1736,10 +1817,11 @@ pub async fn list_child_groups(
             Ok(groups) => {
                 let response: Vec<GroupResponse> = groups
                     .into_iter()
-                    .map(|(id, name, description)| GroupResponse {
+                    .map(|(id, name, description, is_virtual)| GroupResponse {
                         id,
                         name,
                         description,
+                        is_virtual,
                     })
                     .collect();
                 (StatusCode::OK, Json(response)).into_response()
