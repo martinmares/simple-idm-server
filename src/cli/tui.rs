@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
@@ -14,8 +14,12 @@ use ratatui::{
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rand::RngCore;
-use serde_json::json;
-use std::{collections::HashSet, io, time::Duration};
+use serde_json::{json, Value};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    time::Duration,
+};
 use tui_input::{backend::crossterm::EventHandler, Input};
 use url::Url;
 
@@ -203,6 +207,7 @@ struct App {
     tab: Tab,
     users: EntityState<UserRow>,
     groups: EntityState<GroupRow>,
+    group_depths: HashMap<String, usize>,
     clients: EntityState<ClientRow>,
     client_claims: EntityState<ClientClaimsRow>,
     group_claims: EntityState<GroupClaimsRow>,
@@ -227,6 +232,7 @@ impl App {
             tab: Tab::Users,
             users: EntityState::new(),
             groups: EntityState::new(),
+            group_depths: HashMap::new(),
             clients: EntityState::new(),
             client_claims: EntityState::new(),
             group_claims: EntityState::new(),
@@ -370,7 +376,7 @@ struct GroupUsersRow {
 struct ClaimSummary {
     id: String,
     claim_name: String,
-    claim_value: Option<String>,
+    claim_value: Option<Value>,
     other_id: String,
     other_label: String,
 }
@@ -586,7 +592,7 @@ enum ClaimEditorMode {
 struct ClaimEditorItem {
     id: Option<String>,
     claim_name: String,
-    claim_value: Option<String>,
+    claim_value: Option<Value>,
     other_id: String,
     other_label: String,
 }
@@ -989,7 +995,7 @@ async fn handle_claim_editor_event(
                     title: "Upravit claim map".to_string(),
                     mode: ClaimEntryMode::Edit(editor.index),
                     claim_name: input_with_value(item.claim_name),
-                    claim_value: input_with_value(item.claim_value.unwrap_or_default()),
+                    claim_value: input_with_value(claim_value_to_input(&item.claim_value)),
                     other_id: Some(item.other_id),
                     other_label: Some(item.other_label),
                     index: 0,
@@ -1071,11 +1077,13 @@ async fn handle_claim_entry_event(
                 entry.error = Some("Vyber klienta nebo skupinu".to_string());
                 return Ok(ClaimEntryResult::Continue);
             };
-            let claim_value = entry.claim_value.value().trim().to_string();
-            let claim_value = if claim_value.is_empty() {
-                None
-            } else {
-                Some(claim_value)
+            let claim_value_input = entry.claim_value.value().to_string();
+            let claim_value = match parse_claim_value_input(&claim_value_input) {
+                Ok(value) => value,
+                Err(err) => {
+                    entry.error = Some(err.to_string());
+                    return Ok(ClaimEntryResult::Continue);
+                }
             };
             let other_label = entry
                 .other_label
@@ -1380,9 +1388,10 @@ async fn refresh_active_tab(app: &mut App, http: &HttpClient) -> Result<()> {
             }
         }
         Tab::Groups => {
-            match fetch_groups(http, app.groups.page).await {
-                Ok(groups) => {
+            match fetch_groups_tree(http).await {
+                Ok((groups, depths)) => {
                     app.groups.items = groups;
+                    app.group_depths = depths;
                     apply_selection(app, EntityKind::Groups);
                 }
                 Err(err) => app.set_status(err.to_string()),
@@ -1580,10 +1589,118 @@ async fn fetch_users(http: &HttpClient, page: usize) -> Result<Vec<UserRow>> {
     serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse users: {e}"))
 }
 
-async fn fetch_groups(http: &HttpClient, page: usize) -> Result<Vec<GroupRow>> {
-    let path = format!("/admin/groups?page={page}&limit={PAGE_SIZE}");
-    let body = http.get(&path).await?;
-    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse groups: {e}"))
+async fn fetch_groups_tree(http: &HttpClient) -> Result<(Vec<GroupRow>, HashMap<String, usize>)> {
+    let groups = fetch_groups_for_selector(http).await?;
+    if groups.is_empty() {
+        return Ok((Vec::new(), HashMap::new()));
+    }
+
+    let mut group_map: HashMap<String, GroupRow> = HashMap::new();
+    for group in &groups {
+        group_map.insert(group.id.clone(), group.clone());
+    }
+
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+    for group in &groups {
+        let path = format!("/admin/groups/{}/children", group.id);
+        let body = http.get(&path).await?;
+        let mut children: Vec<GroupRow> =
+            serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse group children: {e}"))?;
+        children.sort_by(|a, b| a.name.cmp(&b.name));
+        let child_ids = children.into_iter().map(|child| child.id).collect::<Vec<_>>();
+        children_map.insert(group.id.clone(), child_ids);
+    }
+
+    let mut child_set: HashSet<String> = HashSet::new();
+    for child_ids in children_map.values() {
+        for child_id in child_ids {
+            child_set.insert(child_id.clone());
+        }
+    }
+
+    let mut root_ids: Vec<String> = groups
+        .iter()
+        .filter(|group| !child_set.contains(&group.id))
+        .map(|group| group.id.clone())
+        .collect();
+    root_ids.sort_by(|a, b| {
+        let name_a = group_map.get(a).map(|g| g.name.as_str()).unwrap_or("");
+        let name_b = group_map.get(b).map(|g| g.name.as_str()).unwrap_or("");
+        name_a.cmp(name_b)
+    });
+
+    let mut ordered = Vec::new();
+    let mut depths = HashMap::new();
+    let mut visited: HashSet<String> = HashSet::new();
+
+    fn visit_group(
+        id: &str,
+        depth: usize,
+        group_map: &HashMap<String, GroupRow>,
+        children_map: &HashMap<String, Vec<String>>,
+        ordered: &mut Vec<GroupRow>,
+        depths: &mut HashMap<String, usize>,
+        visited: &mut HashSet<String>,
+    ) {
+        if visited.contains(id) {
+            return;
+        }
+        let Some(group) = group_map.get(id) else {
+            return;
+        };
+        visited.insert(id.to_string());
+        depths.insert(id.to_string(), depth);
+        ordered.push(group.clone());
+        if let Some(children) = children_map.get(id) {
+            for child_id in children {
+                visit_group(
+                    child_id,
+                    depth + 1,
+                    group_map,
+                    children_map,
+                    ordered,
+                    depths,
+                    visited,
+                );
+            }
+        }
+    }
+
+    for root_id in root_ids {
+        visit_group(
+            &root_id,
+            0,
+            &group_map,
+            &children_map,
+            &mut ordered,
+            &mut depths,
+            &mut visited,
+        );
+    }
+
+    let mut remaining: Vec<String> = groups
+        .iter()
+        .filter(|group| !visited.contains(&group.id))
+        .map(|group| group.id.clone())
+        .collect();
+    remaining.sort_by(|a, b| {
+        let name_a = group_map.get(a).map(|g| g.name.as_str()).unwrap_or("");
+        let name_b = group_map.get(b).map(|g| g.name.as_str()).unwrap_or("");
+        name_a.cmp(name_b)
+    });
+    for id in remaining {
+        visit_group(
+            &id,
+            0,
+            &group_map,
+            &children_map,
+            &mut ordered,
+            &mut depths,
+            &mut visited,
+        );
+    }
+
+    Ok((ordered, depths))
 }
 
 async fn fetch_users_for_selector(http: &HttpClient) -> Result<Vec<UserRow>> {
@@ -2828,8 +2945,11 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 .items
                 .iter()
                 .map(|g| {
+                    let depth = app.group_depths.get(&g.id).copied().unwrap_or(0);
+                    let indent = "  ".repeat(depth);
+                    let name = format!("{indent}{}", g.name);
                     Row::new(vec![
-                        Cell::from(g.name.clone()),
+                        Cell::from(name),
                         Cell::from(g.description.clone().unwrap_or_default()),
                     ])
                 })
@@ -2866,9 +2986,13 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                     let claims = row
                         .claims
                         .iter()
-                        .map(|c| match &c.claim_value {
-                            Some(value) => format!("{}={} ({})", c.claim_name, value, c.other_label),
-                            None => format!("{} ({})", c.claim_name, c.other_label),
+                        .map(|c| {
+                            let value = claim_value_to_display(&c.claim_value);
+                            if value.is_empty() {
+                                format!("{} ({})", c.claim_name, c.other_label)
+                            } else {
+                                format!("{}={} ({})", c.claim_name, value, c.other_label)
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -2887,9 +3011,13 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                     let claims = row
                         .claims
                         .iter()
-                        .map(|c| match &c.claim_value {
-                            Some(value) => format!("{}={} ({})", c.claim_name, value, c.other_label),
-                            None => format!("{} ({})", c.claim_name, c.other_label),
+                        .map(|c| {
+                            let value = claim_value_to_display(&c.claim_value);
+                            if value.is_empty() {
+                                format!("{} ({})", c.claim_name, c.other_label)
+                            } else {
+                                format!("{}={} ({})", c.claim_name, value, c.other_label)
+                            }
                         })
                         .collect::<Vec<_>>()
                         .join(", ");
@@ -3202,11 +3330,12 @@ fn detail_client_claims(app: &App) -> Vec<Line<'static>> {
         line_kv("client_name", &row.client_name),
     ];
     for claim in &row.claims {
-        let value = claim
-            .claim_value
-            .as_ref()
-            .map(|v| format!("{} ({})", v, claim.other_label))
-            .unwrap_or_else(|| claim.other_label.clone());
+        let value = claim_value_to_display(&claim.claim_value);
+        let value = if value.is_empty() {
+            claim.other_label.clone()
+        } else {
+            format!("{} ({})", value, claim.other_label)
+        };
         lines.push(line_kv(&claim.claim_name, &value));
     }
     lines
@@ -3229,11 +3358,12 @@ fn detail_group_claims(app: &App) -> Vec<Line<'static>> {
         ),
     ];
     for claim in &row.claims {
-        let value = claim
-            .claim_value
-            .as_ref()
-            .map(|v| format!("{} ({})", v, claim.other_label))
-            .unwrap_or_else(|| claim.other_label.clone());
+        let value = claim_value_to_display(&claim.claim_value);
+        let value = if value.is_empty() {
+            claim.other_label.clone()
+        } else {
+            format!("{} ({})", value, claim.other_label)
+        };
         lines.push(line_kv(&claim.claim_name, &value));
     }
     lines
@@ -3284,6 +3414,53 @@ fn detail_group_users(app: &App) -> Vec<Line<'static>> {
         ),
         line_kv("users", &users),
     ]
+}
+
+fn claim_value_to_display(value: &Option<Value>) -> String {
+    match value {
+        None => String::new(),
+        Some(Value::String(val)) => val.clone(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn claim_value_to_input(value: &Option<Value>) -> String {
+    match value {
+        None => String::new(),
+        Some(Value::String(val)) => val.clone(),
+        Some(Value::Array(values)) => serde_json::to_string(values).unwrap_or_default(),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn parse_claim_value_input(input: &str) -> Result<Option<Value>> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    if trimmed.starts_with('[') {
+        let parsed: Value =
+            serde_json::from_str(trimmed).context("claim_value musí být JSON array")?;
+        let arr = parsed
+            .as_array()
+            .ok_or_else(|| anyhow!("claim_value musí být JSON array"))?;
+        let strings: Vec<Value> = arr
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| Value::String(s.to_string())))
+            .collect();
+        if strings.is_empty() {
+            bail!("claim_value array musí obsahovat alespoň jeden string");
+        }
+        return Ok(Some(Value::Array(strings)));
+    }
+
+    Ok(Some(Value::String(trimmed.to_string())))
 }
 
 fn line_kv(key: &str, value: &str) -> Line<'static> {
@@ -3628,7 +3805,7 @@ fn draw_claim_editor(frame: &mut ratatui::Frame, area: Rect, editor: &ClaimEdito
         .items
         .iter()
         .map(|item| {
-            let value = item.claim_value.clone().unwrap_or_default();
+            let value = claim_value_to_display(&item.claim_value);
             let target = format_other_label(&item.other_label, &item.other_id);
             Row::new(vec![item.claim_name.clone(), value, target])
         })
@@ -3710,7 +3887,11 @@ fn draw_claim_entry(
 
     let fields = vec![
         ("claim_name", entry.claim_name.value().to_string(), ""),
-        ("claim_value", entry.claim_value.value().to_string(), " (optional)"),
+        (
+            "claim_value",
+            entry.claim_value.value().to_string(),
+            " (string nebo JSON array)",
+        ),
         ("target", other_line, other_hint),
     ];
 

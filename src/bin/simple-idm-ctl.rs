@@ -395,7 +395,7 @@ pub(crate) struct UserRow {
     is_active: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize, Tabled)]
+#[derive(Clone, Debug, Deserialize, Serialize, Tabled)]
 pub(crate) struct GroupRow {
     id: String,
     name: String,
@@ -422,8 +422,8 @@ pub(crate) struct ClaimMapRow {
     client_id: String,
     group_id: String,
     claim_name: String,
-    #[tabled(display_with = "display_opt")]
-    claim_value: Option<String>,
+    #[tabled(display_with = "display_claim_value")]
+    claim_value: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
@@ -906,7 +906,7 @@ async fn handle_clients(
                 "scope": scope,
             });
             let body = http.post_json("/admin/oauth-clients", payload).await?;
-            print_table_item::<ClientRow>(output, &body)?;
+            print_client_item(output, &body)?;
         }
         ClientsCommand::Update {
             id,
@@ -945,7 +945,7 @@ async fn handle_clients(
                 "is_active": is_active,
             });
             let body = http.put_json(&format!("/admin/oauth-clients/{id}"), payload).await?;
-            print_table_item::<ClientRow>(output, &body)?;
+            print_client_item(output, &body)?;
         }
         ClientsCommand::Delete { id } => {
             let body = http.delete(&format!("/admin/oauth-clients/{id}")).await?;
@@ -1182,6 +1182,19 @@ fn display_opt(value: &Option<String>) -> String {
     value.clone().unwrap_or_default()
 }
 
+fn display_claim_value(value: &Option<serde_json::Value>) -> String {
+    match value {
+        None => String::new(),
+        Some(serde_json::Value::String(val)) => val.clone(),
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(other) => other.to_string(),
+    }
+}
+
 fn display_vec_limited(value: &Vec<String>) -> String {
     let joined = value.join(", ");
     limit_text(&joined, 42)
@@ -1317,6 +1330,28 @@ fn print_clients_output(output: OutputConfig, rows: Vec<ClientRow>) -> Result<()
                     println!();
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn print_client_item(output: OutputConfig, body: &str) -> Result<()> {
+    match output.format {
+        OutputFormat::Json => println!("{}", body),
+        OutputFormat::Table => {
+            let client: ClientRow = serde_json::from_str(body).context("Failed to parse response")?;
+            let rows = vec![
+                KeyValueRow::new("id", client.id),
+                KeyValueRow::new("client_id", client.client_id),
+                KeyValueRow::new("name", client.name),
+                KeyValueRow::new("redirect_uris", client.redirect_uris.join(", ")),
+                KeyValueRow::new("grant_types", client.grant_types.join(", ")),
+                KeyValueRow::new("scope", client.scope),
+                KeyValueRow::new("is_active", client.is_active.to_string()),
+            ];
+            let mut table = Table::new(rows);
+            apply_style(&mut table, output.style);
+            println!("{table}");
         }
     }
     Ok(())
