@@ -282,6 +282,7 @@ struct PickerState {
     options: Vec<PickerOption>,
     index: usize,
     target_field: &'static str,
+    single_select: bool,
 }
 
 impl PickerState {
@@ -300,10 +301,41 @@ impl PickerState {
             options,
             index: 0,
             target_field: "grant_types",
+            single_select: false,
+        }
+    }
+
+    fn new_groups_claim_mode(selected: &str) -> Self {
+        let options = ["effective", "direct", "none"]
+            .iter()
+            .map(|value| PickerOption {
+                label: value,
+                value,
+                selected: *value == selected,
+            })
+            .collect();
+
+        Self {
+            title: "Select groups_claim_mode".to_string(),
+            options,
+            index: 0,
+            target_field: "groups_claim_mode",
+            single_select: true,
         }
     }
 
     fn selected_values(&self) -> Vec<String> {
+        if self.single_select {
+            let selected = self
+                .options
+                .iter()
+                .find(|opt| opt.selected)
+                .or_else(|| self.options.get(self.index));
+            return selected
+                .map(|opt| vec![opt.value.to_string()])
+                .unwrap_or_default();
+        }
+
         self.options
             .iter()
             .filter(|opt| opt.selected)
@@ -880,11 +912,23 @@ fn handle_picker_event(app: &mut App, event: Event) -> Result<PickerResult> {
             picker.index = (picker.index + 1).min(picker.options.len().saturating_sub(1));
         }
         KeyCode::Char(' ') => {
+            if picker.single_select {
+                return Ok(PickerResult::Continue);
+            }
             if let Some(option) = picker.options.get_mut(picker.index) {
                 option.selected = !option.selected;
             }
         }
         KeyCode::Enter => {
+            if picker.single_select {
+                for (idx, opt) in picker.options.iter_mut().enumerate() {
+                    opt.selected = idx == picker.index;
+                }
+            } else if !picker.options.iter().any(|opt| opt.selected) {
+                if let Some(option) = picker.options.get_mut(picker.index) {
+                    option.selected = true;
+                }
+            }
             if let Some(form) = app.form.as_mut() {
                 let values = picker.selected_values();
                 set_field_value(form, picker.target_field, values.join(", "));
@@ -1779,6 +1823,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             fields: vec![
                 FormField::new("name", String::new()),
                 FormField::new("description", String::new()).optional(),
+                FormField::boolean("is_virtual", false),
             ],
             index: 0,
             error: None,
@@ -1794,6 +1839,9 @@ fn open_create_form(app: &mut App) -> Result<()> {
                 FormField::new("grant_types", String::new()),
                 FormField::new("scope", String::new()),
                 FormField::boolean("is_active", true),
+                FormField::new("groups_claim_mode", "effective".to_string()),
+                FormField::boolean("include_claim_maps", true),
+                FormField::boolean("ignore_virtual_groups", false),
             ],
             index: 0,
             error: None,
@@ -1856,6 +1904,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                     FormField::new("name", group.name.clone()).optional(),
                     FormField::new("description", group.description.clone().unwrap_or_default())
                         .optional(),
+                    FormField::boolean("is_virtual", group.is_virtual).optional(),
                 ],
                 index: 0,
                 error: None,
@@ -1873,6 +1922,12 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                     FormField::new("grant_types", client.grant_types.join(", ")).optional(),
                     FormField::new("scope", client.scope.clone()).optional(),
                     FormField::boolean("is_active", client.is_active),
+                    FormField::new("groups_claim_mode", client.groups_claim_mode.clone())
+                        .optional(),
+                    FormField::boolean("include_claim_maps", client.include_claim_maps)
+                        .optional(),
+                    FormField::boolean("ignore_virtual_groups", client.ignore_virtual_groups)
+                        .optional(),
                 ],
                 index: 0,
                 error: None,
@@ -2185,6 +2240,24 @@ async fn handle_form_event(
                 }
             }
         }
+        KeyCode::Char('e') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && label == Some("groups_claim_mode")
+            {
+                let current = form.fields[form.index].value();
+                app.picker = Some(PickerState::new_groups_claim_mode(&current));
+                app.mode = Mode::Picker;
+                return Ok(FormResult::Continue);
+            }
+        }
+        KeyCode::Char('m') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && label == Some("groups_claim_mode")
+            {
+                let current = form.fields[form.index].value();
+                app.picker = Some(PickerState::new_groups_claim_mode(&current));
+                app.mode = Mode::Picker;
+                return Ok(FormResult::Continue);
+            }
+        }
         KeyCode::Char('u') => {
             if key.modifiers.contains(KeyModifiers::CONTROL) {
                 if is_add_remove && label == Some("user_id") {
@@ -2225,7 +2298,9 @@ async fn handle_form_event(
     }
 
     if let Some(field) = form.fields.get_mut(form.index) {
-        if !matches!(field.kind, FieldKind::Bool) {
+        if !matches!(field.kind, FieldKind::Bool)
+            && field.label != "groups_claim_mode"
+        {
             field.input.handle_event(&event);
         }
     }
@@ -2290,6 +2365,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
             let payload = json!({
                 "name": field_value(form, "name")?,
                 "description": field_optional(form, "description"),
+                "is_virtual": field_bool(form, "is_virtual"),
             });
             let body = http.post_json("/admin/groups", payload).await?;
             let created: GroupRow =
@@ -2307,6 +2383,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
             let payload = json!({
                 "name": field_optional(form, "name"),
                 "description": field_optional(form, "description"),
+                "is_virtual": field_bool_optional(form, "is_virtual"),
             });
             http.put_json(&format!("/admin/groups/{id}"), payload)
                 .await?;
@@ -2330,6 +2407,8 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
         FormAction::CreateClient => {
             let redirect_uris = parse_redirect_uris(field_optional(form, "redirect_uris"))?;
             let grant_types = parse_grant_types(Some(field_value(form, "grant_types")?))?;
+            let groups_claim_mode =
+                parse_groups_claim_mode(&field_value(form, "groups_claim_mode")?)?;
             let payload = json!({
                 "client_id": field_value(form, "client_id")?,
                 "client_secret": field_value(form, "client_secret")?,
@@ -2338,6 +2417,9 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 "grant_types": grant_types,
                 "scope": field_value(form, "scope")?,
                 "is_active": field_bool(form, "is_active"),
+                "groups_claim_mode": groups_claim_mode,
+                "include_claim_maps": field_bool(form, "include_claim_maps"),
+                "ignore_virtual_groups": field_bool(form, "ignore_virtual_groups"),
             });
             let body = http.post_json("/admin/oauth-clients", payload).await?;
             let created: ClientRow =
@@ -2354,6 +2436,10 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
         FormAction::UpdateClient(id) => {
             let redirect_uris = parse_redirect_uris(field_optional(form, "redirect_uris"))?;
             let grant_types = parse_grant_types(field_optional(form, "grant_types"))?;
+            let groups_claim_mode = match field_optional(form, "groups_claim_mode") {
+                Some(value) => Some(parse_groups_claim_mode(&value)?),
+                None => None,
+            };
             let payload = json!({
                 "name": field_optional(form, "name"),
                 "client_secret": field_optional(form, "client_secret"),
@@ -2361,6 +2447,9 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 "grant_types": if grant_types.is_empty() { None } else { Some(grant_types) },
                 "scope": field_optional(form, "scope"),
                 "is_active": field_bool(form, "is_active"),
+                "groups_claim_mode": groups_claim_mode,
+                "include_claim_maps": field_bool_optional(form, "include_claim_maps"),
+                "ignore_virtual_groups": field_bool_optional(form, "ignore_virtual_groups"),
             });
             http.put_json(&format!("/admin/oauth-clients/{id}"), payload)
                 .await?;
@@ -2427,6 +2516,15 @@ fn field_bool(form: &FormState, name: &str) -> bool {
         .find(|f| f.label == name)
         .map(|f| f.value().eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn field_bool_optional(form: &FormState, name: &str) -> Option<bool> {
+    form.fields
+        .iter()
+        .find(|f| f.label == name)
+        .map(|f| f.value().trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.eq_ignore_ascii_case("true"))
 }
 
 fn ensure_confirm(form: &FormState) -> Result<()> {
@@ -2517,6 +2615,15 @@ fn parse_grant_types(input: Option<String>) -> Result<Vec<String>> {
         }
     }
     Ok(values)
+}
+
+fn parse_groups_claim_mode(value: &str) -> Result<String> {
+    match value.trim() {
+        "effective" | "direct" | "none" => Ok(value.trim().to_string()),
+        _ => Err(anyhow!(
+            "groups_claim_mode must be one of: effective, direct, none"
+        )),
+    }
 }
 
 fn aggregate_user_groups(rows: Vec<UserGroupRow>) -> Vec<UserGroupsRow> {
@@ -2946,10 +3053,22 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 .iter()
                 .map(|g| {
                     let depth = app.group_depths.get(&g.id).copied().unwrap_or(0);
-                    let indent = "  ".repeat(depth);
-                    let name = format!("{indent}{}", g.name);
+                    let prefix = if depth == 0 {
+                        String::new()
+                    } else {
+                        format!(" {}→ ", " ".repeat(depth.saturating_sub(1)))
+                    };
+                    let mut name_spans = vec![Span::raw(format!("{prefix}{}", g.name))];
+                    if g.is_virtual {
+                        name_spans.push(Span::styled(
+                            " [virt]",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::DIM),
+                        ));
+                    }
                     Row::new(vec![
-                        Cell::from(name),
+                        Cell::from(Line::from(name_spans)),
                         Cell::from(g.description.clone().unwrap_or_default()),
                     ])
                 })
@@ -3193,6 +3312,12 @@ fn draw_form(
                 Style::default().fg(Color::DarkGray),
             ));
         }
+        if field.label == "groups_claim_mode" {
+            spans.push(Span::styled(
+                " (Ctrl+E picker)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         if field.label == "user_id" {
             spans.push(Span::styled(
                 " (Ctrl+U select)",
@@ -3237,7 +3362,7 @@ fn draw_form(
         }
     }
 
-    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | Ctrl+G grant types | Ctrl+U user select | Ctrl+G group select | Ctrl+G secret | Ctrl+V reveal")
+    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | Ctrl+E groups_claim_mode picker | Ctrl+G grant types | Ctrl+U user select | Ctrl+G group select | Ctrl+G secret | Ctrl+V reveal")
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 
@@ -3299,6 +3424,7 @@ fn detail_groups(app: &App) -> Vec<Line<'static>> {
             "description",
             group.description.as_deref().unwrap_or(""),
         ),
+        line_kv("is_virtual", &group.is_virtual.to_string()),
     ]
 }
 
@@ -3314,6 +3440,12 @@ fn detail_clients(app: &App) -> Vec<Line<'static>> {
         line_kv("grant_types", &client.grant_types.join(", ")),
         line_kv("scope", &client.scope),
         line_kv("is_active", &client.is_active.to_string()),
+        line_kv("groups_claim_mode", &client.groups_claim_mode),
+        line_kv("include_claim_maps", &client.include_claim_maps.to_string()),
+        line_kv(
+            "ignore_virtual_groups",
+            &client.ignore_virtual_groups.to_string(),
+        ),
     ]
 }
 
@@ -3510,11 +3642,16 @@ fn draw_picker(frame: &mut ratatui::Frame, area: Rect, picker: &PickerState) {
         .iter()
         .enumerate()
         .map(|(idx, option)| {
-            let marker = if option.selected { "[x]" } else { "[ ]" };
             let prefix = if idx == picker.index { ">" } else { " " };
+            let label = if picker.single_select {
+                format!(" {} ({})", option.label, option.value)
+            } else {
+                let marker = if option.selected { "[x]" } else { "[ ]" };
+                format!(" {marker} {} ({})", option.label, option.value)
+            };
             Line::from(vec![
                 Span::styled(prefix, Style::default().fg(Color::Yellow)),
-                Span::raw(format!(" {marker} {} ({})", option.label, option.value)),
+                Span::raw(label),
             ])
         })
         .collect();
@@ -3522,8 +3659,12 @@ fn draw_picker(frame: &mut ratatui::Frame, area: Rect, picker: &PickerState) {
     let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
     frame.render_widget(paragraph, inner[0]);
 
-    let footer = Paragraph::new("Space toggle | Enter apply | Esc cancel")
-        .alignment(Alignment::Center);
+    let footer = Paragraph::new(if picker.single_select {
+        "Enter select | Esc cancel"
+    } else {
+        "Space select | Enter apply | Esc cancel"
+    })
+    .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 }
 

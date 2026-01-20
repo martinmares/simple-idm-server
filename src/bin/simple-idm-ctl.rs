@@ -255,6 +255,8 @@ enum GroupsCommand {
         name: String,
         #[arg(long)]
         description: Option<String>,
+        #[arg(long)]
+        is_virtual: Option<bool>,
     },
     Update {
         #[arg(long)]
@@ -263,6 +265,8 @@ enum GroupsCommand {
         name: Option<String>,
         #[arg(long)]
         description: Option<String>,
+        #[arg(long)]
+        is_virtual: Option<bool>,
     },
     Delete {
         #[arg(long)]
@@ -310,6 +314,12 @@ enum ClientsCommand {
         grant_type: Vec<String>,
         #[arg(long, default_value = "openid profile email")]
         scope: String,
+        #[arg(long, default_value = "effective")]
+        groups_claim_mode: String,
+        #[arg(long, default_value_t = true)]
+        include_claim_maps: bool,
+        #[arg(long, default_value_t = false)]
+        ignore_virtual_groups: bool,
     },
     Update {
         #[arg(long)]
@@ -326,6 +336,12 @@ enum ClientsCommand {
         scope: Option<String>,
         #[arg(long)]
         is_active: Option<bool>,
+        #[arg(long)]
+        groups_claim_mode: Option<String>,
+        #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+        include_claim_maps: Option<bool>,
+        #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+        ignore_virtual_groups: Option<bool>,
     },
     Delete {
         #[arg(long)]
@@ -401,6 +417,7 @@ pub(crate) struct GroupRow {
     name: String,
     #[tabled(display_with = "display_opt")]
     description: Option<String>,
+    is_virtual: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
@@ -414,6 +431,9 @@ pub(crate) struct ClientRow {
     grant_types: Vec<String>,
     scope: String,
     is_active: bool,
+    groups_claim_mode: String,
+    include_claim_maps: bool,
+    ignore_virtual_groups: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Tabled)]
@@ -796,21 +816,23 @@ async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsC
                 serde_json::from_str(&body).context("Failed to parse response")?;
             print_table_rows_vec(output, rows)?;
         }
-        GroupsCommand::Create { name, description } => {
+        GroupsCommand::Create { name, description, is_virtual } => {
             let payload = serde_json::json!({
                 "name": name,
                 "description": description,
+                "is_virtual": is_virtual,
             });
             let body = http.post_json("/admin/groups", payload).await?;
             print_table_item::<GroupRow>(output, &body)?;
         }
-        GroupsCommand::Update { id, name, description } => {
-            if name.is_none() && description.is_none() {
+        GroupsCommand::Update { id, name, description, is_virtual } => {
+            if name.is_none() && description.is_none() && is_virtual.is_none() {
                 bail!("At least one field must be provided for update.");
             }
             let payload = serde_json::json!({
                 "name": name,
                 "description": description,
+                "is_virtual": is_virtual,
             });
             let body = http.put_json(&format!("/admin/groups/{id}"), payload).await?;
             print_table_item::<GroupRow>(output, &body)?;
@@ -896,6 +918,9 @@ async fn handle_clients(
             redirect_uri,
             grant_type,
             scope,
+            groups_claim_mode,
+            include_claim_maps,
+            ignore_virtual_groups,
         } => {
             let payload = serde_json::json!({
                 "client_id": client_id,
@@ -904,6 +929,9 @@ async fn handle_clients(
                 "redirect_uris": redirect_uri,
                 "grant_types": grant_type,
                 "scope": scope,
+                "groups_claim_mode": groups_claim_mode,
+                "include_claim_maps": include_claim_maps,
+                "ignore_virtual_groups": ignore_virtual_groups,
             });
             let body = http.post_json("/admin/oauth-clients", payload).await?;
             print_client_item(output, &body)?;
@@ -916,6 +944,9 @@ async fn handle_clients(
             grant_type,
             scope,
             is_active,
+            groups_claim_mode,
+            include_claim_maps,
+            ignore_virtual_groups,
         } => {
             if name.is_none()
                 && client_secret.is_none()
@@ -923,6 +954,9 @@ async fn handle_clients(
                 && grant_type.is_empty()
                 && scope.is_none()
                 && is_active.is_none()
+                && groups_claim_mode.is_none()
+                && include_claim_maps.is_none()
+                && ignore_virtual_groups.is_none()
             {
                 bail!("At least one field must be provided for update.");
             }
@@ -943,6 +977,9 @@ async fn handle_clients(
                 "grant_types": grant_types,
                 "scope": scope,
                 "is_active": is_active,
+                "groups_claim_mode": groups_claim_mode,
+                "include_claim_maps": include_claim_maps,
+                "ignore_virtual_groups": ignore_virtual_groups,
             });
             let body = http.put_json(&format!("/admin/oauth-clients/{id}"), payload).await?;
             print_client_item(output, &body)?;
@@ -1095,6 +1132,9 @@ fn handle_status() -> Result<()> {
 }
 
 async fn refresh_session_async(session: Session) -> Result<Session> {
+    if session.refresh_token.trim().is_empty() {
+        bail!("No refresh token available. Please login again with 'simple-idm-ctl login'");
+    }
     let client = reqwest::Client::new();
 
     let params = [
@@ -1109,9 +1149,22 @@ async fn refresh_session_async(session: Session) -> Result<Session> {
         .form(&params)
         .send()
         .await?;
+    let status = response.status();
+    let body = response.text().await?;
 
-    if !response.status().is_success() {
-        bail!("Token refresh failed. Please login again with 'simple-idm-ctl login'");
+    if !status.is_success() {
+        if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body) {
+            bail!(
+                "Token refresh failed: {}: {}. Please login again with 'simple-idm-ctl login'",
+                err.error,
+                err.error_description
+            );
+        }
+        bail!(
+            "Token refresh failed ({}). Please login again with 'simple-idm-ctl login'. Response: {}",
+            status,
+            body.trim()
+        );
     }
 
     #[derive(Deserialize)]
@@ -1121,7 +1174,23 @@ async fn refresh_session_async(session: Session) -> Result<Session> {
         expires_in: i64,
     }
 
-    let token_data: TokenResponse = response.json().await?;
+    let token_data: TokenResponse = match serde_json::from_str(&body) {
+        Ok(data) => data,
+        Err(err) => {
+            if let Ok(err_body) = serde_json::from_str::<ErrorResponse>(&body) {
+                bail!(
+                    "Token refresh failed: {}: {}. Please login again with 'simple-idm-ctl login'",
+                    err_body.error,
+                    err_body.error_description
+                );
+            }
+            bail!(
+                "Token refresh response missing access_token. Please login again with 'simple-idm-ctl login'. Parse error: {}. Response: {}",
+                err,
+                body.trim()
+            );
+        }
+    };
 
     Ok(Session {
         access_token: token_data.access_token,
@@ -1322,6 +1391,9 @@ fn print_clients_output(output: OutputConfig, rows: Vec<ClientRow>) -> Result<()
                     KeyValueRow::new("grant_types", client.grant_types.join(", ")),
                     KeyValueRow::new("scope", client.scope),
                     KeyValueRow::new("is_active", client.is_active.to_string()),
+                    KeyValueRow::new("groups_claim_mode", client.groups_claim_mode),
+                    KeyValueRow::new("include_claim_maps", client.include_claim_maps.to_string()),
+                    KeyValueRow::new("ignore_virtual_groups", client.ignore_virtual_groups.to_string()),
                 ];
                 let mut table = Table::new(rows);
                 apply_style(&mut table, output.style);
@@ -1348,6 +1420,9 @@ fn print_client_item(output: OutputConfig, body: &str) -> Result<()> {
                 KeyValueRow::new("grant_types", client.grant_types.join(", ")),
                 KeyValueRow::new("scope", client.scope),
                 KeyValueRow::new("is_active", client.is_active.to_string()),
+                KeyValueRow::new("groups_claim_mode", client.groups_claim_mode),
+                KeyValueRow::new("include_claim_maps", client.include_claim_maps.to_string()),
+                KeyValueRow::new("ignore_virtual_groups", client.ignore_virtual_groups.to_string()),
             ];
             let mut table = Table::new(rows);
             apply_style(&mut table, output.style);
