@@ -1,5 +1,5 @@
 use crate::auth::{build_custom_claims, get_effective_user_groups, get_user_group_names, verify_password, JwtService};
-use crate::db::models::{AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User};
+use crate::db::models::{AuthenticationSession, AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User};
 use axum::{
     body::Bytes,
     extract::{Query, State},
@@ -7,6 +7,7 @@ use axum::{
     response::{Html, IntoResponse, Redirect, Response},
     Form, Json,
 };
+use axum::http::header::SET_COOKIE;
 use chrono::{Duration, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -78,10 +79,45 @@ pub struct TokenResponseWithRefresh {
     pub scope: Option<String>,
 }
 
+/// Helper: Get valid auth session from cookie
+async fn get_auth_session_from_cookie(
+    db_pool: &sqlx::PgPool,
+    headers: &HeaderMap,
+) -> Option<AuthenticationSession> {
+    // Extract session token from cookie
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+
+    let session_token = cookie_header
+        .split(';')
+        .find_map(|cookie| {
+            let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
+            if parts.len() == 2 && parts[0] == "auth_session" {
+                Some(parts[1].to_string())
+            } else {
+                None
+            }
+        })?;
+
+    // Load session from database
+    let session = sqlx::query_as::<_, AuthenticationSession>(
+        r#"
+        SELECT * FROM authentication_sessions
+        WHERE session_token = $1 AND expires_at > NOW()
+        "#,
+    )
+    .bind(&session_token)
+    .fetch_optional(db_pool)
+    .await
+    .ok()??;
+
+    Some(session)
+}
+
 /// Endpoint pro inicializaci authorization code flow
-/// Zobrazí HTML login formulář
+/// Zobrazí HTML login formulář nebo automaticky autorizuje (SSO)
 pub async fn handle_authorize(
     State(state): State<Arc<OAuth2State>>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Získej response_type
@@ -152,9 +188,105 @@ pub async fn handle_authorize(
         return Html(html).into_response();
     }
 
-    // Zobraz login formulář
+    // SSO: Check for existing authentication session
+    if let Some(auth_session) = get_auth_session_from_cookie(&state.db_pool, &headers).await {
+        // User is already authenticated - auto-generate authorization code
+        tracing::debug!(
+            "SSO: Found valid session for user {}, auto-authorizing",
+            auth_session.user_id
+        );
+
+        // Generate authorization code
+        let code: String = rand::rng()
+            .sample_iter(rand::distr::Alphanumeric)
+            .take(32)
+            .map(char::from)
+            .collect();
+
+        let expires_at = Utc::now() + Duration::minutes(10);
+        let scope = params
+            .get("scope")
+            .map(|s| s.as_str())
+            .unwrap_or(&client.scope);
+
+        // Normalize PKCE fields
+        let code_challenge = params.get("code_challenge").map(|s| s.as_str()).and_then(non_empty);
+        let code_challenge_method = params.get("code_challenge_method").map(|s| s.as_str()).and_then(non_empty);
+
+        // Store authorization code
+        if let Err(e) = sqlx::query(
+            r#"
+            INSERT INTO authorization_codes
+            (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            "#,
+        )
+        .bind(&code)
+        .bind(client.id)
+        .bind(auth_session.user_id)
+        .bind(redirect_uri)
+        .bind(scope)
+        .bind(code_challenge)
+        .bind(code_challenge_method)
+        .bind(expires_at)
+        .execute(&state.db_pool)
+        .await
+        {
+            tracing::error!("Failed to store authorization code for SSO: {:?}", e);
+            let html = templates::error_page(
+                "server_error",
+                "Failed to create authorization code",
+            );
+            return Html(html).into_response();
+        }
+
+        // Redirect with authorization code (SSO successful)
+        let mut redirect_url = redirect_uri.clone();
+        redirect_url.push_str(&format!("?code={}", code));
+        if let Some(state) = params.get("state") {
+            redirect_url.push_str(&format!("&state={}", state));
+        }
+
+        return Redirect::to(&redirect_url).into_response();
+    }
+
+    // No valid session - show login form
     let html = templates::login_page(&params, None);
     Html(html).into_response()
+}
+
+/// Helper: Create authentication session for SSO
+async fn create_auth_session(
+    db_pool: &sqlx::PgPool,
+    user_id: Uuid,
+    client_id: Option<Uuid>,
+    session_expiry_seconds: i64,
+) -> Result<String, sqlx::Error> {
+    // Generate random session token
+    let session_token: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect();
+
+    let expires_at = Utc::now() + Duration::seconds(session_expiry_seconds);
+
+    // Store session in database
+    sqlx::query(
+        r#"
+        INSERT INTO authentication_sessions
+        (session_token, user_id, client_id, expires_at)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(&session_token)
+    .bind(user_id)
+    .bind(client_id)
+    .bind(expires_at)
+    .execute(db_pool)
+    .await?;
+
+    Ok(session_token)
 }
 
 /// Endpoint pro login a vygenerování authorization code
@@ -290,11 +422,43 @@ pub async fn handle_login(
         return Html(html).into_response();
     }
 
+    // Create authentication session for SSO
+    let session_token = match create_auth_session(
+        &state.db_pool,
+        user.id,
+        Some(client.id),
+        state.auth_session_expiry,
+    )
+    .await
+    {
+        Ok(token) => token,
+        Err(_) => {
+            tracing::warn!("Failed to create auth session for user {}", user.id);
+            // Continue without session - not critical for this flow
+            String::new()
+        }
+    };
+
     // Redirect zpět na aplikaci s authorization code
     let mut redirect_url = req.redirect_uri.clone();
     redirect_url.push_str(&format!("?code={}", code));
     if let Some(state) = req.state {
         redirect_url.push_str(&format!("&state={}", state));
+    }
+
+    // Set session cookie if session was created
+    if !session_token.is_empty() {
+        let cookie = format!(
+            "auth_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+            session_token, state.auth_session_expiry
+        );
+
+        let mut response = Redirect::to(&redirect_url).into_response();
+        response.headers_mut().insert(
+            SET_COOKIE,
+            cookie.parse().unwrap(),
+        );
+        return response;
     }
 
     Redirect::to(&redirect_url).into_response()
@@ -615,6 +779,16 @@ async fn handle_authorization_code_token(
         }
     };
 
+    // Log JWT claims and groups for debugging
+    tracing::debug!(
+        user_id = %user.id,
+        username = %user.username,
+        client_id = %client.client_id,
+        groups = ?user_group_names,
+        custom_claims = ?custom_claims,
+        "Issuing JWT token"
+    );
+
     // Vytvoř access token
     let access_token = match state.jwt_service.create_access_token(
         user.id,
@@ -841,6 +1015,16 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         Err(_) => std::collections::HashMap::new(),
     };
 
+    // Log JWT claims and groups for debugging
+    tracing::debug!(
+        user_id = %user.id,
+        username = %user.username,
+        client_id = %client.client_id,
+        groups = ?user_group_names,
+        custom_claims = ?custom_claims,
+        "Issuing JWT token (refresh)"
+    );
+
     // Vytvoř nový access token
     let access_token = match state.jwt_service.create_access_token(
         user.id,
@@ -953,4 +1137,45 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         scope: Some(refresh_token.scope),
     })
     .into_response()
+}
+
+/// Logout endpoint - invalidates authentication session
+pub async fn handle_logout(
+    State(state): State<Arc<OAuth2State>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    // Extract session token from cookie
+    if let Some(cookie_header) = headers.get(header::COOKIE) {
+        if let Ok(cookie_str) = cookie_header.to_str() {
+            if let Some(session_token) = cookie_str.split(';').find_map(|cookie| {
+                let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
+                if parts.len() == 2 && parts[0] == "auth_session" {
+                    Some(parts[1].to_string())
+                } else {
+                    None
+                }
+            }) {
+                // Delete session from database
+                let _ = sqlx::query("DELETE FROM authentication_sessions WHERE session_token = $1")
+                    .bind(&session_token)
+                    .execute(&state.db_pool)
+                    .await;
+
+                tracing::debug!("Logout: Deleted session {}", session_token);
+            }
+        }
+    }
+
+    // Clear cookie by setting Max-Age=0
+    let cookie = "auth_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
+
+    let mut response = Html("<html><body><h1>Logged out</h1><p>You have been successfully logged out.</p></body></html>")
+        .into_response();
+
+    response.headers_mut().insert(
+        SET_COOKIE,
+        cookie.parse().unwrap(),
+    );
+
+    response
 }

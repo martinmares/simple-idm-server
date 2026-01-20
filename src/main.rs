@@ -67,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         jwt_service: jwt_service.clone(),
         access_token_expiry: config.jwt.access_token_expiry_seconds,
         refresh_token_expiry: config.jwt.refresh_token_expiry_seconds,
+        auth_session_expiry: config.jwt.auth_session_expiry_seconds,
     });
 
     let cleanup_interval = config.jwt.refresh_token_cleanup_interval_seconds;
@@ -234,6 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/oauth2/revoke", post(oauth2::handle_revoke))
         .route("/oauth2/authorize", get(oauth2::handle_authorize))
         .route("/oauth2/login", post(oauth2::handle_login))
+        .route("/oauth2/logout", get(oauth2::handle_logout))
         .route(
             "/oauth2/device/authorize",
             post(oauth2::handle_device_authorization),

@@ -27,6 +27,7 @@ pub struct JwtConfig {
     pub access_token_expiry_seconds: i64,
     pub refresh_token_expiry_seconds: i64,
     pub refresh_token_cleanup_interval_seconds: u64,
+    pub auth_session_expiry_seconds: i64, // SSO session duration
     pub private_key_path: String,
     pub public_key_path: String,
     pub key_id: String, // kid for JWKS
@@ -70,6 +71,10 @@ impl Config {
             .unwrap_or_else(|_| "0".to_string())
             .parse()
             .unwrap_or(0);
+        let auth_session_expiry = env::var("AUTH_SESSION_EXPIRY_SECONDS")
+            .unwrap_or_else(|_| "3600".to_string()) // 1 hour default
+            .parse()
+            .unwrap_or(3600);
         let private_key_path = env::var("JWT_PRIVATE_KEY_PATH")
             .unwrap_or_else(|_| "./keys/private.pem".to_string());
         let public_key_path = env::var("JWT_PUBLIC_KEY_PATH")
@@ -106,6 +111,7 @@ impl Config {
                 access_token_expiry_seconds: access_token_expiry,
                 refresh_token_expiry_seconds: refresh_token_expiry,
                 refresh_token_cleanup_interval_seconds: refresh_token_cleanup_interval,
+                auth_session_expiry_seconds: auth_session_expiry,
                 private_key_path,
                 public_key_path,
                 key_id,

@@ -405,6 +405,16 @@ pub async fn handle_device_token(
         Err(_) => std::collections::HashMap::new(),
     };
 
+    // Log JWT claims and groups for debugging
+    tracing::debug!(
+        user_id = %user.id,
+        username = %user.username,
+        client_id = %client.client_id,
+        groups = ?user_group_names,
+        custom_claims = ?custom_claims,
+        "Issuing JWT token (device flow)"
+    );
+
     // Vytvoř access token
     let access_token = match state.jwt_service.create_access_token(
         user.id,
