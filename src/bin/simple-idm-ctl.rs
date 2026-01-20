@@ -10,6 +10,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::collections::HashMap;
 use rand::Rng;
+use openidconnect::{
+    core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreProviderMetadata},
+    reqwest::async_http_client,
+    AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
+    PkceCodeVerifier, RedirectUrl, Scope,
+};
+use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponseTrait};
+use serde_json::Value;
 
 #[path = "../cli/tui.rs"]
 mod tui;
@@ -158,11 +166,6 @@ enum Commands {
     },
     #[command(alias = "ui")]
     Tui,
-    #[command(name = "oauth")]
-    OAuth {
-        #[command(subcommand)]
-        command: OAuthCommand,
-    },
     Login {
         #[arg(long, required = true)]
         url: String,
@@ -378,74 +381,6 @@ enum UserGroupsCommand {
     },
 }
 
-#[derive(Subcommand, Debug)]
-enum OAuthCommand {
-    AuthorizeUrl {
-        #[arg(long)]
-        client_id: String,
-        #[arg(long)]
-        redirect_uri: String,
-        #[arg(long, default_value = "code")]
-        response_type: String,
-        #[arg(long, default_value = "openid")]
-        scope: String,
-        #[arg(long)]
-        state: Option<String>,
-        #[arg(long)]
-        code_challenge: Option<String>,
-        #[arg(long)]
-        code_challenge_method: Option<String>,
-    },
-    Token {
-        #[arg(long, default_value = "authorization_code")]
-        grant_type: String,
-        #[arg(long)]
-        client_id: String,
-        #[arg(long)]
-        client_secret: String,
-        #[arg(long)]
-        code: Option<String>,
-        #[arg(long)]
-        redirect_uri: Option<String>,
-        #[arg(long)]
-        code_verifier: Option<String>,
-        #[arg(long)]
-        refresh_token: Option<String>,
-    },
-    Refresh {
-        #[arg(long)]
-        client_id: String,
-        #[arg(long)]
-        client_secret: String,
-        #[arg(long)]
-        refresh_token: String,
-    },
-    UserInfo {
-        #[arg(long)]
-        access_token: String,
-    },
-    Introspect {
-        #[arg(long)]
-        client_id: String,
-        #[arg(long)]
-        client_secret: String,
-        #[arg(long)]
-        token: String,
-        #[arg(long)]
-        token_type_hint: Option<String>,
-    },
-    Revoke {
-        #[arg(long)]
-        client_id: String,
-        #[arg(long)]
-        client_secret: String,
-        #[arg(long)]
-        token: String,
-        #[arg(long)]
-        token_type_hint: Option<String>,
-    },
-}
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct ErrorResponse {
     error: String,
@@ -535,6 +470,44 @@ fn generate_pkce_pair() -> (String, String) {
     (code_verifier, code_challenge)
 }
 
+async fn discover_provider(base_url: &str, insecure: bool) -> Result<CoreProviderMetadata> {
+    let issuer_url = IssuerUrl::new(base_url.to_string())
+        .context("Invalid issuer URL")?;
+    if insecure {
+        eprintln!("Warning: --insecure is not supported for OIDC discovery; proceeding with default TLS validation.");
+    }
+    let metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client).await?;
+    Ok(metadata)
+}
+
+fn parse_raw_claims(id_token: &CoreIdToken) -> Result<HashMap<String, Value>> {
+    let token_str = id_token.to_string();
+    let parts: Vec<&str> = token_str.split('.').collect();
+    if parts.len() != 3 {
+        bail!("Invalid JWT format");
+    }
+    let payload = base64::Engine::decode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        parts[1],
+    )
+    .context("Failed to decode JWT payload")?;
+    let claims: HashMap<String, Value> = serde_json::from_slice(&payload)
+        .context("Failed to parse JWT claims")?;
+    Ok(claims)
+}
+
+fn extract_groups(claims: &HashMap<String, Value>) -> Vec<String> {
+    claims
+        .get("groups")
+        .and_then(|value| value.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -570,7 +543,6 @@ async fn main() -> Result<()> {
         Commands::ClaimMaps { command } => handle_claim_maps(&http, output, command).await?,
         Commands::UserGroups { command } => handle_user_groups(&http, output, command).await?,
         Commands::Tui => tui::run_tui(&http).await?,
-        Commands::OAuth { command } => handle_oauth(&http, output, command).await?,
         Commands::Ping => handle_ping(&http).await?,
         Commands::Login { .. } | Commands::Logout { .. } | Commands::Sessions { .. } | Commands::Status => unreachable!(),
     }
@@ -592,23 +564,52 @@ async fn resolve_auth(_cli: &Cli) -> Result<(String, String)> {
 }
 
 async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &str, insecure: bool) -> Result<()> {
+    let provider_metadata = discover_provider(base_url, insecure).await
+        .context("Failed to discover OIDC provider metadata")?;
 
-    let (code_verifier, code_challenge) = generate_pkce_pair();
+    let redirect_uri = format!("http://localhost:{}/callback", port);
+    let redirect_url = RedirectUrl::new(redirect_uri.clone())
+        .context("Invalid redirect URL")?;
 
-    let (tx, rx) = oneshot::channel::<String>();
+    let client = CoreClient::from_provider_metadata(
+        provider_metadata,
+        ClientId::new(client_id.to_string()),
+        None,
+    )
+    .set_redirect_uri(redirect_url);
+
+    let (code_verifier, _code_challenge) = generate_pkce_pair();
+    let pkce_challenge = PkceCodeChallenge::from_code_verifier_sha256(
+        &PkceCodeVerifier::new(code_verifier.clone()),
+    );
+
+    let (auth_url, csrf_state, nonce) = client
+        .authorize_url(
+            CoreAuthenticationFlow::AuthorizationCode,
+            CsrfToken::new_random,
+            Nonce::new_random,
+        )
+        .add_scope(Scope::new("openid".to_string()))
+        .add_scope(Scope::new("profile".to_string()))
+        .add_scope(Scope::new("email".to_string()))
+        .add_scope(Scope::new("groups".to_string()))
+        .set_pkce_challenge(pkce_challenge)
+        .url();
+
+    let (tx, rx) = oneshot::channel::<(String, String)>();
     let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
     let callback_app = axum::Router::new().route(
         "/callback",
         axum::routing::get(|axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
             let tx_clone = tx.clone();
-            if let Some(code) = params.get("code") {
+            if let (Some(code), Some(state)) = (params.get("code"), params.get("state")) {
                 if let Some(sender) = tx_clone.lock().await.take() {
-                    let _ = sender.send(code.clone());
+                    let _ = sender.send((code.clone(), state.clone()));
                 }
                 return "✓ Login successful! You can close this window.";
             }
-            "✗ Login failed: No authorization code received."
+            "✗ Login failed: Missing authorization code or state."
         }),
     );
 
@@ -620,62 +621,76 @@ async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &
         axum::serve(listener, callback_app).await.ok();
     });
 
-    let redirect_uri = format!("http://localhost:{}/callback", port);
-    let authorize_url = format!(
-        "{}/oauth2/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid%20profile%20email&code_challenge={}&code_challenge_method=S256",
-        base_url, client_id, urlencoding::encode(&redirect_uri), code_challenge
-    );
-
     println!("Opening browser for login...");
-    println!("If browser doesn't open, visit: {}", authorize_url);
+    println!("If browser doesn't open, visit: {}", auth_url);
 
-    if let Err(e) = open_url(&authorize_url) {
+    if let Err(e) = open_url(auth_url.as_str()) {
         eprintln!("Could not open browser: {}", e);
     }
 
-    let code = tokio::time::timeout(
+    let (code, returned_state) = tokio::time::timeout(
         std::time::Duration::from_secs(120),
         rx
     ).await
         .context("Login timeout after 2 minutes")??;
 
-    exchange_code_for_tokens(base_url, client_id, &code, &code_verifier, &redirect_uri, insecure, server_name).await
+    if returned_state != *csrf_state.secret() {
+        bail!("State mismatch in OAuth2 callback");
+    }
+
+    exchange_code_for_tokens(
+        &client,
+        base_url,
+        &code,
+        &code_verifier,
+        insecure,
+        server_name,
+        nonce,
+    )
+    .await
 }
 
 async fn exchange_code_for_tokens(
+    client: &CoreClient,
     base_url: &str,
-    client_id: &str,
     code: &str,
     code_verifier: &str,
-    redirect_uri: &str,
     insecure: bool,
     server_name: &str,
+    nonce: Nonce,
 ) -> Result<()> {
-    let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(insecure)
-        .build()?;
-
-    let params = [
-        ("grant_type", "authorization_code"),
-        ("client_id", client_id),
-        ("client_secret", ""),
-        ("code", code),
-        ("redirect_uri", redirect_uri),
-        ("code_verifier", code_verifier),
-    ];
-
-    let response = client
-        .post(format!("{}/oauth2/token", base_url))
-        .form(&params)
-        .send()
-        .await?;
-
-    let status = response.status();
-    let body_text = response.text().await?;
-
-    if !status.is_success() {
-        bail!("Token exchange failed (status {}): {}", status, body_text);
+    if insecure {
+        eprintln!("Warning: --insecure is not supported for OIDC token exchange; proceeding with default TLS validation.");
     }
+
+    let token_response = client
+        .exchange_code(AuthorizationCode::new(code.to_string()))
+        .set_pkce_verifier(PkceCodeVerifier::new(code_verifier.to_string()))
+        .request_async(async_http_client)
+        .await
+        .context("Failed to exchange authorization code for tokens")?;
+
+    let id_token = token_response
+        .id_token()
+        .context("No ID token in response")?;
+
+    let claims = id_token
+        .claims(&client.id_token_verifier(), move |nonce_opt: Option<&Nonce>| {
+            match nonce_opt {
+                Some(value) if value.secret() == nonce.secret() => Ok(()),
+                Some(_) => Err("Nonce mismatch".to_string()),
+                None => Err("No nonce in token".to_string()),
+            }
+        })
+        .context("Failed to verify ID token")?;
+
+    let email = claims
+        .email()
+        .map(|e| e.as_str().to_string())
+        .filter(|e| !e.is_empty());
+
+    let raw_claims = parse_raw_claims(id_token)?;
+    let groups = extract_groups(&raw_claims);
 
     #[derive(Deserialize)]
     struct TokenResponse {
@@ -684,8 +699,16 @@ async fn exchange_code_for_tokens(
         expires_in: i64,
     }
 
-    let token_data: TokenResponse = serde_json::from_str(&body_text)
-        .context(format!("Failed to parse token response: {}", body_text))?;
+    let token_data = TokenResponse {
+        access_token: token_response.access_token().secret().to_string(),
+        refresh_token: token_response
+            .refresh_token()
+            .map(|token| token.secret().to_string()),
+        expires_in: token_response
+            .expires_in()
+            .map(|exp| exp.as_secs() as i64)
+            .unwrap_or(3600),
+    };
 
     let session = Session {
         access_token: token_data.access_token,
@@ -693,8 +716,8 @@ async fn exchange_code_for_tokens(
         expires_at: Utc::now() + Duration::seconds(token_data.expires_in),
         base_url: base_url.to_string(),
         created_at: Utc::now(),
-        user_email: None,
-        user_groups: vec![],
+        user_email: email,
+        user_groups: groups,
     };
 
     save_session(server_name, session)?;
@@ -1071,134 +1094,6 @@ fn handle_status() -> Result<()> {
     Ok(())
 }
 
-async fn handle_oauth(http: &HttpClient, output: OutputConfig, command: OAuthCommand) -> Result<()> {
-    match command {
-        OAuthCommand::AuthorizeUrl {
-            client_id,
-            redirect_uri,
-            response_type,
-            scope,
-            state,
-            code_challenge,
-            code_challenge_method,
-        } => {
-            let mut params = vec![
-                ("client_id".to_string(), client_id),
-                ("redirect_uri".to_string(), redirect_uri),
-                ("response_type".to_string(), response_type),
-                ("scope".to_string(), scope),
-            ];
-            if let Some(state) = state {
-                params.push(("state".to_string(), state));
-            }
-            if let Some(code_challenge) = code_challenge {
-                params.push(("code_challenge".to_string(), code_challenge));
-            }
-            if let Some(code_challenge_method) = code_challenge_method {
-                params.push(("code_challenge_method".to_string(), code_challenge_method));
-            }
-
-            let query = serde_urlencoded::to_string(params)
-                .context("Failed to build authorize query")?;
-            let mut url = http.url("/oauth2/authorize");
-            url.push('?');
-            url.push_str(&query);
-            println!("{url}");
-        }
-        OAuthCommand::Token {
-            grant_type,
-            client_id,
-            client_secret,
-            code,
-            redirect_uri,
-            code_verifier,
-            refresh_token,
-        } => {
-            let mut params = vec![
-                ("grant_type".to_string(), grant_type.clone()),
-                ("client_id".to_string(), client_id),
-                ("client_secret".to_string(), client_secret),
-            ];
-            match grant_type.as_str() {
-                "authorization_code" => {
-                    let code = code.ok_or_else(|| anyhow!("Missing --code"))?;
-                    let redirect_uri =
-                        redirect_uri.ok_or_else(|| anyhow!("Missing --redirect-uri"))?;
-                    params.push(("code".to_string(), code));
-                    params.push(("redirect_uri".to_string(), redirect_uri));
-                    if let Some(code_verifier) = code_verifier {
-                        params.push(("code_verifier".to_string(), code_verifier));
-                    }
-                }
-                "refresh_token" => {
-                    let refresh_token =
-                        refresh_token.ok_or_else(|| anyhow!("Missing --refresh-token"))?;
-                    params.push(("refresh_token".to_string(), refresh_token));
-                }
-                other => bail!("Unsupported grant_type: {other}"),
-            }
-            let body = http.post_form_no_auth("/oauth2/token", params).await?;
-            print_json_or_kv(output, &body)?;
-        }
-        OAuthCommand::Refresh {
-            client_id,
-            client_secret,
-            refresh_token,
-        } => {
-            let params = vec![
-                ("grant_type".to_string(), "refresh_token".to_string()),
-                ("client_id".to_string(), client_id),
-                ("client_secret".to_string(), client_secret),
-                ("refresh_token".to_string(), refresh_token),
-            ];
-            let body = http.post_form_no_auth("/oauth2/token", params).await?;
-            print_json_or_kv(output, &body)?;
-        }
-        OAuthCommand::UserInfo { access_token } => {
-            let body = http.get_with_bearer("/oauth2/userinfo", &access_token).await?;
-            print_json_or_kv(output, &body)?;
-        }
-        OAuthCommand::Introspect {
-            client_id,
-            client_secret,
-            token,
-            token_type_hint,
-        } => {
-            let mut params = vec![
-                ("client_id".to_string(), client_id),
-                ("client_secret".to_string(), client_secret),
-                ("token".to_string(), token),
-            ];
-            if let Some(hint) = token_type_hint {
-                params.push(("token_type_hint".to_string(), hint));
-            }
-            let body = http.post_form_no_auth("/oauth2/introspect", params).await?;
-            print_json_or_kv(output, &body)?;
-        }
-        OAuthCommand::Revoke {
-            client_id,
-            client_secret,
-            token,
-            token_type_hint,
-        } => {
-            let mut params = vec![
-                ("client_id".to_string(), client_id),
-                ("client_secret".to_string(), client_secret),
-                ("token".to_string(), token),
-            ];
-            if let Some(hint) = token_type_hint {
-                params.push(("token_type_hint".to_string(), hint));
-            }
-            let body = http.post_form_no_auth("/oauth2/revoke", params).await?;
-            if !body.trim().is_empty() {
-                print_json_or_kv(output, &body)?;
-            }
-        }
-    }
-
-    Ok(())
-}
-
 async fn refresh_session_async(session: Session) -> Result<Session> {
     let client = reqwest::Client::new();
 
@@ -1300,21 +1195,6 @@ fn limit_text(value: &str, max_len: usize) -> String {
     format!("{trimmed}...")
 }
 
-fn json_value_to_string(value: &serde_json::Value) -> String {
-    match value {
-        serde_json::Value::Null => "".to_string(),
-        serde_json::Value::Bool(val) => val.to_string(),
-        serde_json::Value::Number(val) => val.to_string(),
-        serde_json::Value::String(val) => val.clone(),
-        serde_json::Value::Array(values) => values
-            .iter()
-            .map(json_value_to_string)
-            .collect::<Vec<_>>()
-            .join(", "),
-        serde_json::Value::Object(_) => value.to_string(),
-    }
-}
-
 fn append_pagination(path: &str, page: Option<usize>, limit: Option<usize>) -> String {
     let mut params = Vec::new();
     if let Some(page) = page {
@@ -1386,32 +1266,6 @@ fn print_message(output: OutputConfig, body: &str) -> Result<()> {
             }
         }
     }
-    Ok(())
-}
-
-fn print_json_or_kv(output: OutputConfig, body: &str) -> Result<()> {
-    if matches!(output.format, OutputFormat::Json) {
-        println!("{}", body);
-        return Ok(());
-    }
-
-    let value: serde_json::Value =
-        serde_json::from_str(body).context("Failed to parse response")?;
-    let obj = match value.as_object() {
-        Some(obj) => obj,
-        None => {
-            println!("{}", body);
-            return Ok(());
-        }
-    };
-
-    let mut rows = Vec::new();
-    for (key, value) in obj {
-        rows.push(KeyValueRow::new(key, json_value_to_string(value)));
-    }
-    let mut table = Table::new(rows);
-    apply_style(&mut table, output.style);
-    println!("{table}");
     Ok(())
 }
 
@@ -1524,27 +1378,8 @@ impl HttpClient {
         self.request_with_auth(self.client.post(self.url(path))).await
     }
 
-    pub(crate) async fn get_with_bearer(&self, path: &str, token: &str) -> Result<String> {
-        self.request_no_auth(self.client.get(self.url(path)).bearer_auth(token))
-            .await
-    }
-
-    pub(crate) async fn post_form_no_auth(
-        &self,
-        path: &str,
-        body: Vec<(String, String)>,
-    ) -> Result<String> {
-        self.request_no_auth(self.client.post(self.url(path)).form(&body))
-            .await
-    }
-
     async fn request_with_auth(&self, req: reqwest::RequestBuilder) -> Result<String> {
         let resp = req.bearer_auth(&self.token).send().await?;
-        Self::handle_response(resp).await
-    }
-
-    async fn request_no_auth(&self, req: reqwest::RequestBuilder) -> Result<String> {
-        let resp = req.send().await?;
         Self::handle_response(resp).await
     }
 

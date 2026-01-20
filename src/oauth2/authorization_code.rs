@@ -31,6 +31,7 @@ pub struct AuthorizeRequest {
     pub state: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +49,7 @@ pub struct LoginRequest {
     pub state: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +77,8 @@ pub struct TokenResponseWithRefresh {
     pub expires_in: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }
@@ -204,10 +208,11 @@ pub async fn handle_authorize(
             .collect();
 
         let expires_at = Utc::now() + Duration::minutes(10);
-        let scope = params
-            .get("scope")
-            .map(|s| s.as_str())
-            .unwrap_or(&client.scope);
+    let scope = params
+        .get("scope")
+        .map(|s| s.as_str())
+        .unwrap_or(&client.scope);
+    let nonce = params.get("nonce").map(|s| s.as_str()).and_then(non_empty);
 
         // Normalize PKCE fields
         let code_challenge = params.get("code_challenge").map(|s| s.as_str()).and_then(non_empty);
@@ -217,8 +222,8 @@ pub async fn handle_authorize(
         if let Err(e) = sqlx::query(
             r#"
             INSERT INTO authorization_codes
-            (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
             "#,
         )
         .bind(&code)
@@ -228,6 +233,7 @@ pub async fn handle_authorize(
         .bind(scope)
         .bind(code_challenge)
         .bind(code_challenge_method)
+        .bind(nonce)
         .bind(expires_at)
         .execute(&state.db_pool)
         .await
@@ -312,6 +318,9 @@ pub async fn handle_login(
             if let Some(state) = &req.state {
                 params.insert("state".to_string(), state.clone());
             }
+            if let Some(nonce) = &req.nonce {
+                params.insert("nonce".to_string(), nonce.clone());
+            }
             if let Some(scope) = &req.scope {
                 params.insert("scope".to_string(), scope.clone());
             }
@@ -342,6 +351,9 @@ pub async fn handle_login(
         params.insert("redirect_uri".to_string(), req.redirect_uri.clone());
         if let Some(state) = &req.state {
             params.insert("state".to_string(), state.clone());
+        }
+        if let Some(nonce) = &req.nonce {
+            params.insert("nonce".to_string(), nonce.clone());
         }
         if let Some(scope) = &req.scope {
             params.insert("scope".to_string(), scope.clone());
@@ -385,6 +397,7 @@ pub async fn handle_login(
     // Normalize empty PKCE fields (Grafana can submit empty values)
     let code_challenge = req.code_challenge.as_deref().and_then(non_empty);
     let code_challenge_method = req.code_challenge_method.as_deref().and_then(non_empty);
+    let nonce = req.nonce.as_deref().and_then(non_empty);
 
     // Vygeneruj authorization code
     let code: String = rand::rng()
@@ -400,8 +413,8 @@ pub async fn handle_login(
     if let Err(_) = sqlx::query(
         r#"
         INSERT INTO authorization_codes
-        (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
         "#,
     )
     .bind(&code)
@@ -411,6 +424,7 @@ pub async fn handle_login(
     .bind(&scope)
     .bind(code_challenge)
     .bind(code_challenge_method)
+    .bind(nonce)
     .bind(expires_at)
     .execute(&state.db_pool)
     .await
@@ -796,8 +810,8 @@ async fn handle_authorization_code_token(
         Some(user.email.clone()),
         Some(user.username.clone()),
         Some(auth_code.scope.clone()),
-        user_group_names,
-        custom_claims,
+        user_group_names.clone(),
+        custom_claims.clone(),
         state.access_token_expiry,
     ) {
         Ok(token) => token,
@@ -805,6 +819,26 @@ async fn handle_authorization_code_token(
             return Json(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Failed to create access token".to_string(),
+            })
+            .into_response()
+        }
+    };
+
+    let id_token = match state.jwt_service.create_id_token(
+        user.id,
+        client.client_id.clone(),
+        Some(user.email.clone()),
+        Some(user.username.clone()),
+        user_group_names,
+        custom_claims,
+        auth_code.nonce.clone(),
+        state.access_token_expiry,
+    ) {
+        Ok(token) => token,
+        Err(_) => {
+            return Json(ErrorResponse {
+                error: "server_error".to_string(),
+                error_description: "Failed to create ID token".to_string(),
             })
             .into_response()
         }
@@ -848,6 +882,7 @@ async fn handle_authorization_code_token(
         token_type: "Bearer".to_string(),
         expires_in: state.access_token_expiry,
         refresh_token: Some(refresh_token),
+        id_token: Some(id_token),
         scope: Some(auth_code.scope),
     })
     .into_response()
@@ -1134,6 +1169,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         token_type: "Bearer".to_string(),
         expires_in: state.access_token_expiry,
         refresh_token: Some(new_refresh_token),
+        id_token: None,
         scope: Some(refresh_token.scope),
     })
     .into_response()
