@@ -97,8 +97,32 @@ async fn handle_auth(
     // Validate session
     let session = match state.session_store.get(&session_id).await {
         Some(s) if !s.is_expired() => s,
-        _ => {
-            tracing::debug!("Session not found or expired: {}", session_id);
+        Some(s) => {
+            if let Some(refresh_token) = s.refresh_token.clone() {
+                match state.oidc_client.refresh_token(&refresh_token).await {
+                    Ok(refresh) => match state
+                        .session_store
+                        .refresh_session(&session_id, &refresh, &state.config)
+                        .await
+                    {
+                        Some(updated) => updated,
+                        None => {
+                            tracing::warn!("Failed to refresh session: {}", session_id);
+                            return (StatusCode::UNAUTHORIZED, HeaderMap::new()).into_response();
+                        }
+                    },
+                    Err(err) => {
+                        tracing::warn!("Token refresh failed for session {}: {:?}", session_id, err);
+                        return (StatusCode::UNAUTHORIZED, HeaderMap::new()).into_response();
+                    }
+                }
+            } else {
+                tracing::debug!("Session expired without refresh token: {}", session_id);
+                return (StatusCode::UNAUTHORIZED, HeaderMap::new()).into_response();
+            }
+        }
+        None => {
+            tracing::debug!("Session not found: {}", session_id);
             return (StatusCode::UNAUTHORIZED, HeaderMap::new()).into_response();
         }
     };

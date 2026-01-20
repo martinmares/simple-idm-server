@@ -7,8 +7,9 @@ use openidconnect::{
     },
     reqwest::async_http_client,
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope, TokenResponse as OidcTokenResponse,
+    PkceCodeVerifier, RedirectUrl, RefreshToken, Scope, TokenResponse as OidcTokenResponse,
 };
+use openidconnect::OAuth2TokenResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -28,6 +29,12 @@ pub struct TokenResponse {
     pub email: Option<String>,
     pub groups: Vec<String>,
     pub issued_at: DateTime<Utc>,
+    pub refresh_token: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct RefreshResult {
+    pub refresh_token: Option<String>,
 }
 
 impl OidcClient {
@@ -152,6 +159,24 @@ impl OidcClient {
             email,
             groups,
             issued_at: Utc::now(),
+            refresh_token: token_response
+                .refresh_token()
+                .map(|token| token.secret().to_string()),
+        })
+    }
+
+    pub async fn refresh_token(&self, refresh_token: &str) -> Result<RefreshResult> {
+        let token_response = self
+            .client
+            .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+            .request_async(async_http_client)
+            .await
+            .context("Failed to refresh token")?;
+
+        Ok(RefreshResult {
+            refresh_token: token_response
+                .refresh_token()
+                .map(|token| token.secret().to_string()),
         })
     }
 
