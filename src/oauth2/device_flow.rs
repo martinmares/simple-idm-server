@@ -3,7 +3,11 @@ use crate::auth::{
     get_user_group_names,
 };
 use crate::db::models::{DeviceCode, OAuthClient, User};
-use axum::{extract::State, response::IntoResponse, Json};
+use axum::{
+    extract::{Query, State},
+    response::{Html, IntoResponse},
+    Json,
+};
 use chrono::{Duration, Utc};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -11,6 +15,7 @@ use sqlx;
 use std::sync::Arc;
 
 use super::client_credentials::{ErrorResponse, OAuth2State};
+use super::templates;
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthorizationRequest {
@@ -52,6 +57,11 @@ pub struct DeviceVerifyRequest {
     pub password: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DevicePageQuery {
+    pub user_code: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct DeviceVerifyResponse {
     pub success: bool,
@@ -67,6 +77,18 @@ fn generate_user_code() -> String {
         .map(char::from)
         .collect();
     format!("{}-{}", &chars[..4], &chars[4..])
+}
+
+/// Endpoint pro zobrazení HTML formuláře pro device verification
+/// GET /device?user_code=XXXX-XXXX
+pub async fn show_device_form(
+    Query(query): Query<DevicePageQuery>,
+) -> impl IntoResponse {
+    Html(templates::device_verify_page(
+        query.user_code.as_deref(),
+        None,
+        None,
+    ))
 }
 
 /// Endpoint pro iniciaci device flow
@@ -160,9 +182,10 @@ pub async fn handle_device_authorization(
 
 /// Endpoint pro ověření user_code uživatelem
 /// Uživatel zadá user_code a svoje credentials
+/// Podporuje JSON i HTML formuláře
 pub async fn handle_device_verify(
     State(state): State<Arc<OAuth2State>>,
-    Json(req): Json<DeviceVerifyRequest>,
+    axum::extract::Form(req): axum::extract::Form<DeviceVerifyRequest>,
 ) -> impl IntoResponse {
     // Načti device code podle user_code
     let device_code = match sqlx::query_as::<_, DeviceCode>(
@@ -174,17 +197,19 @@ pub async fn handle_device_verify(
     {
         Ok(Some(dc)) => dc,
         Ok(None) => {
-            return Json(DeviceVerifyResponse {
-                success: false,
-                message: "Invalid user code".to_string(),
-            })
+            return Html(templates::device_verify_page(
+                Some(&req.user_code),
+                Some("Invalid user code"),
+                None,
+            ))
             .into_response()
         }
         Err(_) => {
-            return Json(DeviceVerifyResponse {
-                success: false,
-                message: "Database error".to_string(),
-            })
+            return Html(templates::device_verify_page(
+                Some(&req.user_code),
+                Some("Database error"),
+                None,
+            ))
             .into_response()
         }
     };
@@ -196,19 +221,21 @@ pub async fn handle_device_verify(
             .execute(&state.db_pool)
             .await;
 
-        return Json(DeviceVerifyResponse {
-            success: false,
-            message: "User code expired".to_string(),
-        })
+        return Html(templates::device_verify_page(
+            Some(&req.user_code),
+            Some("User code expired"),
+            None,
+        ))
         .into_response();
     }
 
     // Zkontroluj, jestli už není autorizovaný
     if device_code.is_authorized {
-        return Json(DeviceVerifyResponse {
-            success: false,
-            message: "Device already authorized".to_string(),
-        })
+        return Html(templates::device_verify_page(
+            Some(&req.user_code),
+            Some("Device already authorized"),
+            None,
+        ))
         .into_response();
     }
 
@@ -222,27 +249,30 @@ pub async fn handle_device_verify(
     {
         Ok(Some(user)) => user,
         Ok(None) => {
-            return Json(DeviceVerifyResponse {
-                success: false,
-                message: "Invalid credentials".to_string(),
-            })
+            return Html(templates::device_verify_page(
+                Some(&req.user_code),
+                Some("Invalid credentials"),
+                None,
+            ))
             .into_response()
         }
         Err(_) => {
-            return Json(DeviceVerifyResponse {
-                success: false,
-                message: "Database error".to_string(),
-            })
+            return Html(templates::device_verify_page(
+                Some(&req.user_code),
+                Some("Database error"),
+                None,
+            ))
             .into_response()
         }
     };
 
     // Ověř heslo
     if !crate::auth::verify_password(&req.password, &user.password_hash).unwrap_or(false) {
-        return Json(DeviceVerifyResponse {
-            success: false,
-            message: "Invalid credentials".to_string(),
-        })
+        return Html(templates::device_verify_page(
+            Some(&req.user_code),
+            Some("Invalid credentials"),
+            None,
+        ))
         .into_response();
     }
 
@@ -255,17 +285,19 @@ pub async fn handle_device_verify(
     .execute(&state.db_pool)
     .await
     {
-        return Json(DeviceVerifyResponse {
-            success: false,
-            message: "Failed to authorize device".to_string(),
-        })
+        return Html(templates::device_verify_page(
+            Some(&req.user_code),
+            Some("Failed to authorize device"),
+            None,
+        ))
         .into_response();
     }
 
-    Json(DeviceVerifyResponse {
-        success: true,
-        message: "Device authorized successfully".to_string(),
-    })
+    Html(templates::device_verify_page(
+        None,
+        None,
+        Some("Device authorized successfully! You can now return to your device."),
+    ))
     .into_response()
 }
 

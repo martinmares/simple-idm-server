@@ -241,7 +241,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             post(oauth2::handle_device_authorization),
         )
         .route("/oauth2/device/token", post(oauth2::handle_device_token))
-        .route("/oauth2/device/verify", post(oauth2::handle_device_verify))
+        .route("/device", get(oauth2::show_device_form))
+        .route("/device", post(oauth2::handle_device_verify))
         .route(
             "/password/reset",
             get(password_reset::show_password_reset_form),
