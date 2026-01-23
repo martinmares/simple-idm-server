@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use sqlx;
 use std::collections::HashMap;
 use std::sync::Arc;
+use url::Url;
 use uuid::Uuid;
 
 const EMPTY_CLIENT_SECRET_HASH: &str =
@@ -190,7 +191,7 @@ pub async fn handle_authorize(
     };
 
     // Ověř redirect_uri
-    if !client.redirect_uris.contains(redirect_uri) {
+    if !is_redirect_uri_allowed(&client, redirect_uri) {
         let html = templates::error_page(
             "invalid_request",
             "Invalid redirect_uri for this client",
@@ -265,6 +266,40 @@ pub async fn handle_authorize(
     // No valid session - show login form
     let html = templates::login_page(&params, None);
     Html(html).into_response()
+}
+
+fn is_redirect_uri_allowed(client: &OAuthClient, redirect_uri: &str) -> bool {
+    if client
+        .redirect_uris
+        .iter()
+        .any(|uri| uri == redirect_uri)
+    {
+        return true;
+    }
+
+    if client.client_id != "cli-tools" {
+        return false;
+    }
+
+    client.redirect_uris.iter().any(|uri| {
+        matches_localhost_wildcard(uri, "localhost", redirect_uri)
+            || matches_localhost_wildcard(uri, "127.0.0.1", redirect_uri)
+    })
+}
+
+fn matches_localhost_wildcard(pattern: &str, host: &str, redirect_uri: &str) -> bool {
+    if pattern != format!("http://{}:*/callback", host) {
+        return false;
+    }
+
+    let Ok(url) = Url::parse(redirect_uri) else {
+        return false;
+    };
+
+    url.scheme() == "http"
+        && url.host_str() == Some(host)
+        && url.path() == "/callback"
+        && url.port().is_some()
 }
 
 /// Helper: Create authentication session for SSO
