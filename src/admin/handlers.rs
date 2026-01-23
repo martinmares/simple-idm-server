@@ -10,6 +10,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx;
 use std::env;
+use url::Url;
 use uuid::Uuid;
 
 // ============================================================================
@@ -961,6 +962,10 @@ pub async fn create_oauth_client(
     let include_claim_maps = req.include_claim_maps.unwrap_or(true);
     let ignore_virtual_groups = req.ignore_virtual_groups.unwrap_or(false);
 
+    if let Err(resp) = validate_redirect_uris(&req.client_id, &req.redirect_uris) {
+        return resp;
+    }
+
     // Hash client secret
     let client_secret_hash = match hash_password(&req.client_secret) {
         Ok(hash) => hash,
@@ -1188,6 +1193,44 @@ pub async fn update_oauth_client(
 
     let redirect_uris = req.redirect_uris.as_deref();
     let grant_types = req.grant_types.as_deref();
+
+    if let Some(uris) = redirect_uris {
+        let client = sqlx::query_scalar::<_, String>(
+            "SELECT client_id FROM oauth_clients WHERE id = $1"
+        )
+        .bind(client_id)
+        .fetch_optional(&db_pool)
+        .await;
+
+        match client {
+            Ok(Some(client_id_str)) => {
+                if let Err(resp) = validate_redirect_uris(&client_id_str, uris) {
+                    return resp;
+                }
+            }
+            Ok(None) => {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: "not_found".to_string(),
+                        error_description: "OAuth client not found".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch OAuth client: {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Failed to validate redirect_uris".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    }
     let result = sqlx::query!(
         r#"
         UPDATE oauth_clients
@@ -1256,6 +1299,73 @@ pub async fn update_oauth_client(
                 .into_response()
         }
     }
+}
+
+fn validate_redirect_uris(
+    client_id: &str,
+    redirect_uris: &[String],
+) -> Result<(), axum::response::Response> {
+    const CLI_CLIENT_ID: &str = "cli-tools";
+    const ALLOWED_WILDCARDS: [&str; 2] = [
+        "http://localhost:*/callback",
+        "http://127.0.0.1:*/callback",
+    ];
+
+    for uri in redirect_uris {
+        if uri.contains('*') {
+            if client_id != CLI_CLIENT_ID {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: "redirect_uris cannot contain wildcard '*'".to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+            if !ALLOWED_WILDCARDS.iter().any(|allowed| allowed == uri) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description:
+                            "Only localhost wildcard redirect_uris are allowed for cli-tools"
+                                .to_string(),
+                    }),
+                )
+                    .into_response());
+            }
+            continue;
+        }
+
+        let url = Url::parse(uri).map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Invalid redirect_uri: {}", uri),
+                }),
+            )
+                .into_response()
+        })?;
+
+        let scheme = url.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!(
+                        "redirect_uris must be http or https: {}",
+                        uri
+                    ),
+                }),
+            )
+                .into_response());
+        }
+    }
+
+    Ok(())
 }
 
 // ============================================================================

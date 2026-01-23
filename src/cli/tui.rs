@@ -63,6 +63,7 @@ struct FormField {
     label: &'static str,
     kind: FieldKind,
     optional: bool,
+    read_only: bool,
     input: Input,
     reveal: bool,
 }
@@ -73,6 +74,7 @@ impl FormField {
             label,
             kind: FieldKind::Text,
             optional: false,
+            read_only: false,
             input: input_with_value(value),
             reveal: false,
         }
@@ -83,6 +85,7 @@ impl FormField {
             label,
             kind: FieldKind::Secret,
             optional: false,
+            read_only: false,
             input: input_with_value(value),
             reveal: false,
         }
@@ -93,6 +96,7 @@ impl FormField {
             label,
             kind: FieldKind::Bool,
             optional: false,
+            read_only: false,
             input: input_with_value(value.to_string()),
             reveal: false,
         }
@@ -100,6 +104,11 @@ impl FormField {
 
     fn optional(mut self) -> Self {
         self.optional = true;
+        self
+    }
+
+    fn read_only(mut self) -> Self {
+        self.read_only = true;
         self
     }
 
@@ -134,6 +143,7 @@ enum FormAction {
     UpdateUser(String),
     DeleteUser(String),
     CreateGroup,
+    CreateChildGroup(String),
     UpdateGroup(String),
     DeleteGroup(String),
     CreateClient,
@@ -225,6 +235,7 @@ struct App {
     claim_editor: Option<ClaimEditorState>,
     claim_entry: Option<ClaimEntryState>,
     claim_value_editor: Option<ClaimValueEditorState>,
+    pending_group_move: Option<GroupMoveRequest>,
     cursor_visible: bool,
 }
 
@@ -251,6 +262,7 @@ impl App {
             claim_editor: None,
             claim_entry: None,
             claim_value_editor: None,
+            pending_group_move: None,
             cursor_visible: false,
         }
     }
@@ -259,11 +271,11 @@ impl App {
         vec![
             (Tab::Users, "Users"),
             (Tab::Groups, "Groups"),
+            (Tab::UserGroups, "User groups"),
+            (Tab::GroupUsers, "Group users"),
             (Tab::Clients, "Clients"),
             (Tab::ClientClaims, "Client claims"),
             (Tab::GroupClaims, "Group claims"),
-            (Tab::UserGroups, "User groups"),
-            (Tab::GroupUsers, "Group users"),
         ]
     }
 
@@ -479,6 +491,7 @@ enum SelectorKind {
 enum SelectorTarget {
     FormField(&'static str),
     ClaimEntryOther,
+    GroupParent { child_id: String },
 }
 
 #[derive(Debug)]
@@ -722,6 +735,14 @@ struct ClaimValueEditorState {
     error: Option<String>,
     allow_multiple: bool,
 }
+
+#[derive(Clone, Debug)]
+struct GroupMoveRequest {
+    child_id: String,
+    new_parent_id: Option<String>,
+}
+
+const ROOT_GROUP_ID: &str = "__root__";
 fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
     vec![
         ("authorization_code", "authorization_code"),
@@ -837,8 +858,17 @@ async fn event_loop(
             if handled == SelectorResult::Applied || handled == SelectorResult::Cancelled {
                 if app.claim_entry.is_some() {
                     app.mode = Mode::ClaimEntry;
-                } else {
+                } else if app.form.is_some() {
                     app.mode = Mode::Form;
+                } else {
+                    app.mode = Mode::Normal;
+                }
+                if let Some(request) = app.pending_group_move.take() {
+                    if let Err(err) = apply_group_parent_move(http, &request).await {
+                        app.set_status(err.to_string());
+                    } else {
+                        refresh_active_tab(app, http).await?;
+                    }
                 }
             }
             continue;
@@ -908,6 +938,20 @@ async fn handle_normal_key(app: &mut App, key: KeyEvent, http: &HttpClient) -> R
         KeyCode::Char('a') => {
             if let Err(err) = open_add_user_group(app) {
                 app.set_status(err.to_string());
+            }
+        }
+        KeyCode::Char('m') => {
+            if app.tab == Tab::Groups {
+                if let Err(err) = open_move_group_parent_selector(app, http).await {
+                    app.set_status(err.to_string());
+                }
+            }
+        }
+        KeyCode::Char('c') => {
+            if app.tab == Tab::Groups {
+                if let Err(err) = open_create_subgroup_form(app) {
+                    app.set_status(err.to_string());
+                }
             }
         }
         KeyCode::Char('x') => {
@@ -1402,6 +1446,14 @@ fn handle_selector_event(app: &mut App, event: Event) -> Result<SelectorResult> 
                         entry.other_id = Some(value);
                         entry.other_label = Some(label);
                     }
+                }
+                SelectorTarget::GroupParent { child_id } => {
+                    let new_parent_id =
+                        if value == ROOT_GROUP_ID { None } else { Some(value) };
+                    app.pending_group_move = Some(GroupMoveRequest {
+                        child_id: child_id.clone(),
+                        new_parent_id,
+                    });
                 }
             }
             app.selector = None;
@@ -1952,6 +2004,22 @@ async fn fetch_groups_tree(http: &HttpClient) -> Result<(Vec<GroupRow>, HashMap<
     Ok((ordered, depths))
 }
 
+async fn fetch_parent_groups(http: &HttpClient, child_id: &str) -> Result<Vec<String>> {
+    let groups = fetch_groups_for_selector(http).await?;
+    let mut parents = Vec::new();
+    for group in groups {
+        let body = http
+            .get(&format!("/admin/groups/{}/children", group.id))
+            .await?;
+        let children: Vec<GroupRow> =
+            serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse group children: {e}"))?;
+        if children.iter().any(|child| child.id == child_id) {
+            parents.push(group.id);
+        }
+    }
+    Ok(parents)
+}
+
 async fn fetch_users_for_selector(http: &HttpClient) -> Result<Vec<UserRow>> {
     let body = http.get("/admin/users?page=1&limit=1000").await?;
     serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse users: {e}"))
@@ -2081,6 +2149,48 @@ fn open_create_form(app: &mut App) -> Result<()> {
     };
     app.mode = Mode::Form;
     app.form = Some(form);
+    Ok(())
+}
+
+fn open_create_subgroup_form(app: &mut App) -> Result<()> {
+    let row = selected_item(&app.groups.items, app.groups.selected())?;
+    let form = FormState {
+        title: "Create subgroup".to_string(),
+        action: FormAction::CreateChildGroup(row.id.clone()),
+        fields: vec![
+            FormField::new("parent_group_id", row.id.clone()).read_only(),
+            FormField::new("name", String::new()),
+            FormField::new("description", String::new()).optional(),
+            FormField::boolean("is_virtual", false),
+        ],
+        index: 0,
+        error: None,
+    };
+    app.mode = Mode::Form;
+    app.form = Some(form);
+    Ok(())
+}
+
+async fn open_move_group_parent_selector(app: &mut App, http: &HttpClient) -> Result<()> {
+    let row = selected_item(&app.groups.items, app.groups.selected())?;
+    let mut groups = fetch_groups_for_selector(http).await?;
+    groups.retain(|group| group.id != row.id);
+    groups.insert(
+        0,
+        GroupRow {
+            id: ROOT_GROUP_ID.to_string(),
+            name: "<root>".to_string(),
+            description: Some("no parent".to_string()),
+            is_virtual: false,
+        },
+    );
+    app.selector = Some(SelectorState::new_groups(
+        groups,
+        SelectorTarget::GroupParent {
+            child_id: row.id.clone(),
+        },
+    ));
+    app.mode = Mode::Selector;
     Ok(())
 }
 
@@ -2507,6 +2617,7 @@ async fn handle_form_event(
     if let Some(field) = form.fields.get_mut(form.index) {
         if !matches!(field.kind, FieldKind::Bool)
             && field.label != "groups_claim_mode"
+            && !field.read_only
         {
             field.input.handle_event(&event);
         }
@@ -2586,6 +2697,27 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 }),
             })
         }
+        FormAction::CreateChildGroup(parent_id) => {
+            let payload = json!({
+                "name": field_value(form, "name")?,
+                "description": field_optional(form, "description"),
+                "is_virtual": field_bool(form, "is_virtual"),
+            });
+            let body = http.post_json("/admin/groups", payload).await?;
+            let created: GroupRow =
+                serde_json::from_str(&body).context("Failed to parse group response")?;
+            let payload = json!({ "child_group_id": created.id });
+            http.post_json(&format!("/admin/groups/{parent_id}/children"), payload)
+                .await?;
+            Ok(SubmitResult {
+                message: "Subgroup created".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Groups,
+                    id: created.id,
+                    label: Some(created.name.clone()),
+                }),
+            })
+        }
         FormAction::UpdateGroup(id) => {
             let payload = json!({
                 "name": field_optional(form, "name"),
@@ -2612,12 +2744,16 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
             })
         }
         FormAction::CreateClient => {
-            let redirect_uris = parse_redirect_uris(field_optional(form, "redirect_uris"))?;
+            let client_id = field_value(form, "client_id")?;
+            let redirect_uris = parse_redirect_uris(
+                field_optional(form, "redirect_uris"),
+                client_id == "cli-tools",
+            )?;
             let grant_types = parse_grant_types(Some(field_value(form, "grant_types")?))?;
             let groups_claim_mode =
                 parse_groups_claim_mode(&field_value(form, "groups_claim_mode")?)?;
             let payload = json!({
-                "client_id": field_value(form, "client_id")?,
+                "client_id": client_id,
                 "client_secret": field_value(form, "client_secret")?,
                 "name": field_value(form, "name")?,
                 "redirect_uris": redirect_uris,
@@ -2641,7 +2777,11 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
             })
         }
         FormAction::UpdateClient(id) => {
-            let redirect_uris = parse_redirect_uris(field_optional(form, "redirect_uris"))?;
+            let client_id = fetch_client_id_by_uuid(http, id).await?;
+            let redirect_uris = parse_redirect_uris(
+                field_optional(form, "redirect_uris"),
+                client_id == "cli-tools",
+            )?;
             let grant_types = parse_grant_types(field_optional(form, "grant_types"))?;
             let groups_claim_mode = match field_optional(form, "groups_claim_mode") {
                 Some(value) => Some(parse_groups_claim_mode(&value)?),
@@ -2793,12 +2933,25 @@ fn generate_secret() -> String {
     BASE64_STANDARD.encode(bytes)
 }
 
-fn parse_redirect_uris(input: Option<String>) -> Result<Vec<String>> {
+fn parse_redirect_uris(input: Option<String>, allow_wildcard: bool) -> Result<Vec<String>> {
+    const ALLOWED_WILDCARDS: [&str; 2] = [
+        "http://localhost:*/callback",
+        "http://127.0.0.1:*/callback",
+    ];
     let values = split_csv(input);
     let mut parsed = Vec::new();
     for value in values {
         if value.contains('*') {
-            return Err(anyhow!("redirect_uris cannot contain wildcard '*'."));
+            if !allow_wildcard {
+                return Err(anyhow!("redirect_uris cannot contain wildcard '*'."));
+            }
+            if !ALLOWED_WILDCARDS.iter().any(|allowed| allowed == &value) {
+                return Err(anyhow!(
+                    "Only localhost wildcard redirect_uris are allowed for cli-tools."
+                ));
+            }
+            parsed.push(value);
+            continue;
         }
         let url = Url::parse(&value).map_err(|_| anyhow!("Invalid redirect_uri: {value}"))?;
         let scheme = url.scheme();
@@ -2808,6 +2961,17 @@ fn parse_redirect_uris(input: Option<String>) -> Result<Vec<String>> {
         parsed.push(value);
     }
     Ok(parsed)
+}
+
+async fn fetch_client_id_by_uuid(http: &HttpClient, id: &str) -> Result<String> {
+    let body = http.get("/admin/oauth-clients?page=1&limit=1000").await?;
+    let clients: Vec<ClientRow> =
+        serde_json::from_str(&body).context("Failed to parse client response")?;
+    clients
+        .into_iter()
+        .find(|client| client.id == id)
+        .map(|client| client.client_id)
+        .ok_or_else(|| anyhow!("Client not found"))
 }
 
 fn parse_grant_types(input: Option<String>) -> Result<Vec<String>> {
@@ -3060,6 +3224,36 @@ async fn apply_relation_changes(
                 http.delete(&format!("/admin/users/{user_id}/groups/{group_id}"))
                     .await?;
             }
+        }
+    }
+
+    Ok(())
+}
+
+async fn apply_group_parent_move(http: &HttpClient, request: &GroupMoveRequest) -> Result<()> {
+    if let Some(new_parent) = &request.new_parent_id {
+        if new_parent == &request.child_id {
+            bail!("Skupina nemůže být sama sobě rodičem");
+        }
+    }
+
+    let current_parents = fetch_parent_groups(http, &request.child_id).await?;
+    for parent_id in &current_parents {
+        if request.new_parent_id.as_ref() == Some(parent_id) {
+            continue;
+        }
+        http.delete(&format!(
+            "/admin/groups/{parent_id}/children/{}",
+            request.child_id
+        ))
+        .await?;
+    }
+
+    if let Some(new_parent) = &request.new_parent_id {
+        if !current_parents.iter().any(|id| id == new_parent) {
+            let payload = json!({ "child_group_id": request.child_id });
+            http.post_json(&format!("/admin/groups/{new_parent}/children"), payload)
+                .await?;
         }
     }
 
@@ -3438,7 +3632,11 @@ fn draw_details(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let help = "q quit | tab switch | r refresh | n new | e edit | d delete | [/] page | a add | x remove";
+    let help = if app.tab == Tab::Groups {
+        "q quit | tab switch | r refresh | n new | e edit | d delete | [/] page | c child | m move"
+    } else {
+        "q quit | tab switch | r refresh | n new | e edit | d delete | [/] page | a add | x remove"
+    };
     let status = if app.status.is_empty() {
         help.to_string()
     } else {
@@ -3478,20 +3676,28 @@ fn draw_form(
         let is_active = idx == form.index;
         let prefix = if is_active { "> " } else { "  " };
         let value = field.display();
+        let label_style = if field.read_only {
+            Style::default().fg(Color::DarkGray)
+        } else if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let value_style = if field.read_only {
+            Style::default().fg(Color::DarkGray)
+        } else if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
         let mut spans = vec![
             Span::styled(prefix, Style::default().fg(Color::Yellow)),
-            Span::styled(
-                format!("{}: ", field.label),
-                Style::default()
-                    .fg(if is_active { Color::Cyan } else { Color::White })
-                    .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
-            ),
-            Span::styled(
-                value,
-                Style::default()
-                    .fg(if is_active { Color::Cyan } else { Color::White })
-                    .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
-            ),
+            Span::styled(format!("{}: ", field.label), label_style),
+            Span::styled(value, value_style),
         ];
         if field.optional {
             spans.push(Span::styled(
@@ -3547,7 +3753,7 @@ fn draw_form(
                 Style::default().fg(Color::DarkGray),
             ));
         }
-        if is_active && !matches!(field.kind, FieldKind::Bool) {
+        if is_active && !matches!(field.kind, FieldKind::Bool) && !field.read_only {
             let cursor_offset = field.input.cursor();
             let cursor_x = inner[0].x
                 + (prefix.len() + field.label.len() + 2 + cursor_offset) as u16;
@@ -3579,8 +3785,16 @@ fn draw_form(
         }
     }
 
-    let footer = Paragraph::new("Enter next/submit | Tab switch | Esc cancel | Ctrl+E groups_claim_mode picker | Ctrl+G grant types | Ctrl+U user select | Ctrl+G group select | Ctrl+G secret | Ctrl+V reveal")
-        .alignment(Alignment::Center);
+    let footer_text = if form
+        .fields
+        .iter()
+        .any(|field| field.label == "groups_claim_mode" || field.label == "grant_types")
+    {
+        "Enter next/submit | Tab switch | Esc cancel | Ctrl+E groups_claim_mode picker | Ctrl+G grant types | Ctrl+U user select | Ctrl+G group select | Ctrl+G secret | Ctrl+V reveal"
+    } else {
+        "Enter next/submit | Tab switch | Esc cancel"
+    };
+    let footer = Paragraph::new(footer_text).alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 
     if let Some(selector) = &app.selector {
@@ -3973,8 +4187,16 @@ fn draw_selector(
                 .iter()
                 .map(|idx| {
                     let group = &items[*idx];
+                    let is_root = group.id == ROOT_GROUP_ID;
+                    let name_style = if is_root {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
                     Row::new(vec![
-                        Cell::from(group.name.clone()),
+                        Cell::from(group.name.clone()).style(name_style),
                         Cell::from(group.description.clone().unwrap_or_default()),
                     ])
                 })
