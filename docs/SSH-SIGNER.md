@@ -95,10 +95,33 @@ simple-idm-ctl user-groups add --username alice --group "ssh:role:devops"
 
 ### 6. Start Signer
 
+**Option 1: With config file**
+
 ```bash
-SSH_SIGNER_CONFIG=/etc/simple-idm-ssh-signer/config.toml \
+simple-idm-ssh-signer -c /etc/simple-idm-ssh-signer/config.toml
+```
+
+**Option 2: With CLI arguments (no config file needed)**
+
+```bash
+simple-idm-ssh-signer \
+  --listen-addr "127.0.0.1:9222" \
+  --oidc-issuer "http://localhost:8080" \
+  --expected-audience "simple-idm-ssh-login" \
+  --ca-private-key-path "/etc/simple-idm-ssh-signer/ca_key"
+```
+
+**Option 3: With environment variables**
+
+```bash
+LISTEN_ADDR="127.0.0.1:9222" \
+OIDC_ISSUER="http://localhost:8080" \
+EXPECTED_AUDIENCE="simple-idm-ssh-login" \
+CA_PRIVATE_KEY_PATH="/etc/simple-idm-ssh-signer/ca_key" \
   simple-idm-ssh-signer
 ```
+
+**Configuration priority:** CLI args > env vars > config file > defaults
 
 ## API Reference
 
@@ -214,14 +237,32 @@ Use `RUST_LOG=simple_idm_ssh_signer=info` for audit logging.
 
 TODO: Add rate limiting to prevent DoS on signing endpoint.
 
+## CLI Arguments
+
+```bash
+simple-idm-ssh-signer --help
+
+Options:
+  -c, --config <CONFIG>                            Path to config file (TOML)
+  -l, --listen-addr <LISTEN_ADDR>                  Listen address (e.g. "127.0.0.1:9222")
+      --oidc-issuer <OIDC_ISSUER>                  OIDC issuer URL
+      --expected-audience <EXPECTED_AUDIENCE>      Expected audience (OAuth2 client ID)
+      --ca-private-key-path <CA_PRIVATE_KEY_PATH>  CA private key path
+  -h, --help                                       Print help
+```
+
+**Note:** Config file is **optional**. All settings can be provided via CLI arguments or environment variables.
+
+**Priority:** CLI args > env vars > config file > defaults
+
 ## Environment Variables
 
 Override config via env vars:
 
-- `SSH_SIGNER_CONFIG` - Path to config.toml
-- `LISTEN_ADDR` - Override listen address
-- `OIDC_ISSUER` - Override OIDC issuer
-- `EXPECTED_AUDIENCE` - Override expected audience
+- `LISTEN_ADDR` - Listen address
+- `OIDC_ISSUER` - OIDC issuer URL (required if no config)
+- `EXPECTED_AUDIENCE` - Expected audience (required if no config)
+- `CA_PRIVATE_KEY_PATH` - CA private key path (required if no config)
 - `RUST_LOG` - Logging level (e.g., `simple_idm_ssh_signer=debug`)
 
 ## Development
