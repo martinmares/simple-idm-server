@@ -6,7 +6,7 @@ use crate::db::models::{DeviceCode, OAuthClient, User};
 use axum::{
     extract::{Query, State},
     response::{Html, IntoResponse},
-    Json,
+    Form, Json,
 };
 use chrono::{Duration, Utc};
 use rand::Rng;
@@ -101,7 +101,7 @@ pub async fn show_device_form(
 /// Klient (TV) volá tento endpoint a dostane device_code a user_code
 pub async fn handle_device_authorization(
     State(state): State<Arc<OAuth2State>>,
-    Json(req): Json<DeviceAuthorizationRequest>,
+    Form(req): Form<DeviceAuthorizationRequest>,
 ) -> impl IntoResponse {
     // Ověř klienta
     let client = match sqlx::query_as::<_, OAuthClient>(
