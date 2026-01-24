@@ -387,16 +387,32 @@ enum UserGroupsCommand {
         limit: Option<usize>,
     },
     Add {
-        #[arg(long)]
-        user_id: String,
-        #[arg(long)]
-        group_id: String,
+        /// User UUID (use this OR --username)
+        #[arg(long, conflicts_with = "username")]
+        user_id: Option<String>,
+        /// Username to lookup
+        #[arg(long, conflicts_with = "user_id")]
+        username: Option<String>,
+        /// Group UUID (use this OR --group)
+        #[arg(long, conflicts_with = "group")]
+        group_id: Option<String>,
+        /// Group name to lookup
+        #[arg(long, conflicts_with = "group_id")]
+        group: Option<String>,
     },
     Remove {
-        #[arg(long)]
-        user_id: String,
-        #[arg(long)]
-        group_id: String,
+        /// User UUID (use this OR --username)
+        #[arg(long, conflicts_with = "username")]
+        user_id: Option<String>,
+        /// Username to lookup
+        #[arg(long, conflicts_with = "user_id")]
+        username: Option<String>,
+        /// Group UUID (use this OR --group)
+        #[arg(long, conflicts_with = "group")]
+        group_id: Option<String>,
+        /// Group name to lookup
+        #[arg(long, conflicts_with = "group_id")]
+        group: Option<String>,
     },
 }
 
@@ -1238,16 +1254,64 @@ async fn handle_user_groups(
                 serde_json::from_str(&body).context("Failed to parse response")?;
             print_table_rows_vec(output, rows)?;
         }
-        UserGroupsCommand::Add { user_id, group_id } => {
-            let payload = serde_json::json!({ "group_id": group_id });
+        UserGroupsCommand::Add {
+            user_id,
+            username,
+            group_id,
+            group,
+        } => {
+            // Resolve user_id from username if needed
+            let resolved_user_id = if let Some(uid) = user_id {
+                uid
+            } else if let Some(uname) = username {
+                lookup_user_id(http, &uname).await?
+            } else {
+                anyhow::bail!("Either --user-id or --username must be provided");
+            };
+
+            // Resolve group_id from group name if needed
+            let resolved_group_id = if let Some(gid) = group_id {
+                gid
+            } else if let Some(gname) = group {
+                lookup_group_id(http, &gname).await?
+            } else {
+                anyhow::bail!("Either --group-id or --group must be provided");
+            };
+
+            let payload = serde_json::json!({ "group_id": resolved_group_id });
             let body = http
-                .post_json(&format!("/admin/users/{user_id}/groups"), payload)
+                .post_json(&format!("/admin/users/{resolved_user_id}/groups"), payload)
                 .await?;
             print_message(output, &body)?;
         }
-        UserGroupsCommand::Remove { user_id, group_id } => {
+        UserGroupsCommand::Remove {
+            user_id,
+            username,
+            group_id,
+            group,
+        } => {
+            // Resolve user_id from username if needed
+            let resolved_user_id = if let Some(uid) = user_id {
+                uid
+            } else if let Some(uname) = username {
+                lookup_user_id(http, &uname).await?
+            } else {
+                anyhow::bail!("Either --user-id or --username must be provided");
+            };
+
+            // Resolve group_id from group name if needed
+            let resolved_group_id = if let Some(gid) = group_id {
+                gid
+            } else if let Some(gname) = group {
+                lookup_group_id(http, &gname).await?
+            } else {
+                anyhow::bail!("Either --group-id or --group must be provided");
+            };
+
             let body = http
-                .delete(&format!("/admin/users/{user_id}/groups/{group_id}"))
+                .delete(&format!(
+                    "/admin/users/{resolved_user_id}/groups/{resolved_group_id}"
+                ))
                 .await?;
             print_message(output, &body)?;
         }
@@ -1708,4 +1772,30 @@ impl HttpClient {
     pub(crate) fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
     }
+}
+
+/// Lookup user UUID by username
+async fn lookup_user_id(http: &HttpClient, username: &str) -> Result<String> {
+    let body = http.get("/admin/users?page=1&limit=1000").await?;
+    let users: Vec<UserRow> =
+        serde_json::from_str(&body).context("Failed to parse users list")?;
+
+    users
+        .iter()
+        .find(|u| u.username == username)
+        .map(|u| u.id.clone())
+        .ok_or_else(|| anyhow!("User '{}' not found", username))
+}
+
+/// Lookup group UUID by name
+async fn lookup_group_id(http: &HttpClient, group_name: &str) -> Result<String> {
+    let body = http.get("/admin/groups?page=1&limit=1000").await?;
+    let groups: Vec<GroupRow> =
+        serde_json::from_str(&body).context("Failed to parse groups list")?;
+
+    groups
+        .iter()
+        .find(|g| g.name == group_name)
+        .map(|g| g.id.clone())
+        .ok_or_else(|| anyhow!("Group '{}' not found", group_name))
 }
