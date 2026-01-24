@@ -67,6 +67,10 @@ pub async fn browser_flow(
     let redirect_url = format!("http://127.0.0.1:{}/callback", local_addr.port());
     tracing::info!("Callback server listening on {}", redirect_url);
 
+    // Parse redirect URL once for reuse in authorization and token requests
+    let redirect_url_parsed = RedirectUrl::new(redirect_url.clone())
+        .map_err(|e| format!("Invalid redirect URL: {}", e))?;
+
     // Generate PKCE challenge
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -78,10 +82,7 @@ pub async fn browser_flow(
             Nonce::new_random,
         )
         .set_pkce_challenge(pkce_challenge)
-        .set_redirect_uri(std::borrow::Cow::Owned(
-            RedirectUrl::new(redirect_url.clone())
-                .map_err(|e| format!("Invalid redirect URL: {}", e))?,
-        ));
+        .set_redirect_uri(std::borrow::Cow::Borrowed(&redirect_url_parsed));
 
     // Add scopes
     for scope in scopes {
@@ -143,10 +144,12 @@ pub async fn browser_flow(
     }
 
     // Exchange code for token
+    // IMPORTANT: redirect_uri MUST be included per OAuth2 RFC 6749 section 4.1.3
     tracing::debug!("Exchanging authorization code for tokens");
     let token_response = client
         .exchange_code(AuthorizationCode::new(callback_result.code))
         .set_pkce_verifier(pkce_verifier)
+        .set_redirect_uri(std::borrow::Cow::Borrowed(&redirect_url_parsed))
         .request_async(async_http_client)
         .await
         .map_err(|e| {
