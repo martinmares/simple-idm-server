@@ -1,7 +1,8 @@
 use super::{
-    keypair, oidc_browser, oidc_device, signer_client, SshLoginConfig,
+    cert_checker, keypair, oidc_browser, oidc_device, signer_client, SshLoginConfig,
 };
 use std::fs;
+use std::os::unix::process::CommandExt;
 use std::process::Command;
 
 pub async fn login(config: &SshLoginConfig, force_browser: bool, force_device: bool) -> Result<(), String> {
@@ -145,4 +146,49 @@ pub fn print_ssh_config(config: &SshLoginConfig) {
     println!("  CertificateFile {}", cert_path.display());
     println!("  IdentitiesOnly yes");
     println!("\n# Adjust Host patterns to match your environment");
+}
+
+/// SSH s automatickým obnovením certifikátu
+pub async fn ssh(
+    config: &SshLoginConfig,
+    ssh_args: Vec<String>,
+    force_browser: bool,
+    force_device: bool,
+) -> Result<(), String> {
+    let cert_path = config.cert_path();
+
+    // Zkontroluj platnost certifikátu
+    let needs_renewal = if let Ok(cert_info) = cert_checker::get_certificate_info(&cert_path) {
+        if cert_info.is_valid() {
+            let remaining = cert_info.remaining_seconds();
+            println!("✅ Certificate valid for {} seconds", remaining);
+            false
+        } else {
+            println!("⚠️  Certificate expired");
+            true
+        }
+    } else {
+        println!("⚠️  No valid certificate found");
+        true
+    };
+
+    // Obnov certifikát, pokud je potřeba
+    if needs_renewal {
+        println!("\n🔄 Renewing certificate...\n");
+        login(config, force_browser, force_device).await?;
+    }
+
+    // Spusť SSH s certifikátem
+    println!("\n🔌 Connecting via SSH...\n");
+
+    let key_path = config.ssh_key_path.clone();
+
+    let err = Command::new("ssh")
+        .arg("-i")
+        .arg(&key_path)
+        .args(&ssh_args)
+        .exec(); // exec() nahradí current process → nikdy se nevrátí pokud uspěje
+
+    // Pokud jsme se dostali sem, exec() selhal
+    Err(format!("Failed to execute ssh: {}", err))
 }

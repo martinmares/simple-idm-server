@@ -39,6 +39,21 @@ enum Commands {
         device: bool,
     },
 
+    /// SSH with automatic certificate renewal
+    Ssh {
+        /// Force browser flow for renewal
+        #[arg(long)]
+        browser: bool,
+
+        /// Force device flow for renewal
+        #[arg(long)]
+        device: bool,
+
+        /// SSH arguments (e.g., user@host, -p 2222, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        ssh_args: Vec<String>,
+    },
+
     /// Show current certificate status
     Status,
 
@@ -82,6 +97,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Login { browser, device } => {
             commands::login(&config, browser, device).await?;
+        }
+        Commands::Ssh {
+            browser,
+            device,
+            ssh_args,
+        } => {
+            commands::ssh(&config, ssh_args, browser, device).await?;
         }
         Commands::Status => {
             commands::status(&config)?;
