@@ -118,10 +118,21 @@ pub async fn browser_flow(
     }
 
     // Wait for callback
-    let callback_result = tokio::time::timeout(std::time::Duration::from_secs(300), rx)
-        .await
-        .map_err(|_| "Authentication timeout (5 minutes)".to_string())?
-        .map_err(|_| "Callback channel closed".to_string())?;
+    tracing::info!("Waiting for callback...");
+    let callback_result = match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+        Ok(Ok(result)) => {
+            tracing::info!("Callback received successfully");
+            result
+        }
+        Ok(Err(_)) => {
+            tracing::error!("Callback channel closed unexpectedly");
+            return Err("Callback channel closed".to_string());
+        }
+        Err(_) => {
+            tracing::error!("Authentication timeout after 5 minutes");
+            return Err("Authentication timeout (5 minutes)".to_string());
+        }
+    };
 
     // Abort server
     server.abort();
@@ -183,10 +194,17 @@ async fn handle_callback(
 
     // Send result back to main flow
     if let Some(tx) = state.tx.lock().await.take() {
-        let _ = tx.send(CallbackResult {
+        tracing::info!("Sending callback result to main flow");
+        if tx.send(CallbackResult {
             code,
             state: callback_state,
-        });
+        }).is_err() {
+            tracing::error!("Failed to send callback result - receiver dropped");
+        } else {
+            tracing::info!("Callback result sent successfully");
+        }
+    } else {
+        tracing::warn!("Callback handler already consumed");
     }
 
     Html("<h1>✅ Authentication successful!</h1><p>You can close this window and return to the terminal.</p>")
