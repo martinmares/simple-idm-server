@@ -3584,7 +3584,7 @@ fn draw_tabs(frame: &mut ratatui::Frame, area: Rect, app: &App) {
 fn draw_body(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(12)])
+        .constraints([Constraint::Min(0), Constraint::Length(14)])
         .split(area);
     draw_table(frame, chunks[0], app);
     draw_details(frame, chunks[1], app);
@@ -3652,8 +3652,22 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 .iter()
                 .filter_map(|&idx| app.clients.items.get(idx))
                 .map(|c| {
+                    // Highlight public clients in yellow
+                    let client_id_cell = if c.is_public {
+                        Cell::from(Line::from(vec![
+                            Span::styled(
+                                c.client_id.clone(),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]))
+                    } else {
+                        Cell::from(c.client_id.clone())
+                    };
+
                     Row::new(vec![
-                        Cell::from(c.client_id.clone()),
+                        client_id_cell,
                         Cell::from(c.name.clone()),
                         Cell::from(c.grant_types.join(", ")),
                     ])
@@ -4295,6 +4309,17 @@ fn detail_clients(app: &App) -> Vec<Line<'static>> {
     let Some(client) = app.clients.selected().and_then(|idx| app.clients.items.get(idx)) else {
         return vec![Line::from("No client selected")];
     };
+
+    // Highlight is_public in yellow if true
+    let is_public_line = if client.is_public {
+        Line::from(vec![
+            Span::raw("is_public: "),
+            Span::styled("true", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ])
+    } else {
+        line_kv("is_public", "false")
+    };
+
     vec![
         line_kv("id", &client.id),
         line_kv("client_id", &client.client_id),
@@ -4303,6 +4328,7 @@ fn detail_clients(app: &App) -> Vec<Line<'static>> {
         line_kv("grant_types", &client.grant_types.join(", ")),
         line_kv("scope", &client.scope),
         line_kv("is_active", &client.is_active.to_string()),
+        is_public_line,
         line_kv("groups_claim_mode", &client.groups_claim_mode),
         line_kv("include_claim_maps", &client.include_claim_maps.to_string()),
         line_kv(
