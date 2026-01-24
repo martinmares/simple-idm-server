@@ -67,6 +67,7 @@ url = "2.5"
 dirs = "5.0"
 urlencoding = "2.1"
 qrcode = "0.14"
+open = "5.0"
 
 [[bin]]
 name = "simple-idm-ctl"
@@ -75,6 +76,10 @@ path = "src/bin/simple-idm-ctl.rs"
 [[bin]]
 name = "simple-idm-oauth2-proxy"
 path = "src/bin/simple-idm-oauth2-proxy.rs"
+
+[[bin]]
+name = "simple-idm-ssh-login"
+path = "src/bin/simple-idm-ssh-login.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
