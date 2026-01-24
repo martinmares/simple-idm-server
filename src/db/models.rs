@@ -37,7 +37,7 @@ pub struct OAuthClient {
     pub id: Uuid,
     pub client_id: String,
     #[serde(skip_serializing)]
-    pub client_secret_hash: String,
+    pub client_secret_hash: Option<String>, // None for public clients
     pub name: String,
     pub redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,

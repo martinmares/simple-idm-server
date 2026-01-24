@@ -125,7 +125,7 @@ pub struct UserGroupListRow {
 #[derive(Debug, Deserialize)]
 pub struct CreateOAuthClientRequest {
     pub client_id: String,
-    pub client_secret: String,
+    pub client_secret: Option<String>,
     pub name: String,
     pub redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
@@ -966,20 +966,25 @@ pub async fn create_oauth_client(
         return resp;
     }
 
-    // Hash client secret
-    let client_secret_hash = match hash_password(&req.client_secret) {
-        Ok(hash) => hash,
-        Err(e) => {
-            tracing::error!("Failed to hash client secret: {:?}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Failed to hash client secret".to_string(),
-                }),
-            )
-                .into_response();
+    // Hash client secret (optional for public clients)
+    let client_secret_hash = match &req.client_secret {
+        Some(secret) if !secret.trim().is_empty() => {
+            match hash_password(secret) {
+                Ok(hash) => Some(hash),
+                Err(e) => {
+                    tracing::error!("Failed to hash client secret: {:?}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse {
+                            error: "server_error".to_string(),
+                            error_description: "Failed to hash client secret".to_string(),
+                        }),
+                    )
+                        .into_response();
+                }
+            }
         }
+        _ => None, // Public client (no secret)
     };
 
     let result = sqlx::query!(

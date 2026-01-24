@@ -2194,7 +2194,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             action: FormAction::CreateClient,
             fields: vec![
                 FormField::new("client_id", String::new()),
-                FormField::secret("client_secret", String::new()),
+                FormField::secret("client_secret", String::new()).optional(),
                 FormField::new("name", String::new()),
                 FormField::new("redirect_uris", String::new()).optional(),
                 FormField::new("grant_types", String::new()),
@@ -2840,9 +2840,13 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
             let grant_types = parse_grant_types(Some(field_value(form, "grant_types")?))?;
             let groups_claim_mode =
                 parse_groups_claim_mode(&field_value(form, "groups_claim_mode")?)?;
+
+            // client_secret is optional for public clients
+            let client_secret = field_optional(form, "client_secret");
+
             let payload = json!({
                 "client_id": client_id,
-                "client_secret": field_value(form, "client_secret")?,
+                "client_secret": client_secret,
                 "name": field_value(form, "name")?,
                 "redirect_uris": redirect_uris,
                 "grant_types": grant_types,
