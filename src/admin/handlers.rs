@@ -130,6 +130,7 @@ pub struct CreateOAuthClientRequest {
     pub redirect_uris: Vec<String>,
     pub grant_types: Vec<String>,
     pub scope: String,
+    pub is_public: Option<bool>, // true for public clients (no secret required)
     pub groups_claim_mode: Option<String>,
     pub include_claim_maps: Option<bool>,
     pub ignore_virtual_groups: Option<bool>,
@@ -139,6 +140,7 @@ pub struct CreateOAuthClientRequest {
 pub struct UpdateOAuthClientRequest {
     pub name: Option<String>,
     pub client_secret: Option<String>,
+    pub is_public: Option<bool>,
     pub redirect_uris: Option<Vec<String>>,
     pub grant_types: Option<Vec<String>>,
     pub scope: Option<String>,
@@ -157,6 +159,7 @@ pub struct OAuthClientResponse {
     pub grant_types: Vec<String>,
     pub scope: String,
     pub is_active: bool,
+    pub is_public: bool,
     pub groups_claim_mode: String,
     pub include_claim_maps: bool,
     pub ignore_virtual_groups: bool,
@@ -961,40 +964,79 @@ pub async fn create_oauth_client(
     };
     let include_claim_maps = req.include_claim_maps.unwrap_or(true);
     let ignore_virtual_groups = req.ignore_virtual_groups.unwrap_or(false);
+    let is_public = req.is_public.unwrap_or(false);
 
     if let Err(resp) = validate_redirect_uris(&req.client_id, &req.redirect_uris) {
         return resp;
     }
 
-    // Hash client secret (optional for public clients)
-    let client_secret_hash = match &req.client_secret {
-        Some(secret) if !secret.trim().is_empty() => {
-            match hash_password(secret) {
-                Ok(hash) => Some(hash),
-                Err(e) => {
-                    tracing::error!("Failed to hash client secret: {:?}", e);
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(ErrorResponse {
-                            error: "server_error".to_string(),
-                            error_description: "Failed to hash client secret".to_string(),
-                        }),
-                    )
-                        .into_response();
+    // Validate: public clients must NOT have secret, confidential clients MUST have secret
+    let client_secret_hash = if is_public {
+        // Public client - must NOT have secret
+        if let Some(ref secret) = req.client_secret {
+            if !secret.trim().is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: "Public clients cannot have client_secret. Set is_public=false or remove client_secret.".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+        None
+    } else {
+        // Confidential client - MUST have secret
+        match &req.client_secret {
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: "Confidential clients (is_public=false) must have client_secret".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            Some(secret) if secret.trim().is_empty() => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: "Confidential clients (is_public=false) must have client_secret".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            Some(secret) => {
+                // Hash secret
+                match hash_password(secret) {
+                    Ok(hash) => Some(hash),
+                    Err(e) => {
+                        tracing::error!("Failed to hash client secret: {:?}", e);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ErrorResponse {
+                                error: "server_error".to_string(),
+                                error_description: "Failed to hash client secret".to_string(),
+                            }),
+                        )
+                            .into_response();
+                    }
                 }
             }
         }
-        _ => None, // Public client (no secret)
     };
 
     let result = sqlx::query!(
         r#"
         INSERT INTO oauth_clients (
-            client_id, client_secret_hash, name, redirect_uris, grant_types, scope, is_active,
+            client_id, client_secret_hash, name, redirect_uris, grant_types, scope, is_active, is_public,
             groups_claim_mode, include_claim_maps, ignore_virtual_groups
         )
-        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9)
-        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active,
+        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9, $10)
+        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public,
             groups_claim_mode, include_claim_maps, ignore_virtual_groups
         "#,
         req.client_id,
@@ -1003,6 +1045,7 @@ pub async fn create_oauth_client(
         &req.redirect_uris,
         &req.grant_types,
         req.scope,
+        is_public,
         groups_claim_mode,
         include_claim_maps,
         ignore_virtual_groups
@@ -1021,6 +1064,7 @@ pub async fn create_oauth_client(
                 grant_types: client.grant_types,
                 scope: client.scope,
                 is_active: client.is_active,
+                is_public: client.is_public,
                 groups_claim_mode: client.groups_claim_mode,
                 include_claim_maps: client.include_claim_maps,
                 ignore_virtual_groups: client.ignore_virtual_groups,
@@ -1070,6 +1114,7 @@ pub async fn list_oauth_clients(
                     grant_types: c.grant_types,
                     scope: c.scope,
                     is_active: c.is_active,
+                    is_public: c.is_public,
                     groups_claim_mode: c.groups_claim_mode,
                     include_claim_maps: c.include_claim_maps,
                     ignore_virtual_groups: c.ignore_virtual_groups,
@@ -1145,6 +1190,7 @@ pub async fn update_oauth_client(
         && req.grant_types.is_none()
         && req.scope.is_none()
         && req.is_active.is_none()
+        && req.is_public.is_none()
         && req.groups_claim_mode.is_none()
         && req.include_claim_maps.is_none()
         && req.ignore_virtual_groups.is_none()
@@ -1246,11 +1292,12 @@ pub async fn update_oauth_client(
             grant_types = COALESCE($4, grant_types),
             scope = COALESCE($5, scope),
             is_active = COALESCE($6, is_active),
-            groups_claim_mode = COALESCE($7, groups_claim_mode),
-            include_claim_maps = COALESCE($8, include_claim_maps),
-            ignore_virtual_groups = COALESCE($9, ignore_virtual_groups)
-        WHERE id = $10
-        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active,
+            is_public = COALESCE($7, is_public),
+            groups_claim_mode = COALESCE($8, groups_claim_mode),
+            include_claim_maps = COALESCE($9, include_claim_maps),
+            ignore_virtual_groups = COALESCE($10, ignore_virtual_groups)
+        WHERE id = $11
+        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public,
             groups_claim_mode, include_claim_maps, ignore_virtual_groups
         "#,
         req.name,
@@ -1259,6 +1306,7 @@ pub async fn update_oauth_client(
         grant_types,
         req.scope,
         req.is_active,
+        req.is_public,
         groups_claim_mode,
         req.include_claim_maps,
         req.ignore_virtual_groups,
@@ -1278,6 +1326,7 @@ pub async fn update_oauth_client(
                 grant_types: client.grant_types,
                 scope: client.scope,
                 is_active: client.is_active,
+                is_public: client.is_public,
                 groups_claim_mode: client.groups_claim_mode,
                 include_claim_maps: client.include_claim_maps,
                 ignore_virtual_groups: client.ignore_virtual_groups,

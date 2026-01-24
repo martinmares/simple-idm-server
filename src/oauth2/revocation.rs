@@ -88,15 +88,21 @@ pub async fn handle_revoke(
         }
     };
 
-    if !crate::auth::verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "invalid_client".to_string(),
-                error_description: "Invalid client credentials".to_string(),
-            }),
-        )
-            .into_response();
+    // Verify client secret
+    match &client.client_secret_hash {
+        Some(hash) if crate::auth::verify_password(&client_secret, hash).unwrap_or(false) => {
+            // OK
+        }
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "invalid_client".to_string(),
+                    error_description: "Invalid client credentials".to_string(),
+                }),
+            )
+                .into_response();
+        }
     }
 
     cleanup_refresh_tokens(&state.db_pool).await;
