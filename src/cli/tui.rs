@@ -3067,13 +3067,27 @@ fn parse_grant_types(input: Option<String>) -> Result<Vec<String>> {
     if values.is_empty() {
         return Ok(Vec::new());
     }
-    let allowed: Vec<&str> = supported_grant_types().iter().map(|(_, v)| *v).collect();
-    for value in &values {
-        if !allowed.iter().any(|allowed| allowed == value) {
-            return Err(anyhow!("Unsupported grant_type: {value}"));
+    let mut mapped = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut normalized: Option<String> = None;
+        for (label, stored) in supported_grant_types() {
+            if trimmed == label || trimmed == stored {
+                normalized = Some(stored.to_string());
+                break;
+            }
+        }
+        let Some(resolved) = normalized else {
+            return Err(anyhow!("Unsupported grant_type: {trimmed}"));
+        };
+        if !mapped.iter().any(|item: &String| item == &resolved) {
+            mapped.push(resolved);
         }
     }
-    Ok(values)
+    Ok(mapped)
 }
 
 fn parse_groups_claim_mode(value: &str) -> Result<String> {
