@@ -1,6 +1,12 @@
 use axum::http::{header, HeaderMap};
 use base64::Engine as _;
 
+/// Check if client is public (no client_secret required)
+/// Public client has NULL client_secret_hash in database
+pub fn is_public_client(client_secret_hash: &Option<String>) -> bool {
+    client_secret_hash.is_none()
+}
+
 pub fn apply_client_auth(
     client_id: &mut Option<String>,
     client_secret: &mut Option<String>,
