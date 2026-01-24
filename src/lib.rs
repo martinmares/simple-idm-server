@@ -11,3 +11,6 @@ pub mod password_reset;
 
 // OAuth2 Proxy modules
 pub mod proxy;
+
+// SSH Certificate Signer modules
+pub mod ssh_signer;
