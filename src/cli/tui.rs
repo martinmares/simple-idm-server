@@ -3021,23 +3021,37 @@ fn generate_secret() -> String {
     BASE64_STANDARD.encode(bytes)
 }
 
-fn parse_redirect_uris(input: Option<String>, allow_wildcard: bool) -> Result<Vec<String>> {
-    const ALLOWED_WILDCARDS: [&str; 2] = [
-        "http://localhost:*/callback",
-        "http://127.0.0.1:*/callback",
-    ];
+fn parse_redirect_uris(input: Option<String>, _allow_wildcard: bool) -> Result<Vec<String>> {
     let values = split_csv(input);
     let mut parsed = Vec::new();
     for value in values {
         if value.contains('*') {
-            if !allow_wildcard {
-                return Err(anyhow!("redirect_uris cannot contain wildcard '*'."));
-            }
-            if !ALLOWED_WILDCARDS.iter().any(|allowed| allowed == &value) {
+            // Parse URL with wildcard replaced temporarily for validation
+            let test_uri = value.replace('*', "8080");
+            let url = Url::parse(&test_uri)
+                .map_err(|_| anyhow!("Invalid redirect_uri format: {value}"))?;
+
+            // Check if host is loopback (localhost, 127.0.0.1, ::1)
+            let host = url.host_str().unwrap_or("");
+            let is_loopback = host == "localhost"
+                || host == "127.0.0.1"
+                || host == "[::1]"
+                || host == "::1";
+
+            if !is_loopback {
                 return Err(anyhow!(
-                    "Only localhost wildcard redirect_uris are allowed for cli-tools."
+                    "Wildcard '*' in redirect_uri is only allowed for loopback addresses (localhost, 127.0.0.1, ::1), got: {}",
+                    host
                 ));
             }
+
+            // Ensure wildcard is only in port position
+            if !value.contains(":*/") && !value.ends_with(":*") {
+                return Err(anyhow!(
+                    "Wildcard '*' must be used for port only (e.g., http://localhost:*/callback)"
+                ));
+            }
+
             parsed.push(value);
             continue;
         }
