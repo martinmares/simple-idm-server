@@ -434,6 +434,7 @@ pub(crate) struct ClientRow {
     grant_types: Vec<String>,
     scope: String,
     is_active: bool,
+    is_public: bool,
     groups_claim_mode: String,
     include_claim_maps: bool,
     ignore_virtual_groups: bool,
