@@ -68,6 +68,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         access_token_expiry: config.jwt.access_token_expiry_seconds,
         refresh_token_expiry: config.jwt.refresh_token_expiry_seconds,
         auth_session_expiry: config.jwt.auth_session_expiry_seconds,
+        device_flow_config: config.device_flow.clone(),
     });
 
     let cleanup_interval = config.jwt.refresh_token_cleanup_interval_seconds;
@@ -104,6 +105,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 interval.tick().await;
                 tracing::info!("Running password reset cleanup");
                 password_reset::cleanup_password_reset_tokens(&cleanup_pool).await;
+            }
+        });
+    }
+
+    let device_cleanup_interval = config.device_flow.cleanup_interval_seconds;
+    if device_cleanup_interval > 0 {
+        let cleanup_pool = db_pool.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                "Device code cleanup scheduler enabled (interval {}s)",
+                device_cleanup_interval
+            );
+            let mut interval = tokio::time::interval(Duration::from_secs(device_cleanup_interval));
+            loop {
+                interval.tick().await;
+                tracing::debug!("Running device code cleanup");
+                oauth2::cleanup::cleanup_device_codes(&cleanup_pool).await;
             }
         });
     }

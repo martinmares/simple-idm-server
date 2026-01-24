@@ -381,21 +381,17 @@ Polling endpoint pro získání tokenu.
 
 ### Timeout a Interval
 
-- **Expiration:** 600 sekund (10 minut)
-- **Polling interval:** 5 sekund
+- **Expiration:** 600 sekund (10 minut) - konfigurovatelné
+- **Polling interval:** 5 sekund - konfigurovatelné
 
-Tyto hodnoty jsou zatím hardcoded v `src/oauth2/device_flow.rs`:
-```rust
-let expires_at = Utc::now() + Duration::minutes(10);
-// ...
-expires_in: 600,
-interval: 5,
-```
-
-Pro customizaci přidejte do `.env`:
+Konfigurace v `.env`:
 ```env
-DEVICE_CODE_EXPIRY_SECONDS=600
-DEVICE_CODE_POLLING_INTERVAL_SECONDS=5
+DEVICE_CODE_EXPIRY_SECONDS=600                 # Device code expiruje po 10 minutách
+DEVICE_CODE_POLLING_INTERVAL_SECONDS=5         # Polling interval 5 sekund
+DEVICE_USER_CODE_LENGTH=8                      # Délka user kódu (8 znaků)
+DEVICE_USER_CODE_FORMAT=XXXX-XXXX             # Formát (rozděleno pomlčkou)
+DEVICE_CODE_CLEANUP_INTERVAL_SECONDS=3600      # Cleanup každou hodinu
+DEVICE_MAX_VERIFICATION_ATTEMPTS=5             # Max 5 pokusů před lockoutem
 ```
 
 ## Security Considerations
@@ -410,28 +406,52 @@ DEVICE_CODE_POLLING_INTERVAL_SECONDS=5
 ### Device Code
 
 - 64 znaků, alfanumerické
-- Stored hashed v databázi? (TODO: implementovat hashing)
-- Expiruje po 10 minutách
+- Expiruje po 10 minutách (konfigurovatelné)
 - Smazán po použití
+- Automaticky cleanupovaný po expiraci
 
 ### Rate Limiting
 
 Device flow endpointy jsou chráněny globálním rate limiterem:
-- Default: 10 requests/second
-- Burst: 50 requests
+- Default: 5 requests/second
+- Burst: 10 requests
 
 Pro přísnější limity upravte `.env`:
 ```env
-RATE_LIMIT_REQUESTS_PER_SECOND=10
-RATE_LIMIT_BURST_SIZE=50
+RATE_LIMIT_REQUESTS_PER_SECOND=5
+RATE_LIMIT_BURST_SIZE=10
 ```
 
-### Brute Force Protection
+### Brute Force Protection ✅
 
-**TODO:** Implementovat:
-- Max attempts na user_code (např. 5 pokusů)
-- Lockout po překročení limitů
-- CAPTCHA po opakovaných chybách
+**Implementováno:**
+- ✅ Max attempts na user_code (default 5 pokusů)
+- ✅ Automatické smazání device_code po překročení limitu
+- ✅ Tracking failed attempts v databázi (`device_verification_attempts`)
+- ✅ Cleanup starých attempts po 1 hodině
+
+**Konfigurace:**
+```env
+DEVICE_MAX_VERIFICATION_ATTEMPTS=5  # Max pokusů před lockoutem
+```
+
+**Chování:**
+1. Uživatel zadá špatné credentials na `/device`
+2. Failed attempt se zaznamená do DB
+3. Po 5. pokusu se device_code smaže
+4. Uživatel dostane chybovou hlášku: "Too many failed attempts. This device code has been invalidated."
+5. Musí začít device flow znovu
+
+**Database:**
+```sql
+CREATE TABLE device_verification_attempts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_code TEXT NOT NULL,
+    ip_address TEXT,
+    failed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (user_code) REFERENCES device_codes(user_code) ON DELETE CASCADE
+);
+```
 
 ## Troubleshooting
 
@@ -459,6 +479,12 @@ Tento user_code už byl použit. Každý user_code lze použít pouze jednou.
 
 Device verification page (`/device`) je HTML formulář, takže CORS není problém. Pokud implementujete vlastní SPA frontend, přidejte CORS middleware.
 
+### "Too many failed attempts"
+
+Tento device_code byl zneplatněn po překročení max attempts (default 5 pokusů). Začněte device flow znovu:
+1. CLI opět zavolá `/oauth2/device/authorize` a dostane nový user_code
+2. Uživatel zadá nový user_code na `/device`
+
 ## Database Schema
 
 Device codes jsou uloženy v tabulce `device_codes`:
@@ -485,14 +511,15 @@ CREATE INDEX idx_device_codes_expires_at ON device_codes(expires_at);
 
 ## Roadmap
 
-- [ ] Device code hashing v databázi
-- [ ] Konfigurovatelný timeout a polling interval
-- [ ] Brute force protection (max attempts)
-- [ ] Rate limiting specifický pro device flow
+- [x] ✅ Konfigurovatelný timeout a polling interval
+- [x] ✅ Brute force protection (max attempts)
+- [x] ✅ Cleanup job pro expirované device codes
+- [ ] Device code hashing v databázi (low priority - 64 chars + 10 min lifetime)
+- [ ] Rate limiting specifický pro device flow endpoints
+- [ ] IP adresa v brute force attempts (extrakce z requestu)
 - [ ] CAPTCHA po opakovaných chybách
 - [ ] Admin UI pro správu pending device codes
 - [ ] Metrics (počet device flow, success rate, atd.)
-- [ ] Cleanup job pro expirované device codes
 
 ## Reference
 

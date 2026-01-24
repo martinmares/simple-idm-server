@@ -8,6 +8,7 @@ pub struct Config {
     pub jwt: JwtConfig,
     pub rate_limit: RateLimitConfig,
     pub admin: AdminConfig,
+    pub device_flow: DeviceFlowConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,6 +45,16 @@ pub struct RateLimitConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdminConfig {
     pub root_token: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeviceFlowConfig {
+    pub expiry_seconds: i64,
+    pub polling_interval_seconds: i64,
+    pub user_code_length: usize,
+    pub user_code_format: String,
+    pub cleanup_interval_seconds: u64,
+    pub max_verification_attempts: u32,
 }
 
 impl Config {
@@ -100,6 +111,29 @@ impl Config {
             .parse()
             .unwrap_or(5);
 
+        let device_code_expiry = env::var("DEVICE_CODE_EXPIRY_SECONDS")
+            .unwrap_or_else(|_| "600".to_string())
+            .parse()
+            .unwrap_or(600);
+        let device_polling_interval = env::var("DEVICE_CODE_POLLING_INTERVAL_SECONDS")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .unwrap_or(5);
+        let device_user_code_length = env::var("DEVICE_USER_CODE_LENGTH")
+            .unwrap_or_else(|_| "8".to_string())
+            .parse()
+            .unwrap_or(8);
+        let device_user_code_format = env::var("DEVICE_USER_CODE_FORMAT")
+            .unwrap_or_else(|_| "XXXX-XXXX".to_string());
+        let device_cleanup_interval = env::var("DEVICE_CODE_CLEANUP_INTERVAL_SECONDS")
+            .unwrap_or_else(|_| "3600".to_string())
+            .parse()
+            .unwrap_or(3600);
+        let device_max_attempts = env::var("DEVICE_MAX_VERIFICATION_ATTEMPTS")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .unwrap_or(5);
+
         Ok(Config {
             server: ServerConfig {
                 host: server_host,
@@ -124,6 +158,14 @@ impl Config {
             },
             admin: AdminConfig {
                 root_token: admin_root_token,
+            },
+            device_flow: DeviceFlowConfig {
+                expiry_seconds: device_code_expiry,
+                polling_interval_seconds: device_polling_interval,
+                user_code_length: device_user_code_length,
+                user_code_format: device_user_code_format,
+                cleanup_interval_seconds: device_cleanup_interval,
+                max_verification_attempts: device_max_attempts,
             },
         })
     }
