@@ -64,6 +64,7 @@ tui-input = "0.8"
 url = "2.5"
 dirs = "5.0"
 urlencoding = "2.1"
+qrcode = "0.14"
 
 [[bin]]
 name = "simple-idm-ctl"

@@ -17,6 +17,7 @@ use openidconnect::{
     PkceCodeVerifier, RedirectUrl, Scope,
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponseTrait};
+use qrcode::QrCode;
 use serde_json::Value;
 
 #[path = "../cli/tui.rs"]
@@ -175,6 +176,8 @@ enum Commands {
         port: u16,
         #[arg(long, default_value = "default")]
         server: String,
+        #[arg(long)]
+        device: bool,
     },
     Logout {
         #[arg(long)]
@@ -534,7 +537,10 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Login { url, client, port, server } => {
+        Commands::Login { url, client, port, server, device } => {
+            if *device {
+                return handle_device_login(url, client, server, cli.insecure.unwrap_or(false)).await;
+            }
             return handle_login(url, client, *port, server, cli.insecure.unwrap_or(false)).await;
         }
         Commands::Logout { server, all } => {
@@ -669,6 +675,195 @@ async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &
         nonce,
     )
     .await
+}
+
+#[derive(Serialize)]
+struct DeviceAuthorizationRequest {
+    client_id: String,
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeviceAuthorizationResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    verification_uri_complete: Option<String>,
+    expires_in: i64,
+    interval: i64,
+}
+
+#[derive(Deserialize)]
+struct DeviceTokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: i64,
+    scope: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct UserinfoResponse {
+    email: Option<String>,
+    groups: Option<Vec<String>>,
+}
+
+async fn handle_device_login(base_url: &str, client_id: &str, server_name: &str, insecure: bool) -> Result<()> {
+    let client = if insecure {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .context("Failed to build HTTP client")?
+    } else {
+        reqwest::Client::new()
+    };
+
+    let payload = DeviceAuthorizationRequest {
+        client_id: client_id.to_string(),
+        scope: Some("openid profile email groups".to_string()),
+    };
+
+    let response = client
+        .post(format!("{}/oauth2/device/authorize", base_url))
+        .json(&payload)
+        .send()
+        .await?;
+
+    let status = response.status();
+    let body = response.text().await?;
+    if !status.is_success() {
+        if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body) {
+            bail!("Device authorization failed: {}: {}", err.error, err.error_description);
+        }
+        bail!("Device authorization failed ({}). Response: {}", status, body.trim());
+    }
+
+    let auth: DeviceAuthorizationResponse =
+        serde_json::from_str(&body).context("Failed to parse device authorization response")?;
+
+    println!("Device login started.");
+    println!("User code: {}", auth.user_code);
+    println!("Verify at: {}", auth.verification_uri);
+    if let Some(uri) = &auth.verification_uri_complete {
+        println!("Direct link: {}", uri);
+        print_qr_code(uri);
+    }
+
+    let deadline = Utc::now() + Duration::seconds(auth.expires_in);
+    let interval = Duration::seconds(auth.interval.max(1));
+
+    loop {
+        if Utc::now() >= deadline {
+            bail!("Device authorization expired. Please run 'simple-idm-ctl login --device' again.");
+        }
+
+        tokio::time::sleep(std::time::Duration::from_secs(interval.num_seconds() as u64)).await;
+
+        let token_payload = serde_json::json!({
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": auth.device_code,
+            "client_id": client_id,
+        });
+
+        let token_response = client
+            .post(format!("{}/oauth2/device/token", base_url))
+            .json(&token_payload)
+            .send()
+            .await?;
+
+        let token_status = token_response.status();
+        let token_body = token_response.text().await?;
+
+        if let Ok(err) = serde_json::from_str::<ErrorResponse>(&token_body) {
+            match err.error.as_str() {
+                "authorization_pending" => continue,
+                "expired_token" => {
+                    bail!("Device authorization expired. Please run 'simple-idm-ctl login --device' again.");
+                }
+                _ => {
+                    bail!("Device token error: {}: {}", err.error, err.error_description);
+                }
+            }
+        }
+
+        if token_status.is_success() {
+            let token_data: DeviceTokenResponse = serde_json::from_str(&token_body)
+                .context("Failed to parse device token response")?;
+            return save_device_session(
+                base_url,
+                server_name,
+                token_data.access_token,
+                token_data.expires_in,
+                insecure,
+            )
+            .await;
+        }
+
+        bail!(
+            "Device token request failed ({}). Response: {}",
+            token_status,
+            token_body.trim()
+        );
+    }
+}
+
+async fn save_device_session(
+    base_url: &str,
+    server_name: &str,
+    access_token: String,
+    expires_in: i64,
+    insecure: bool,
+) -> Result<()> {
+    let client = if insecure {
+        reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .context("Failed to build HTTP client")?
+    } else {
+        reqwest::Client::new()
+    };
+
+    let response = client
+        .get(format!("{}/oauth2/userinfo", base_url))
+        .bearer_auth(&access_token)
+        .send()
+        .await?;
+    let status = response.status();
+    let body = response.text().await?;
+    let (email, groups) = if status.is_success() {
+        let userinfo: UserinfoResponse =
+            serde_json::from_str(&body).context("Failed to parse userinfo response")?;
+        (userinfo.email, userinfo.groups.unwrap_or_default())
+    } else {
+        (None, Vec::new())
+    };
+
+    let session = Session {
+        access_token,
+        refresh_token: String::new(),
+        expires_at: Utc::now() + Duration::seconds(expires_in),
+        base_url: base_url.to_string(),
+        created_at: Utc::now(),
+        user_email: email,
+        user_groups: groups,
+    };
+
+    save_session(server_name, session)?;
+
+    println!("✓ Device login successful!");
+    println!("Session saved to {}", sessions_file_path()?.display());
+    println!("Server: {}", server_name);
+
+    Ok(())
+}
+
+fn print_qr_code(url: &str) {
+    let Ok(code) = QrCode::new(url.as_bytes()) else {
+        return;
+    };
+    let qr = code
+        .render::<qrcode::render::unicode::Dense1x2>()
+        .build();
+    println!("\n{}\n", qr);
 }
 
 async fn exchange_code_for_tokens(
