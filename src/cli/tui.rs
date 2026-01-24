@@ -2200,6 +2200,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
                 FormField::new("grant_types", String::new()),
                 FormField::new("scope", String::new()),
                 FormField::boolean("is_active", true),
+                FormField::boolean("is_public", false),
                 FormField::new("groups_claim_mode", "effective".to_string()),
                 FormField::boolean("include_claim_maps", true),
                 FormField::boolean("ignore_virtual_groups", false),
@@ -2325,6 +2326,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                     FormField::new("grant_types", client.grant_types.join(", ")).optional(),
                     FormField::new("scope", client.scope.clone()).optional(),
                     FormField::boolean("is_active", client.is_active),
+                    FormField::boolean("is_public", client.is_public).optional(),
                     FormField::new("groups_claim_mode", client.groups_claim_mode.clone())
                         .optional(),
                     FormField::boolean("include_claim_maps", client.include_claim_maps)
@@ -2843,6 +2845,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
 
             // client_secret is optional for public clients
             let client_secret = field_optional(form, "client_secret");
+            let is_public = field_bool(form, "is_public");
 
             let payload = json!({
                 "client_id": client_id,
@@ -2852,6 +2855,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 "grant_types": grant_types,
                 "scope": field_value(form, "scope")?,
                 "is_active": field_bool(form, "is_active"),
+                "is_public": is_public,
                 "groups_claim_mode": groups_claim_mode,
                 "include_claim_maps": field_bool(form, "include_claim_maps"),
                 "ignore_virtual_groups": field_bool(form, "ignore_virtual_groups"),
@@ -2886,6 +2890,7 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 "grant_types": if grant_types.is_empty() { None } else { Some(grant_types) },
                 "scope": field_optional(form, "scope"),
                 "is_active": field_bool(form, "is_active"),
+                "is_public": field_bool_optional(form, "is_public"),
                 "groups_claim_mode": groups_claim_mode,
                 "include_claim_maps": field_bool_optional(form, "include_claim_maps"),
                 "ignore_virtual_groups": field_bool_optional(form, "ignore_virtual_groups"),

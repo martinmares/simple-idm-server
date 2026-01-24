@@ -43,6 +43,7 @@ pub struct OAuthClient {
     pub grant_types: Vec<String>,
     pub scope: String,
     pub is_active: bool,
+    pub is_public: bool, // true for public clients (PKCE-only, no secret)
     pub groups_claim_mode: String,
     pub include_claim_maps: bool,
     pub ignore_virtual_groups: bool,

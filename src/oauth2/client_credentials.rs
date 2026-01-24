@@ -85,16 +85,21 @@ pub async fn handle_client_credentials(
         }
     };
 
-    // Ověř client secret
-    if !verify_password(&req.client_secret, &client.client_secret_hash).unwrap_or(false) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "invalid_client".to_string(),
-                error_description: "Invalid client credentials".to_string(),
-            }),
-        )
-            .into_response();
+    // Ověř client secret (client_credentials flow vyžaduje vždy secret)
+    match &client.client_secret_hash {
+        Some(hash) if verify_password(&req.client_secret, hash).unwrap_or(false) => {
+            // OK
+        }
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "invalid_client".to_string(),
+                    error_description: "Invalid client credentials".to_string(),
+                }),
+            )
+                .into_response();
+        }
     }
 
     // Zkontroluj, že klient podporuje client_credentials flow

@@ -727,12 +727,23 @@ async fn handle_authorization_code_token(
             }
         };
 
-        if !verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
-            return Json(ErrorResponse {
-                error: "invalid_client".to_string(),
-                error_description: "Invalid client credentials".to_string(),
-            })
-            .into_response();
+        // Verify client secret for confidential clients
+        if !client.is_public {
+            if let Some(ref hash) = client.client_secret_hash {
+                if !verify_password(&client_secret, hash).unwrap_or(false) {
+                    return Json(ErrorResponse {
+                        error: "invalid_client".to_string(),
+                        error_description: "Invalid client credentials".to_string(),
+                    })
+                    .into_response();
+                }
+            } else {
+                return Json(ErrorResponse {
+                    error: "invalid_client".to_string(),
+                    error_description: "Client secret required for confidential client".to_string(),
+                })
+                .into_response();
+            }
         }
     }
 
@@ -1047,25 +1058,32 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     };
 
     let client_secret = req.client_secret.unwrap_or_default();
-    let is_public = client.client_id == "cli-tools"
-        || client.client_secret_hash == EMPTY_CLIENT_SECRET_HASH
-        || client.client_secret_hash.contains("dummy-hash-not-used")
-        || verify_password("", &client.client_secret_hash).unwrap_or(false);
 
-    if client_secret.is_empty() {
-        if !is_public {
+    // Verify client credentials (only for confidential clients)
+    if !client.is_public {
+        if client_secret.is_empty() {
             return Json(ErrorResponse {
                 error: "invalid_client".to_string(),
-                error_description: "Missing client_secret".to_string(),
+                error_description: "Missing client_secret for confidential client".to_string(),
             })
             .into_response();
         }
-    } else if !verify_password(&client_secret, &client.client_secret_hash).unwrap_or(false) {
-        return Json(ErrorResponse {
-            error: "invalid_client".to_string(),
-            error_description: "Invalid client credentials".to_string(),
-        })
-        .into_response();
+
+        if let Some(ref hash) = client.client_secret_hash {
+            if !verify_password(&client_secret, hash).unwrap_or(false) {
+                return Json(ErrorResponse {
+                    error: "invalid_client".to_string(),
+                    error_description: "Invalid client credentials".to_string(),
+                })
+                .into_response();
+            }
+        } else {
+            return Json(ErrorResponse {
+                error: "invalid_client".to_string(),
+                error_description: "Client secret required for confidential client".to_string(),
+            })
+            .into_response();
+        }
     }
 
     // Načti uživatele
