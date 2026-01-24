@@ -359,7 +359,10 @@ pub async fn handle_device_token(
 ) -> impl IntoResponse {
     use axum::http::StatusCode;
 
+    tracing::debug!("Device token request: grant_type={}, device_code={}", req.grant_type, req.device_code);
+
     if req.grant_type != "urn:ietf:params:oauth:grant-type:device_code" {
+        tracing::warn!("Unsupported grant_type: {}", req.grant_type);
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -420,15 +423,21 @@ pub async fn handle_device_token(
 
     // Zkontroluj, jestli je autorizovaný
     if !device_code.is_authorized {
-        return (
-            axum::http::StatusCode::BAD_REQUEST,
+        tracing::info!(
+            "Returning authorization_pending (HTTP 400) for device_code: {}",
+            req.device_code
+        );
+        let response = (
+            StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: "authorization_pending".to_string(),
                 error_description: "User has not authorized the device yet".to_string(),
             }),
-        )
-            .into_response();
+        );
+        return response.into_response();
     }
+
+    tracing::info!("Device code authorized, exchanging for tokens: user_id={:?}", device_code.user_id);
 
     // Musí existovat user_id, pokud je autorizovaný
     let user_id = match device_code.user_id {
