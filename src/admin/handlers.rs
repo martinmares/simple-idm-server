@@ -1302,39 +1302,57 @@ pub async fn update_oauth_client(
 }
 
 fn validate_redirect_uris(
-    client_id: &str,
+    _client_id: &str,
     redirect_uris: &[String],
 ) -> Result<(), axum::response::Response> {
-    const CLI_CLIENT_ID: &str = "cli-tools";
-    const ALLOWED_WILDCARDS: [&str; 2] = [
-        "http://localhost:*/callback",
-        "http://127.0.0.1:*/callback",
-    ];
-
     for uri in redirect_uris {
         if uri.contains('*') {
-            if client_id != CLI_CLIENT_ID {
+            // Parse URL with wildcard replaced temporarily for validation
+            let test_uri = uri.replace('*', "8080");
+            let url = Url::parse(&test_uri).map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: format!("Invalid redirect_uri format: {}", uri),
+                    }),
+                )
+                    .into_response()
+            })?;
+
+            // Check if host is loopback (localhost, 127.0.0.1, ::1)
+            let host = url.host_str().unwrap_or("");
+            let is_loopback = host == "localhost"
+                || host == "127.0.0.1"
+                || host == "[::1]"
+                || host == "::1";
+
+            if !is_loopback {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: "bad_request".to_string(),
-                        error_description: "redirect_uris cannot contain wildcard '*'".to_string(),
+                        error_description: format!(
+                            "Wildcard '*' in redirect_uri is only allowed for loopback addresses (localhost, 127.0.0.1, ::1), got: {}",
+                            host
+                        ),
                     }),
                 )
                     .into_response());
             }
-            if !ALLOWED_WILDCARDS.iter().any(|allowed| allowed == uri) {
+
+            // Ensure wildcard is only in port position
+            if !uri.contains(":*/") && !uri.ends_with(":*") {
                 return Err((
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: "bad_request".to_string(),
-                        error_description:
-                            "Only localhost wildcard redirect_uris are allowed for cli-tools"
-                                .to_string(),
+                        error_description: "Wildcard '*' must be used for port only (e.g., http://localhost:*/callback)".to_string(),
                     }),
                 )
                     .into_response());
             }
+
             continue;
         }
 
