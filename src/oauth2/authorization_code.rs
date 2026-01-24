@@ -75,6 +75,7 @@ pub struct TokenRequest {
     pub client_secret: Option<String>,
     pub code_verifier: Option<String>,
     pub refresh_token: Option<String>,
+    pub device_code: Option<String>, // For device flow
 }
 
 #[derive(Debug, Serialize)]
@@ -534,6 +535,31 @@ pub async fn handle_login(
     Redirect::to(&redirect_url).into_response()
 }
 
+/// Wrapper pro device code token exchange - deleguje na device_flow modul
+async fn handle_device_code_token(state: Arc<OAuth2State>, req: TokenRequest) -> Response {
+    use crate::oauth2::device_flow::{handle_device_token_internal, DeviceTokenRequest};
+
+    let device_req = DeviceTokenRequest {
+        grant_type: req.grant_type,
+        device_code: match req.device_code {
+            Some(code) => code,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "invalid_request".to_string(),
+                        error_description: "Missing device_code parameter".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        },
+        client_id: req.client_id.unwrap_or_default(),
+    };
+
+    handle_device_token_internal(state, device_req).await
+}
+
 /// Endpoint pro výměnu authorization code za access token
 pub async fn handle_token(
     State(state): State<Arc<OAuth2State>>,
@@ -551,11 +577,17 @@ pub async fn handle_token(
     match req.grant_type.as_str() {
         "authorization_code" => handle_authorization_code_token(state, req).await,
         "refresh_token" => handle_refresh_token(state, req).await,
-        _ => Json(ErrorResponse {
-            error: "unsupported_grant_type".to_string(),
-            error_description: "Unsupported grant type".to_string(),
-        })
-        .into_response(),
+        "urn:ietf:params:oauth:grant-type:device_code" => {
+            handle_device_code_token(state, req).await
+        }
+        _ => (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "unsupported_grant_type".to_string(),
+                error_description: "Unsupported grant type".to_string(),
+            }),
+        )
+            .into_response(),
     }
 }
 
