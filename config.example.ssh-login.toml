@@ -1,0 +1,16 @@
+# Simple IDM SSH Login Configuration
+# Copy to ~/.config/simple-idm-ssh-login/config.toml
+
+# OIDC Provider (Simple IDM Server)
+oidc_issuer = "https://sso.cloud-app.cz"
+client_id = "simple-idm-ssh-login"
+scopes = ["openid", "profile", "email", "groups"]
+
+# SSH Certificate Signer
+signer_url = "https://ssh-signer.cloud-app.cz"
+
+# Certificate TTL (in seconds)
+ttl_seconds = 3600  # 1 hour
+
+# SSH key path (optional, defaults to ~/.ssh/id_simpleidm)
+# ssh_key_path = "/home/user/.ssh/id_simpleidm"

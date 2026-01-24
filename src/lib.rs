@@ -14,3 +14,6 @@ pub mod proxy;
 
 // SSH Certificate Signer modules
 pub mod ssh_signer;
+
+// SSH Login Client modules
+pub mod ssh_login;
