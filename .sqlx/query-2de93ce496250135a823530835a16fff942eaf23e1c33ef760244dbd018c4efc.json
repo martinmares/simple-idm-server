@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        INSERT INTO oauth_clients (\n            client_id, client_secret_hash, name, redirect_uris, grant_types, scope, is_active,\n            groups_claim_mode, include_claim_maps, ignore_virtual_groups\n        )\n        VALUES ($1, $2, $3, $4, $5, $6, true, $7, $8, $9)\n        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active,\n            groups_claim_mode, include_claim_maps, ignore_virtual_groups\n        ",
+  "query": "\n        UPDATE oauth_clients\n        SET\n            name = COALESCE($1, name),\n            client_secret_hash = COALESCE($2, client_secret_hash),\n            redirect_uris = COALESCE($3, redirect_uris),\n            grant_types = COALESCE($4, grant_types),\n            scope = COALESCE($5, scope),\n            is_active = COALESCE($6, is_active),\n            is_public = COALESCE($7, is_public),\n            groups_claim_mode = COALESCE($8, groups_claim_mode),\n            include_claim_maps = COALESCE($9, include_claim_maps),\n            ignore_virtual_groups = COALESCE($10, ignore_virtual_groups)\n        WHERE id = $11\n        RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public,\n            groups_claim_mode, include_claim_maps, ignore_virtual_groups\n        ",
   "describe": {
     "columns": [
       {
@@ -40,16 +40,21 @@
       },
       {
         "ordinal": 7,
+        "name": "is_public",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
         "name": "groups_claim_mode",
         "type_info": "Text"
       },
       {
-        "ordinal": 8,
+        "ordinal": 9,
         "name": "include_claim_maps",
         "type_info": "Bool"
       },
       {
-        "ordinal": 9,
+        "ordinal": 10,
         "name": "ignore_virtual_groups",
         "type_info": "Bool"
       }
@@ -58,13 +63,15 @@
       "Left": [
         "Varchar",
         "Varchar",
-        "Varchar",
         "TextArray",
         "TextArray",
-        "Text",
         "Text",
         "Bool",
-        "Bool"
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Uuid"
       ]
     },
     "nullable": [
@@ -77,8 +84,9 @@
       false,
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "d5e7d74ad66ff3446587105f2e0dec4b50698f5d21bff6c87508f140bf67eec9"
+  "hash": "2de93ce496250135a823530835a16fff942eaf23e1c33ef760244dbd018c4efc"
 }
