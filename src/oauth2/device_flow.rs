@@ -352,12 +352,13 @@ pub async fn handle_device_verify(
     .into_response()
 }
 
-/// Endpoint pro polling - klient (TV) volá opakovaně, dokud nedostane token
-pub async fn handle_device_token(
-    State(state): State<Arc<OAuth2State>>,
-    Form(req): Form<DeviceTokenRequest>,
-) -> impl IntoResponse {
+/// Interní implementace device token exchange - volaná z handle_token routeru
+pub async fn handle_device_token_internal(
+    state: Arc<OAuth2State>,
+    req: DeviceTokenRequest,
+) -> axum::response::Response {
     use axum::http::StatusCode;
+    use axum::response::IntoResponse;
 
     tracing::debug!("Device token request: grant_type={}, device_code={}", req.grant_type, req.device_code);
 
@@ -581,4 +582,13 @@ pub async fn handle_device_token(
         scope: Some(device_code.scope),
     })
     .into_response()
+}
+
+/// Axum endpoint wrapper pro device token (pro přímé volání /oauth2/device/token)
+/// DEPRECATED: Mělo by se volat přes /oauth2/token s grant_type=urn:ietf:params:oauth:grant-type:device_code
+pub async fn handle_device_token(
+    State(state): State<Arc<OAuth2State>>,
+    Form(req): Form<DeviceTokenRequest>,
+) -> axum::response::Response {
+    handle_device_token_internal(state, req).await
 }
