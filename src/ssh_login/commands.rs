@@ -1,11 +1,13 @@
-use super::{
-    cert_checker, keypair, oidc_browser, oidc_device, signer_client, SshLoginConfig,
-};
+use super::{cert_checker, keypair, oidc_browser, oidc_device, signer_client, SshLoginConfig};
 use std::fs;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
-pub async fn login(config: &SshLoginConfig, force_browser: bool, force_device: bool) -> Result<(), String> {
+pub async fn login(
+    config: &SshLoginConfig,
+    force_browser: bool,
+    force_device: bool,
+) -> Result<(), String> {
     println!("🔑 Simple IDM SSH Login");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
@@ -18,42 +20,24 @@ pub async fn login(config: &SshLoginConfig, force_browser: bool, force_device: b
     // Get ID token via OIDC
     let id_token = if force_device {
         // Force device flow
-        oidc_device::device_flow(
-            &config.oidc_issuer,
-            &config.client_id,
-            &config.scopes,
-        )
-        .await?
+        oidc_device::device_flow(&config.oidc_issuer, &config.client_id, &config.scopes).await?
     } else if force_browser {
         // Force browser flow
-        oidc_browser::browser_flow(
-            &config.oidc_issuer,
-            &config.client_id,
-            &config.scopes,
-        )
-        .await?
+        oidc_browser::browser_flow(&config.oidc_issuer, &config.client_id, &config.scopes).await?
     } else {
         // Smart mode: try browser, fallback to device
         println!("Attempting browser flow (use --device to skip)...\n");
 
-        match oidc_browser::browser_flow(
-            &config.oidc_issuer,
-            &config.client_id,
-            &config.scopes,
-        )
-        .await
+        match oidc_browser::browser_flow(&config.oidc_issuer, &config.client_id, &config.scopes)
+            .await
         {
             Ok(token) => token,
             Err(e) => {
                 tracing::warn!("Browser flow failed: {}. Falling back to device flow.", e);
                 println!("\n⚠️  Browser flow unavailable. Switching to device flow...\n");
 
-                oidc_device::device_flow(
-                    &config.oidc_issuer,
-                    &config.client_id,
-                    &config.scopes,
-                )
-                .await?
+                oidc_device::device_flow(&config.oidc_issuer, &config.client_id, &config.scopes)
+                    .await?
             }
         }
     };
@@ -76,7 +60,8 @@ pub async fn login(config: &SshLoginConfig, force_browser: bool, force_device: b
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("Certificate: {:?}", config.cert_path());
     println!("Principals: {}", cert_info.principals.join(", "));
-    println!("Valid for: {} seconds ({} hours)",
+    println!(
+        "Valid for: {} seconds ({} hours)",
         cert_info.validity_duration_secs(),
         cert_info.validity_duration_secs() / 3600
     );
@@ -126,8 +111,7 @@ pub fn logout(config: &SshLoginConfig) -> Result<(), String> {
     let cert_path = config.cert_path();
 
     if cert_path.exists() {
-        fs::remove_file(&cert_path)
-            .map_err(|e| format!("Failed to remove certificate: {}", e))?;
+        fs::remove_file(&cert_path).map_err(|e| format!("Failed to remove certificate: {}", e))?;
         println!("✅ Certificate removed: {:?}", cert_path);
     } else {
         println!("ℹ️  No certificate found (already logged out)");
@@ -148,6 +132,37 @@ pub fn print_ssh_config(config: &SshLoginConfig) {
     println!("\n# Adjust Host patterns to match your environment");
 }
 
+fn format_duration_human(mut secs: i64) -> String {
+    if secs <= 0 {
+        return "0s".to_string();
+    }
+
+    let days = secs / 86_400;
+    secs %= 86_400;
+
+    let hours = secs / 3_600;
+    secs %= 3_600;
+
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+
+    let mut parts = Vec::new();
+    if days > 0 {
+        parts.push(format!("{}d", days));
+    }
+    if hours > 0 {
+        parts.push(format!("{}h", hours));
+    }
+    if minutes > 0 {
+        parts.push(format!("{}m", minutes));
+    }
+    if seconds > 0 || parts.is_empty() {
+        parts.push(format!("{}s", seconds));
+    }
+
+    parts.join(" ")
+}
+
 /// SSH s automatickým obnovením certifikátu
 pub async fn ssh(
     config: &SshLoginConfig,
@@ -161,7 +176,11 @@ pub async fn ssh(
     let needs_renewal = if let Ok(cert_info) = cert_checker::get_certificate_info(&cert_path) {
         if cert_info.is_valid() {
             let remaining = cert_info.remaining_seconds();
-            println!("✅ Certificate valid for {} seconds", remaining);
+            println!(
+                "✅ Certificate will expire in {}",
+                format_duration_human(remaining)
+            );
+
             false
         } else {
             println!("⚠️  Certificate expired");

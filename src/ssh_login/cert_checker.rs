@@ -1,6 +1,19 @@
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, NaiveDateTime, TimeZone, Utc};
 use std::path::Path;
 use std::process::Command;
+
+fn parse_sshkeygen_local_datetime(s: &str) -> Result<DateTime<Utc>, String> {
+    // ssh-keygen tiskne bez timezone, ale je to lokální čas stroje
+    let naive = NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S")
+        .map_err(|e| format!("Failed to parse local datetime '{}': {}", s, e))?;
+
+    let local_dt = Local
+        .from_local_datetime(&naive)
+        .single()
+        .ok_or_else(|| format!("Ambiguous or invalid local datetime '{}'", s))?;
+
+    Ok(local_dt.with_timezone(&Utc))
+}
 
 /// Zkontroluje platnost SSH certifikátu
 pub fn is_certificate_valid(cert_path: &Path) -> Result<bool, String> {
@@ -34,18 +47,12 @@ pub fn is_certificate_valid(cert_path: &Path) -> Result<bool, String> {
 }
 
 fn parse_validity(line: &str) -> Result<bool, String> {
-    // Example: "Valid: from 2026-01-24T19:16:00 to 2026-01-24T20:17:01"
     let parts: Vec<&str> = line.split_whitespace().collect();
 
-    // Hledáme "to YYYY-MM-DDTHH:MM:SS"
     if let Some(to_idx) = parts.iter().position(|&s| s == "to") {
         if let Some(expiry_str) = parts.get(to_idx + 1) {
-            // Parse expiry time
-            let expiry = DateTime::parse_from_rfc3339(expiry_str)
-                .map_err(|e| format!("Failed to parse expiry time: {}", e))?;
-
-            let now = Utc::now();
-            return Ok(expiry.with_timezone(&Utc) > now);
+            let expiry_utc = parse_sshkeygen_local_datetime(expiry_str)?;
+            return Ok(expiry_utc > Utc::now());
         }
     }
 
@@ -86,17 +93,13 @@ pub fn get_certificate_info(cert_path: &Path) -> Result<CertificateInfo, String>
 
             if let Some(from_idx) = parts.iter().position(|&s| s == "from") {
                 if let Some(from_str) = parts.get(from_idx + 1) {
-                    if let Ok(dt) = DateTime::parse_from_rfc3339(from_str) {
-                        valid_from = Some(dt.with_timezone(&Utc));
-                    }
+                    valid_from = Some(parse_sshkeygen_local_datetime(from_str)?);
                 }
             }
 
             if let Some(to_idx) = parts.iter().position(|&s| s == "to") {
                 if let Some(to_str) = parts.get(to_idx + 1) {
-                    if let Ok(dt) = DateTime::parse_from_rfc3339(to_str) {
-                        valid_to = Some(dt.with_timezone(&Utc));
-                    }
+                    valid_to = Some(parse_sshkeygen_local_datetime(to_str)?);
                 }
             }
         } else if trimmed.starts_with("Principals:") {
