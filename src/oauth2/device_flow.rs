@@ -355,7 +355,7 @@ pub async fn handle_device_verify(
 /// Endpoint pro polling - klient (TV) volá opakovaně, dokud nedostane token
 pub async fn handle_device_token(
     State(state): State<Arc<OAuth2State>>,
-    Json(req): Json<DeviceTokenRequest>,
+    Form(req): Form<DeviceTokenRequest>,
 ) -> impl IntoResponse {
     if req.grant_type != "urn:ietf:params:oauth:grant-type:device_code" {
         return Json(ErrorResponse {
