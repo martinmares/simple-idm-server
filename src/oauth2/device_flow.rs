@@ -357,12 +357,17 @@ pub async fn handle_device_token(
     State(state): State<Arc<OAuth2State>>,
     Form(req): Form<DeviceTokenRequest>,
 ) -> impl IntoResponse {
+    use axum::http::StatusCode;
+
     if req.grant_type != "urn:ietf:params:oauth:grant-type:device_code" {
-        return Json(ErrorResponse {
-            error: "unsupported_grant_type".to_string(),
-            error_description: "Only device_code grant type is supported".to_string(),
-        })
-        .into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "unsupported_grant_type".to_string(),
+                error_description: "Only device_code grant type is supported".to_string(),
+            }),
+        )
+            .into_response();
     }
 
     // Načti device code
@@ -375,18 +380,24 @@ pub async fn handle_device_token(
     {
         Ok(Some(dc)) => dc,
         Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_grant".to_string(),
-                error_description: "Invalid device code".to_string(),
-            })
-            .into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_grant".to_string(),
+                    error_description: "Invalid device code".to_string(),
+                }),
+            )
+                .into_response()
         }
         Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Database error".to_string(),
+                }),
+            )
+                .into_response()
         }
     };
 
@@ -397,31 +408,40 @@ pub async fn handle_device_token(
             .execute(&state.db_pool)
             .await;
 
-        return Json(ErrorResponse {
-            error: "expired_token".to_string(),
-            error_description: "Device code expired".to_string(),
-        })
-        .into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "expired_token".to_string(),
+                error_description: "Device code expired".to_string(),
+            }),
+        )
+            .into_response();
     }
 
     // Zkontroluj, jestli je autorizovaný
     if !device_code.is_authorized {
-        return Json(ErrorResponse {
-            error: "authorization_pending".to_string(),
-            error_description: "User has not authorized the device yet".to_string(),
-        })
-        .into_response();
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "authorization_pending".to_string(),
+                error_description: "User has not authorized the device yet".to_string(),
+            }),
+        )
+            .into_response();
     }
 
     // Musí existovat user_id, pokud je autorizovaný
     let user_id = match device_code.user_id {
         Some(id) => id,
         None => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Device authorized but no user_id".to_string(),
-            })
-            .into_response()
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Device authorized but no user_id".to_string(),
+                }),
+            )
+                .into_response()
         }
     };
 
@@ -435,18 +455,24 @@ pub async fn handle_device_token(
     {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_client".to_string(),
-                error_description: "Client not found".to_string(),
-            })
-            .into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_client".to_string(),
+                    error_description: "Client not found".to_string(),
+                }),
+            )
+                .into_response()
         }
         Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Database error".to_string(),
+                }),
+            )
+                .into_response()
         }
     };
 
@@ -458,18 +484,24 @@ pub async fn handle_device_token(
     {
         Ok(Some(user)) => user,
         Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_grant".to_string(),
-                error_description: "User not found".to_string(),
-            })
-            .into_response()
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_grant".to_string(),
+                    error_description: "User not found".to_string(),
+                }),
+            )
+                .into_response()
         }
         Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Database error".to_string(),
+                }),
+            )
+                .into_response()
         }
     };
 
@@ -516,11 +548,14 @@ pub async fn handle_device_token(
     ) {
         Ok(token) => token,
         Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Failed to create access token".to_string(),
-            })
-            .into_response()
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to create access token".to_string(),
+                }),
+            )
+                .into_response()
         }
     };
 
