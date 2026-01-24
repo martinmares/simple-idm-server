@@ -6,10 +6,12 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Direction, Layout, Rect},
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Tabs, Wrap},
+    widgets::{
+        Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Tabs, Wrap,
+    },
     Terminal,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -236,6 +238,10 @@ struct App {
     claim_entry: Option<ClaimEntryState>,
     claim_value_editor: Option<ClaimValueEditorState>,
     pending_group_move: Option<GroupMoveRequest>,
+    filter: Option<String>,
+    filter_active: bool,
+    filter_input: Input,
+    help_active: bool,
     cursor_visible: bool,
 }
 
@@ -263,6 +269,10 @@ impl App {
             claim_entry: None,
             claim_value_editor: None,
             pending_group_move: None,
+            filter: None,
+            filter_active: false,
+            filter_input: Input::default(),
+            help_active: false,
             cursor_visible: false,
         }
     }
@@ -795,6 +805,41 @@ async fn event_loop(
         }
 
         let event = event::read()?;
+        if app.filter_active {
+            if let Event::Key(key) = event {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.filter_active = false;
+                    }
+                    KeyCode::Enter => {
+                        let value = app.filter_input.value().trim().to_string();
+                        if value.is_empty() {
+                            app.filter = None;
+                        } else {
+                            app.filter = Some(value);
+                        }
+                        app.filter_active = false;
+                    }
+                    _ => {
+                        app.filter_input.handle_event(&event);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if app.help_active {
+            if let Event::Key(key) = event {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('h') => {
+                        app.help_active = false;
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
         if app.mode == Mode::RelationEditor {
             let handled = handle_relation_event(app, event, http).await?;
             if handled == RelationResult::Applied {
@@ -918,6 +963,17 @@ async fn handle_normal_key(app: &mut App, key: KeyEvent, http: &HttpClient) -> R
         KeyCode::Char('r') => refresh_active_tab(app, http).await?,
         KeyCode::Char('[') => page_prev(app, http).await?,
         KeyCode::Char(']') => page_next(app, http).await?,
+        KeyCode::Char('h') => {
+            app.help_active = true;
+        }
+        KeyCode::Char('/') => {
+            app.filter_active = true;
+            let mut input = Input::default();
+            if let Some(current) = app.filter.clone() {
+                input = input.with_value(current);
+            }
+            app.filter_input = input;
+        }
         KeyCode::Char('n') => {
             if app.tab != Tab::ClientClaims && app.tab != Tab::GroupClaims {
                 if let Err(err) = open_create_form(app) {
@@ -1606,27 +1662,59 @@ fn handle_password_gen_event(app: &mut App, event: Event) -> Result<PasswordGenR
 }
 
 fn select_next(app: &mut App) {
+    let filtered = filtered_indices(app);
     match app.tab {
-        Tab::Users => app.users.select_next(),
-        Tab::Groups => app.groups.select_next(),
-        Tab::Clients => app.clients.select_next(),
-        Tab::ClientClaims => app.client_claims.select_next(),
-        Tab::GroupClaims => app.group_claims.select_next(),
-        Tab::UserGroups => app.user_groups.select_next(),
-        Tab::GroupUsers => app.group_users.select_next(),
+        Tab::Users => select_next_filtered(&mut app.users.state, &filtered),
+        Tab::Groups => select_next_filtered(&mut app.groups.state, &filtered),
+        Tab::Clients => select_next_filtered(&mut app.clients.state, &filtered),
+        Tab::ClientClaims => select_next_filtered(&mut app.client_claims.state, &filtered),
+        Tab::GroupClaims => select_next_filtered(&mut app.group_claims.state, &filtered),
+        Tab::UserGroups => select_next_filtered(&mut app.user_groups.state, &filtered),
+        Tab::GroupUsers => select_next_filtered(&mut app.group_users.state, &filtered),
     }
 }
 
 fn select_prev(app: &mut App) {
+    let filtered = filtered_indices(app);
     match app.tab {
-        Tab::Users => app.users.select_prev(),
-        Tab::Groups => app.groups.select_prev(),
-        Tab::Clients => app.clients.select_prev(),
-        Tab::ClientClaims => app.client_claims.select_prev(),
-        Tab::GroupClaims => app.group_claims.select_prev(),
-        Tab::UserGroups => app.user_groups.select_prev(),
-        Tab::GroupUsers => app.group_users.select_prev(),
+        Tab::Users => select_prev_filtered(&mut app.users.state, &filtered),
+        Tab::Groups => select_prev_filtered(&mut app.groups.state, &filtered),
+        Tab::Clients => select_prev_filtered(&mut app.clients.state, &filtered),
+        Tab::ClientClaims => select_prev_filtered(&mut app.client_claims.state, &filtered),
+        Tab::GroupClaims => select_prev_filtered(&mut app.group_claims.state, &filtered),
+        Tab::UserGroups => select_prev_filtered(&mut app.user_groups.state, &filtered),
+        Tab::GroupUsers => select_prev_filtered(&mut app.group_users.state, &filtered),
     }
+}
+
+fn select_next_filtered(state: &mut TableState, filtered: &[usize]) {
+    if filtered.is_empty() {
+        state.select(None);
+        return;
+    }
+    let current_pos = state
+        .selected()
+        .and_then(|idx| filtered.iter().position(|&value| value == idx));
+    let next_pos = match current_pos {
+        Some(pos) => (pos + 1).min(filtered.len() - 1),
+        None => 0,
+    };
+    state.select(Some(filtered[next_pos]));
+}
+
+fn select_prev_filtered(state: &mut TableState, filtered: &[usize]) {
+    if filtered.is_empty() {
+        state.select(None);
+        return;
+    }
+    let current_pos = state
+        .selected()
+        .and_then(|idx| filtered.iter().position(|&value| value == idx));
+    let prev_pos = match current_pos {
+        Some(pos) => pos.saturating_sub(1),
+        None => 0,
+    };
+    state.select(Some(filtered[prev_pos]));
 }
 
 async fn next_tab(app: &mut App, http: &HttpClient) -> Result<()> {
@@ -3372,12 +3460,17 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     let size = frame.size();
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(3), Constraint::Min(0), Constraint::Length(3)])
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(size);
 
     draw_tabs(frame, layout[0], app);
     draw_body(frame, layout[1], app);
-    draw_status(frame, layout[2], app);
+    draw_status(frame, layout[2], layout[3], app);
 
     if app.form.is_some() {
         draw_form(frame, size, app, &mut cursor_visible);
@@ -3405,6 +3498,33 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
         }
     }
 
+    if app.filter_active {
+        let area = centered_rect(60, 5, size);
+        frame.render_widget(Clear, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Filter")
+            .style(Style::default().fg(Color::Yellow))
+            .padding(Padding::horizontal(1));
+        let line = Line::from(vec![
+            Span::raw("> "),
+            Span::raw(app.filter_input.value()),
+        ]);
+        let input = Paragraph::new(vec![Line::from(""), line])
+            .block(block)
+            .style(Style::default().fg(Color::Yellow));
+        frame.render_widget(input, area);
+        let cursor_x = area.x + 2 + app.filter_input.visual_cursor() as u16;
+        let cursor_y = area.y + 2;
+        frame.set_cursor(cursor_x, cursor_y);
+        cursor_visible = true;
+    }
+
+    if app.help_active {
+        draw_help(frame, size, app);
+        cursor_visible = false;
+    }
+
     app.cursor_visible = cursor_visible;
 }
 
@@ -3420,14 +3540,14 @@ fn draw_tabs(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     let tabs = Tabs::new(titles)
         .select(selected)
         .block(Block::default().borders(Borders::ALL).title("simple-idm-ctl"))
-        .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .highlight_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
     frame.render_widget(tabs, area);
 }
 
 fn draw_body(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(0), Constraint::Length(10)])
+        .constraints([Constraint::Min(0), Constraint::Length(12)])
         .split(area);
     draw_table(frame, chunks[0], app);
     draw_details(frame, chunks[1], app);
@@ -3436,12 +3556,14 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
 fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let page = active_page(app);
     let title = tab_title(app.tab);
+    let filtered = filtered_indices(app);
+    ensure_selection_in_filtered(app, &filtered);
     let (header, rows, state, constraints) = match app.tab {
         Tab::Users => (
             Row::new(vec!["Username", "Email", "Active"]),
-            app.users
-                .items
+            filtered
                 .iter()
+                .filter_map(|&idx| app.users.items.get(idx))
                 .map(|u| {
                     Row::new(vec![
                         Cell::from(u.username.clone()),
@@ -3459,9 +3581,9 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         ),
         Tab::Groups => (
             Row::new(vec!["Name", "Description"]),
-            app.groups
-                .items
+            filtered
                 .iter()
+                .filter_map(|&idx| app.groups.items.get(idx))
                 .map(|g| {
                     let depth = app.group_depths.get(&g.id).copied().unwrap_or(0);
                     let prefix = if depth == 0 {
@@ -3489,9 +3611,9 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         ),
         Tab::Clients => (
             Row::new(vec!["Client ID", "Name", "Grants"]),
-            app.clients
-                .items
+            filtered
                 .iter()
+                .filter_map(|&idx| app.clients.items.get(idx))
                 .map(|c| {
                     Row::new(vec![
                         Cell::from(c.client_id.clone()),
@@ -3509,9 +3631,9 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         ),
         Tab::ClientClaims => (
             Row::new(vec!["Client", "Claims"]),
-            app.client_claims
-                .items
+            filtered
                 .iter()
+                .filter_map(|&idx| app.client_claims.items.get(idx))
                 .map(|row| {
                     let claims = row
                         .claims
@@ -3534,9 +3656,9 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         ),
         Tab::GroupClaims => (
             Row::new(vec!["Group", "Claims"]),
-            app.group_claims
-                .items
+            filtered
                 .iter()
+                .filter_map(|&idx| app.group_claims.items.get(idx))
                 .map(|row| {
                     let claims = row
                         .claims
@@ -3559,9 +3681,9 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         ),
         Tab::UserGroups => (
             Row::new(vec!["User", "Groups"]),
-            app.user_groups
-                .items
+            filtered
                 .iter()
+                .filter_map(|&idx| app.user_groups.items.get(idx))
                 .map(|ug| {
                     Row::new(vec![
                         Cell::from(ug.username.clone()),
@@ -3580,9 +3702,9 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
         ),
         Tab::GroupUsers => (
             Row::new(vec!["Group", "Users"]),
-            app.group_users
-                .items
+            filtered
                 .iter()
+                .filter_map(|&idx| app.group_users.items.get(idx))
                 .map(|gu| {
                     Row::new(vec![
                         Cell::from(gu.name.clone()),
@@ -3612,7 +3734,13 @@ fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 .add_modifier(Modifier::BOLD),
         )
         .highlight_symbol(">> ");
-    frame.render_stateful_widget(table, area, state);
+    let mut table_state = TableState::default();
+    if let Some(selected) = state.selected() {
+        if let Some(pos) = filtered.iter().position(|&idx| idx == selected) {
+            table_state.select(Some(pos));
+        }
+    }
+    frame.render_stateful_widget(table, area, &mut table_state);
 }
 
 fn draw_details(frame: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -3631,20 +3759,103 @@ fn draw_details(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     frame.render_widget(paragraph, area);
 }
 
-fn draw_status(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+fn draw_help(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let popup = centered_rect(70, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Help");
+    frame.render_widget(block, popup);
+
+    let lines = help_lines(app.tab);
+    let paragraph = Paragraph::new(lines)
+        .alignment(Alignment::Left)
+        .block(Block::default())
+        .wrap(Wrap { trim: true });
+    let inner = popup.inner(&Margin::new(1, 1));
+    frame.render_widget(paragraph, inner);
+}
+
+fn help_lines(tab: Tab) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from("Tab/Shift+Tab switch tabs"),
+        Line::from("Up/Down select"),
+        Line::from("/ filter"),
+        Line::from("[ / ] page"),
+        Line::from("r refresh"),
+        Line::from("q quit"),
+        Line::from("h close help"),
+        Line::from(""),
+    ];
+
+    match tab {
+        Tab::Groups => {
+            lines.push(Line::from("n new group"));
+            lines.push(Line::from("e edit group"));
+            lines.push(Line::from("d delete group"));
+            lines.push(Line::from("c add child"));
+            lines.push(Line::from("m move group"));
+        }
+        Tab::ClientClaims | Tab::GroupClaims => {
+            lines.push(Line::from("e edit claim maps"));
+        }
+        Tab::UserGroups => {
+            lines.push(Line::from("n new user-group"));
+            lines.push(Line::from("e edit user groups"));
+            lines.push(Line::from("d delete user-group"));
+        }
+        Tab::GroupUsers => {
+            lines.push(Line::from("n new group-user"));
+            lines.push(Line::from("e edit group users"));
+            lines.push(Line::from("d delete group-user"));
+        }
+        Tab::Users => {
+            lines.push(Line::from("n new user"));
+            lines.push(Line::from("e edit user"));
+            lines.push(Line::from("d delete user"));
+        }
+        Tab::Clients => {
+            lines.push(Line::from("n new client"));
+            lines.push(Line::from("e edit client"));
+            lines.push(Line::from("d delete client"));
+        }
+    }
+
+    lines
+}
+
+fn draw_status(frame: &mut ratatui::Frame, status_area: Rect, help_area: Rect, app: &App) {
     let help = if app.tab == Tab::Groups {
-        "q quit | tab switch | r refresh | n new | e edit | d delete | [/] page | c child | m move"
+        "help: Tab switch | Up/Down select | / filter | PgUp/PgDn | q quit | h help | c child | m move"
     } else {
-        "q quit | tab switch | r refresh | n new | e edit | d delete | [/] page | a add | x remove"
+        "help: Tab switch | Up/Down select | / filter | PgUp/PgDn | q quit | h help"
     };
-    let status = if app.status.is_empty() {
-        help.to_string()
+
+    let status_value = if app.status.is_empty() {
+        "-".to_string()
     } else {
-        format!("{} | {}", app.status, help)
+        app.status.clone()
     };
-    let block = Block::default().borders(Borders::ALL).title("Status");
-    let paragraph = Paragraph::new(status).block(block);
-    frame.render_widget(paragraph, area);
+    let filter_value = app
+        .filter
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+    let (filtered_items, total_items) = active_items_count(app);
+    let status = format!(
+        "status: {} | items: {}/{} | filter: {}",
+        status_value,
+        filtered_items,
+        total_items,
+        filter_value
+    );
+    let status_line = Paragraph::new(status).alignment(Alignment::Left);
+    frame.render_widget(
+        status_line.style(Style::default().add_modifier(Modifier::REVERSED)),
+        status_area,
+    );
+
+    let help_line = Paragraph::new(help).alignment(Alignment::Left);
+    frame.render_widget(help_line, help_area);
 }
 
 fn draw_form(
@@ -3826,6 +4037,193 @@ fn active_page(app: &App) -> usize {
         Tab::GroupClaims => app.group_claims.page,
         Tab::UserGroups => app.user_groups.page,
         Tab::GroupUsers => app.group_users.page,
+    }
+}
+
+fn active_items_count(app: &App) -> (usize, usize) {
+    let total = match app.tab {
+        Tab::Users => app.users.items.len(),
+        Tab::Groups => app.groups.items.len(),
+        Tab::Clients => app.clients.items.len(),
+        Tab::ClientClaims => app.client_claims.items.len(),
+        Tab::GroupClaims => app.group_claims.items.len(),
+        Tab::UserGroups => app.user_groups.items.len(),
+        Tab::GroupUsers => app.group_users.items.len(),
+    };
+    let filtered = filtered_indices(app).len();
+    (filtered, total)
+}
+
+fn active_filter(app: &App) -> Option<String> {
+    app.filter
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_lowercase())
+}
+
+fn matches_filter(needle: &str, value: &str) -> bool {
+    value.to_lowercase().contains(needle)
+}
+
+fn filtered_indices(app: &App) -> Vec<usize> {
+    let Some(needle) = active_filter(app) else {
+        return match app.tab {
+            Tab::Users => (0..app.users.items.len()).collect(),
+            Tab::Groups => (0..app.groups.items.len()).collect(),
+            Tab::Clients => (0..app.clients.items.len()).collect(),
+            Tab::ClientClaims => (0..app.client_claims.items.len()).collect(),
+            Tab::GroupClaims => (0..app.group_claims.items.len()).collect(),
+            Tab::UserGroups => (0..app.user_groups.items.len()).collect(),
+            Tab::GroupUsers => (0..app.group_users.items.len()).collect(),
+        };
+    };
+
+    match app.tab {
+        Tab::Users => app
+            .users
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, user)| {
+                let matches = matches_filter(&needle, &user.username)
+                    || matches_filter(&needle, &user.email);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::Groups => app
+            .groups
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, group)| {
+                let matches = matches_filter(&needle, &group.name)
+                    || group
+                        .description
+                        .as_deref()
+                        .map(|value| matches_filter(&needle, value))
+                        .unwrap_or(false);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::Clients => app
+            .clients
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, client)| {
+                let grants = client.grant_types.join(" ");
+                let matches = matches_filter(&needle, &client.client_id)
+                    || matches_filter(&needle, &client.name)
+                    || matches_filter(&needle, &client.scope)
+                    || matches_filter(&needle, &grants);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::ClientClaims => app
+            .client_claims
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let claims = row
+                    .claims
+                    .iter()
+                    .map(|claim| {
+                        let value = claim_value_to_display(&claim.claim_value);
+                        format!("{} {} {}", claim.claim_name, value, claim.other_label)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let matches = matches_filter(&needle, &row.client_name)
+                    || matches_filter(&needle, &claims);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::GroupClaims => app
+            .group_claims
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let claims = row
+                    .claims
+                    .iter()
+                    .map(|claim| {
+                        let value = claim_value_to_display(&claim.claim_value);
+                        format!("{} {} {}", claim.claim_name, value, claim.other_label)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let matches = matches_filter(&needle, &row.group_name)
+                    || matches_filter(&needle, &claims);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::UserGroups => app
+            .user_groups
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let groups = row
+                    .groups
+                    .iter()
+                    .map(|group| group.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let matches = matches_filter(&needle, &row.username)
+                    || matches_filter(&needle, &row.email)
+                    || matches_filter(&needle, &groups);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::GroupUsers => app
+            .group_users
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let users = row
+                    .users
+                    .iter()
+                    .map(|user| user.username.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let matches = matches_filter(&needle, &row.name)
+                    || row
+                        .description
+                        .as_deref()
+                        .map(|value| matches_filter(&needle, value))
+                        .unwrap_or(false)
+                    || matches_filter(&needle, &users);
+                matches.then_some(idx)
+            })
+            .collect(),
+    }
+}
+
+fn ensure_selection_in_filtered(app: &mut App, filtered: &[usize]) {
+    let state = match app.tab {
+        Tab::Users => &mut app.users.state,
+        Tab::Groups => &mut app.groups.state,
+        Tab::Clients => &mut app.clients.state,
+        Tab::ClientClaims => &mut app.client_claims.state,
+        Tab::GroupClaims => &mut app.group_claims.state,
+        Tab::UserGroups => &mut app.user_groups.state,
+        Tab::GroupUsers => &mut app.group_users.state,
+    };
+    if filtered.is_empty() {
+        state.select(None);
+        return;
+    }
+    let selected = state.selected();
+    if selected.is_none()
+        || selected
+            .map(|idx| !filtered.iter().any(|&value| value == idx))
+            .unwrap_or(true)
+    {
+        state.select(Some(filtered[0]));
     }
 }
 
