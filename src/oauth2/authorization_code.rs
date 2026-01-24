@@ -269,6 +269,7 @@ pub async fn handle_authorize(
 }
 
 fn is_redirect_uri_allowed(client: &OAuthClient, redirect_uri: &str) -> bool {
+    // Exact match
     if client
         .redirect_uris
         .iter()
@@ -277,29 +278,43 @@ fn is_redirect_uri_allowed(client: &OAuthClient, redirect_uri: &str) -> bool {
         return true;
     }
 
-    if client.client_id != "cli-tools" {
-        return false;
-    }
-
-    client.redirect_uris.iter().any(|uri| {
-        matches_localhost_wildcard(uri, "localhost", redirect_uri)
-            || matches_localhost_wildcard(uri, "127.0.0.1", redirect_uri)
+    // Check for loopback wildcard patterns (for all clients)
+    client.redirect_uris.iter().any(|pattern| {
+        matches_loopback_wildcard(pattern, redirect_uri)
     })
 }
 
-fn matches_localhost_wildcard(pattern: &str, host: &str, redirect_uri: &str) -> bool {
-    if pattern != format!("http://{}:*/callback", host) {
+fn matches_loopback_wildcard(pattern: &str, redirect_uri: &str) -> bool {
+    // Check if pattern contains wildcard
+    if !pattern.contains("*") {
         return false;
     }
 
-    let Ok(url) = Url::parse(redirect_uri) else {
+    // Parse both pattern (with * replaced) and actual redirect_uri
+    let test_pattern = pattern.replace('*', "8080");
+    let Ok(pattern_url) = Url::parse(&test_pattern) else {
+        return false;
+    };
+    let Ok(redirect_url) = Url::parse(redirect_uri) else {
         return false;
     };
 
-    url.scheme() == "http"
-        && url.host_str() == Some(host)
-        && url.path() == "/callback"
-        && url.port().is_some()
+    // Check if pattern is for loopback address
+    let pattern_host = pattern_url.host_str().unwrap_or("");
+    let is_loopback = pattern_host == "localhost"
+        || pattern_host == "127.0.0.1"
+        || pattern_host == "::1"
+        || pattern_host == "[::1]";
+
+    if !is_loopback {
+        return false;
+    }
+
+    // Match: scheme, host, and path must be identical; port can vary
+    pattern_url.scheme() == redirect_url.scheme()
+        && pattern_url.host_str() == redirect_url.host_str()
+        && pattern_url.path() == redirect_url.path()
+        && redirect_url.port().is_some()
 }
 
 /// Helper: Create authentication session for SSO
