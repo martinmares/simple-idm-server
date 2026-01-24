@@ -1223,9 +1223,28 @@ pub async fn update_oauth_client(
         }
     };
 
-    let secret_hash = if let Some(secret) = &req.client_secret {
+    // Determine new client_secret_hash value
+    // - If is_public is being set to true, secret must be NULL
+    // - If is_public is being set to false or not changing, use provided secret or keep existing
+    let secret_hash = if req.is_public == Some(true) {
+        // Public client: force secret to NULL
+        if let Some(secret) = &req.client_secret {
+            if !secret.trim().is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: "Public clients cannot have client_secret".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+        Some(None) // Explicitly set to NULL
+    } else if let Some(secret) = &req.client_secret {
+        // Secret provided: hash it
         match hash_password(secret) {
-            Ok(hash) => Some(hash),
+            Ok(hash) => Some(Some(hash)),
             Err(e) => {
                 tracing::error!("Failed to hash client secret: {:?}", e);
                 return (
@@ -1239,6 +1258,7 @@ pub async fn update_oauth_client(
             }
         }
     } else {
+        // No secret provided, no is_public change: keep existing
         None
     };
 
@@ -1282,26 +1302,40 @@ pub async fn update_oauth_client(
             }
         }
     }
+    // Flatten secret_hash: Option<Option<String>> -> (update_flag, value)
+    // - None => don't update (keep existing)
+    // - Some(None) => set to NULL (for public clients)
+    // - Some(Some(hash)) => set to hash (for confidential clients)
+    let (update_secret, secret_value) = match secret_hash {
+        Some(Some(hash)) => (true, Some(hash)),  // Set new hash
+        Some(None) => (true, None),              // Set to NULL
+        None => (false, None),                   // Keep existing
+    };
+
     let result = sqlx::query!(
         r#"
         UPDATE oauth_clients
         SET
             name = COALESCE($1, name),
-            client_secret_hash = COALESCE($2, client_secret_hash),
-            redirect_uris = COALESCE($3, redirect_uris),
-            grant_types = COALESCE($4, grant_types),
-            scope = COALESCE($5, scope),
-            is_active = COALESCE($6, is_active),
-            is_public = COALESCE($7, is_public),
-            groups_claim_mode = COALESCE($8, groups_claim_mode),
-            include_claim_maps = COALESCE($9, include_claim_maps),
-            ignore_virtual_groups = COALESCE($10, ignore_virtual_groups)
-        WHERE id = $11
+            client_secret_hash = CASE
+                WHEN $2 THEN $3
+                ELSE client_secret_hash
+            END,
+            redirect_uris = COALESCE($4, redirect_uris),
+            grant_types = COALESCE($5, grant_types),
+            scope = COALESCE($6, scope),
+            is_active = COALESCE($7, is_active),
+            is_public = COALESCE($8, is_public),
+            groups_claim_mode = COALESCE($9, groups_claim_mode),
+            include_claim_maps = COALESCE($10, include_claim_maps),
+            ignore_virtual_groups = COALESCE($11, ignore_virtual_groups)
+        WHERE id = $12
         RETURNING id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public,
             groups_claim_mode, include_claim_maps, ignore_virtual_groups
         "#,
         req.name,
-        secret_hash,
+        update_secret,      // $2: bool - should we update secret?
+        secret_value,       // $3: Option<String> - new value (NULL or hash)
         redirect_uris,
         grant_types,
         req.scope,
