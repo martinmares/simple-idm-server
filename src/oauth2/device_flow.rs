@@ -68,15 +68,21 @@ pub struct DeviceVerifyResponse {
     pub message: String,
 }
 
-/// Generuje náhodný user code ve formátu XXXX-XXXX
-fn generate_user_code() -> String {
+/// Generuje náhodný user code podle konfigurace
+fn generate_user_code(length: usize, format: &str) -> String {
     let chars: String = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
         .filter(|c: &u8| c.is_ascii_uppercase() || c.is_ascii_digit())
-        .take(8)
+        .take(length)
         .map(char::from)
         .collect();
-    format!("{}-{}", &chars[..4], &chars[4..])
+
+    // Formátuj podle pattern (např. "XXXX-XXXX" -> "ABCD-1234")
+    if format.contains('-') && length == 8 {
+        format!("{}-{}", &chars[..4], &chars[4..])
+    } else {
+        chars
+    }
 }
 
 /// Endpoint pro zobrazení HTML formuláře pro device verification
@@ -138,8 +144,11 @@ pub async fn handle_device_authorization(
         .map(char::from)
         .collect();
 
-    let user_code = generate_user_code();
-    let expires_at = Utc::now() + Duration::minutes(10);
+    let user_code = generate_user_code(
+        state.device_flow_config.user_code_length,
+        &state.device_flow_config.user_code_format,
+    );
+    let expires_at = Utc::now() + Duration::seconds(state.device_flow_config.expiry_seconds);
     let scope = req.scope.unwrap_or_else(|| client.scope.clone());
 
     // Ulož do databáze
@@ -174,8 +183,8 @@ pub async fn handle_device_authorization(
         user_code,
         verification_uri,
         verification_uri_complete: Some(verification_uri_complete),
-        expires_in: 600, // 10 minut
-        interval: 5,     // polling každých 5 sekund
+        expires_in: state.device_flow_config.expiry_seconds,
+        interval: state.device_flow_config.polling_interval_seconds,
     })
     .into_response()
 }
@@ -214,6 +223,30 @@ pub async fn handle_device_verify(
         }
     };
 
+    // Brute force protection: Zkontroluj počet failed attempts
+    let failed_attempts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM device_verification_attempts WHERE user_code = $1"
+    )
+    .bind(&req.user_code)
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+
+    if failed_attempts >= state.device_flow_config.max_verification_attempts as i64 {
+        // Smaž device code po překročení limitu
+        let _ = sqlx::query("DELETE FROM device_codes WHERE user_code = $1")
+            .bind(&req.user_code)
+            .execute(&state.db_pool)
+            .await;
+
+        return Html(templates::device_verify_page(
+            Some(&req.user_code),
+            Some("Too many failed attempts. This device code has been invalidated."),
+            None,
+        ))
+        .into_response();
+    }
+
     // Zkontroluj expiraci
     if device_code.expires_at < Utc::now() {
         let _ = sqlx::query("DELETE FROM device_codes WHERE user_code = $1")
@@ -249,6 +282,15 @@ pub async fn handle_device_verify(
     {
         Ok(Some(user)) => user,
         Ok(None) => {
+            // Log failed attempt
+            let _ = sqlx::query(
+                "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)"
+            )
+            .bind(&req.user_code)
+            .bind("unknown") // TODO: extract real IP from request
+            .execute(&state.db_pool)
+            .await;
+
             return Html(templates::device_verify_page(
                 Some(&req.user_code),
                 Some("Invalid credentials"),
@@ -268,6 +310,15 @@ pub async fn handle_device_verify(
 
     // Ověř heslo
     if !crate::auth::verify_password(&req.password, &user.password_hash).unwrap_or(false) {
+        // Log failed attempt
+        let _ = sqlx::query(
+            "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)"
+        )
+        .bind(&req.user_code)
+        .bind("unknown") // TODO: extract real IP from request
+        .execute(&state.db_pool)
+        .await;
+
         return Html(templates::device_verify_page(
             Some(&req.user_code),
             Some("Invalid credentials"),

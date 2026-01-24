@@ -1,4 +1,5 @@
 use crate::auth::{verify_password, JwtService};
+use crate::config::DeviceFlowConfig;
 use crate::db::{models::OAuthClient, DbPool};
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ pub struct OAuth2State {
     pub access_token_expiry: i64,
     pub refresh_token_expiry: i64,
     pub auth_session_expiry: i64,
+    pub device_flow_config: DeviceFlowConfig,
 }
 
 pub async fn handle_client_credentials(
