@@ -958,15 +958,18 @@ async fn handle_authorization_code_token(
         .execute(&state.db_pool)
         .await;
 
-    Json(TokenResponseWithRefresh {
+    let response = TokenResponseWithRefresh {
         access_token,
         token_type: "Bearer".to_string(),
         expires_in: state.access_token_expiry,
         refresh_token: Some(refresh_token),
         id_token: Some(id_token),
         scope: Some(auth_code.scope),
-    })
-    .into_response()
+    };
+
+    tracing::debug!("Token response: {:?}", response);
+
+    Json(response).into_response()
 }
 
 fn non_empty(value: &str) -> Option<&str> {

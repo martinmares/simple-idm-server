@@ -143,12 +143,18 @@ pub async fn browser_flow(
     }
 
     // Exchange code for token
+    tracing::debug!("Exchanging authorization code for tokens");
     let token_response = client
         .exchange_code(AuthorizationCode::new(callback_result.code))
         .set_pkce_verifier(pkce_verifier)
         .request_async(async_http_client)
         .await
-        .map_err(|e| format!("Token exchange failed: {}", e))?;
+        .map_err(|e| {
+            tracing::error!("Token exchange error: {:?}", e);
+            format!("Token exchange failed: {}", e)
+        })?;
+
+    tracing::debug!("Token exchange successful");
 
     let id_token = token_response
         .extra_fields()
