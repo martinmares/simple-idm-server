@@ -694,30 +694,6 @@ async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &
     .await
 }
 
-#[derive(Serialize)]
-struct DeviceAuthorizationRequest {
-    client_id: String,
-    scope: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct DeviceAuthorizationResponse {
-    device_code: String,
-    user_code: String,
-    verification_uri: String,
-    verification_uri_complete: Option<String>,
-    expires_in: i64,
-    interval: i64,
-}
-
-#[derive(Deserialize)]
-struct DeviceTokenResponse {
-    access_token: String,
-    token_type: String,
-    expires_in: i64,
-    scope: Option<String>,
-}
-
 #[derive(Deserialize)]
 struct UserinfoResponse {
     email: Option<String>,
@@ -725,102 +701,102 @@ struct UserinfoResponse {
 }
 
 async fn handle_device_login(base_url: &str, client_id: &str, server_name: &str, insecure: bool) -> Result<()> {
-    let client = if insecure {
-        reqwest::Client::builder()
-            .danger_accept_invalid_certs(true)
-            .build()
-            .context("Failed to build HTTP client")?
-    } else {
-        reqwest::Client::new()
+    use openidconnect::core::{
+        CoreAuthDisplay, CoreClaimName, CoreClaimType, CoreClient, CoreClientAuthMethod,
+        CoreDeviceAuthorizationResponse, CoreGrantType, CoreJsonWebKey, CoreJsonWebKeyType,
+        CoreJsonWebKeyUse, CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm,
+        CoreJwsSigningAlgorithm, CoreResponseMode, CoreResponseType, CoreSubjectIdentifierType,
     };
-
-    let payload = DeviceAuthorizationRequest {
-        client_id: client_id.to_string(),
-        scope: Some("openid profile email groups".to_string()),
+    use openidconnect::{
+        AdditionalProviderMetadata, ClientId, DeviceAuthorizationUrl, IssuerUrl,
+        ProviderMetadata, Scope, reqwest::async_http_client,
     };
+    use serde::{Deserialize, Serialize};
 
-    let response = client
-        .post(format!("{}/oauth2/device/authorize", base_url))
-        .json(&payload)
-        .send()
-        .await?;
-
-    let status = response.status();
-    let body = response.text().await?;
-    if !status.is_success() {
-        if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body) {
-            bail!("Device authorization failed: {}: {}", err.error, err.error_description);
-        }
-        bail!("Device authorization failed ({}). Response: {}", status, body.trim());
+    // Define custom provider metadata to capture device_authorization_endpoint
+    #[derive(Clone, Debug, Deserialize, Serialize)]
+    struct DeviceEndpointMetadata {
+        device_authorization_endpoint: DeviceAuthorizationUrl,
     }
+    impl AdditionalProviderMetadata for DeviceEndpointMetadata {}
 
-    let auth: DeviceAuthorizationResponse =
-        serde_json::from_str(&body).context("Failed to parse device authorization response")?;
+    type DeviceProviderMetadata = ProviderMetadata<
+        DeviceEndpointMetadata,
+        CoreAuthDisplay,
+        CoreClientAuthMethod,
+        CoreClaimName,
+        CoreClaimType,
+        CoreGrantType,
+        CoreJweContentEncryptionAlgorithm,
+        CoreJweKeyManagementAlgorithm,
+        CoreJwsSigningAlgorithm,
+        CoreJsonWebKeyType,
+        CoreJsonWebKeyUse,
+        CoreJsonWebKey,
+        CoreResponseMode,
+        CoreResponseType,
+        CoreSubjectIdentifierType,
+    >;
+
+    // Discover OIDC metadata
+    let issuer_url = IssuerUrl::new(base_url.to_string())
+        .context("Invalid issuer URL")?;
+
+    let metadata = DeviceProviderMetadata::discover_async(issuer_url, async_http_client)
+        .await
+        .context("Failed to discover OIDC metadata")?;
+
+    let device_endpoint = metadata
+        .additional_metadata()
+        .device_authorization_endpoint
+        .clone();
+
+    // Create OIDC client
+    let oidc_client = CoreClient::from_provider_metadata(
+        metadata,
+        ClientId::new(client_id.to_string()),
+        None, // Public client
+    )
+    .set_device_authorization_uri(device_endpoint);
+
+    // Request device code
+    let details: CoreDeviceAuthorizationResponse = oidc_client
+        .exchange_device_code()
+        .context("Failed to create device authorization request")?
+        .add_scope(Scope::new("openid".to_string()))
+        .add_scope(Scope::new("profile".to_string()))
+        .add_scope(Scope::new("email".to_string()))
+        .add_scope(Scope::new("groups".to_string()))
+        .request_async(async_http_client)
+        .await
+        .context("Failed to request device code")?;
 
     println!("Device login started.");
-    println!("User code: {}", auth.user_code);
-    println!("Verify at: {}", auth.verification_uri);
-    if let Some(uri) = &auth.verification_uri_complete {
-        println!("Direct link: {}", uri);
-        print_qr_code(uri);
+    println!("User code: {}", details.user_code().secret());
+    println!("Verify at: {}", details.verification_uri().as_str());
+    if let Some(uri) = details.verification_uri_complete() {
+        println!("Direct link: {}", uri.secret());
+        print_qr_code(uri.secret());
     }
 
-    let deadline = Utc::now() + Duration::seconds(auth.expires_in);
-    let interval = Duration::seconds(auth.interval.max(1));
+    // Poll for token
+    let token_response = oidc_client
+        .exchange_device_access_token(&details)
+        .request_async(async_http_client, tokio::time::sleep, None)
+        .await
+        .context("Failed to exchange device code for token")?;
 
-    loop {
-        if Utc::now() >= deadline {
-            bail!("Device authorization expired. Please run 'simple-idm-ctl login --device' again.");
-        }
-
-        tokio::time::sleep(std::time::Duration::from_secs(interval.num_seconds() as u64)).await;
-
-        let token_payload = serde_json::json!({
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-            "device_code": auth.device_code,
-            "client_id": client_id,
-        });
-
-        let token_response = client
-            .post(format!("{}/oauth2/device/token", base_url))
-            .json(&token_payload)
-            .send()
-            .await?;
-
-        let token_status = token_response.status();
-        let token_body = token_response.text().await?;
-
-        if let Ok(err) = serde_json::from_str::<ErrorResponse>(&token_body) {
-            match err.error.as_str() {
-                "authorization_pending" => continue,
-                "expired_token" => {
-                    bail!("Device authorization expired. Please run 'simple-idm-ctl login --device' again.");
-                }
-                _ => {
-                    bail!("Device token error: {}: {}", err.error, err.error_description);
-                }
-            }
-        }
-
-        if token_status.is_success() {
-            let token_data: DeviceTokenResponse = serde_json::from_str(&token_body)
-                .context("Failed to parse device token response")?;
-            return save_device_session(
-                base_url,
-                server_name,
-                token_data.access_token,
-                token_data.expires_in,
-                insecure,
-            )
-            .await;
-        }
-
-        bail!(
-            "Device token request failed ({}). Response: {}",
-            token_status,
-            token_body.trim()
-        );
-    }
+    // Extract access token and save session
+    save_device_session(
+        base_url,
+        server_name,
+        token_response.access_token().secret().to_string(),
+        token_response.expires_in()
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(3600),
+        insecure,
+    )
+    .await
 }
 
 async fn save_device_session(
@@ -1393,70 +1369,48 @@ fn handle_status() -> Result<()> {
 }
 
 async fn refresh_session_async(session: Session) -> Result<Session> {
+    use openidconnect::core::{CoreClient, CoreProviderMetadata};
+    use openidconnect::{
+        ClientId, IssuerUrl, RefreshToken, reqwest::async_http_client,
+    };
+
     if session.refresh_token.trim().is_empty() {
         bail!("No refresh token available. Please login again with 'simple-idm-ctl login'");
     }
-    let client = reqwest::Client::new();
 
-    let params = [
-        ("grant_type", "refresh_token"),
-        ("client_id", "cli-tools"),
-        ("client_secret", ""),
-        ("refresh_token", &session.refresh_token),
-    ];
+    // Discover OIDC metadata
+    let issuer_url = IssuerUrl::new(session.base_url.clone())
+        .context("Invalid issuer URL")?;
 
-    let response = client
-        .post(format!("{}/oauth2/token", session.base_url))
-        .form(&params)
-        .send()
-        .await?;
-    let status = response.status();
-    let body = response.text().await?;
+    let metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client)
+        .await
+        .context("Failed to discover OIDC metadata for token refresh")?;
 
-    if !status.is_success() {
-        if let Ok(err) = serde_json::from_str::<ErrorResponse>(&body) {
-            bail!(
-                "Token refresh failed: {}: {}. Please login again with 'simple-idm-ctl login'",
-                err.error,
-                err.error_description
-            );
-        }
-        bail!(
-            "Token refresh failed ({}). Please login again with 'simple-idm-ctl login'. Response: {}",
-            status,
-            body.trim()
-        );
-    }
+    // Create OIDC client (public client for cli-tools)
+    let oidc_client = CoreClient::from_provider_metadata(
+        metadata,
+        ClientId::new("cli-tools".to_string()),
+        None, // Public client
+    );
 
-    #[derive(Deserialize)]
-    struct TokenResponse {
-        access_token: String,
-        refresh_token: Option<String>,
-        expires_in: i64,
-    }
-
-    let token_data: TokenResponse = match serde_json::from_str(&body) {
-        Ok(data) => data,
-        Err(err) => {
-            if let Ok(err_body) = serde_json::from_str::<ErrorResponse>(&body) {
-                bail!(
-                    "Token refresh failed: {}: {}. Please login again with 'simple-idm-ctl login'",
-                    err_body.error,
-                    err_body.error_description
-                );
-            }
-            bail!(
-                "Token refresh response missing access_token. Please login again with 'simple-idm-ctl login'. Parse error: {}. Response: {}",
-                err,
-                body.trim()
-            );
-        }
-    };
+    // Exchange refresh token for new access token
+    let token_response = oidc_client
+        .exchange_refresh_token(&RefreshToken::new(session.refresh_token.clone()))
+        .request_async(async_http_client)
+        .await
+        .context("Token refresh failed. Please login again with 'simple-idm-ctl login'")?;
 
     Ok(Session {
-        access_token: token_data.access_token,
-        refresh_token: token_data.refresh_token.unwrap_or(session.refresh_token),
-        expires_at: Utc::now() + Duration::seconds(token_data.expires_in),
+        access_token: token_response.access_token().secret().to_string(),
+        refresh_token: token_response
+            .refresh_token()
+            .map(|t| t.secret().to_string())
+            .unwrap_or(session.refresh_token),
+        expires_at: Utc::now() + Duration::seconds(
+            token_response.expires_in()
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(3600)
+        ),
         base_url: session.base_url,
         created_at: session.created_at,
         user_email: session.user_email,
