@@ -50,6 +50,10 @@ pub struct OidcDiscovery {
     /// OPTIONAL. JSON array containing a list of PKCE code challenge methods
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_challenge_methods_supported: Option<Vec<String>>,
+
+    /// OPTIONAL. URL of the OP's Device Authorization Endpoint (RFC 8628)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_authorization_endpoint: Option<String>,
 }
 
 /// Error response for discovery endpoint
@@ -113,6 +117,7 @@ impl OidcState {
                 "S256".to_string(), // PKCE with SHA-256
                 "plain".to_string(),
             ]),
+            device_authorization_endpoint: Some(format!("{}/oauth2/device/authorize", self.issuer)),
         }
     }
 }
