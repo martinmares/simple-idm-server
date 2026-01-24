@@ -1,4 +1,5 @@
 use axum::{routing::{get, post}, Router};
+use clap::Parser;
 use simple_idm_server::ssh_signer::{
     cert_signer::CertSigner,
     handlers::{handle_sign, AppState},
@@ -10,22 +11,65 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+#[derive(Parser)]
+#[command(name = "simple-idm-ssh-signer")]
+#[command(about = "SSH certificate signer for Simple IDM", long_about = None)]
+struct Cli {
+    /// Path to config file (TOML)
+    #[arg(short = 'c', long)]
+    config: Option<String>,
+
+    /// Listen address (e.g. "127.0.0.1:9222")
+    #[arg(short = 'l', long)]
+    listen_addr: Option<String>,
+
+    /// OIDC issuer URL
+    #[arg(long)]
+    oidc_issuer: Option<String>,
+
+    /// Expected audience (OAuth2 client ID)
+    #[arg(long)]
+    expected_audience: Option<String>,
+
+    /// CA private key path
+    #[arg(long)]
+    ca_private_key_path: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Inicializace loggingu
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "simple_idm_ssh_signer=debug".into()),
+                .unwrap_or_else(|_| "simple_idm_ssh_signer=info".into()),
         )
         .with(tracing_subscriber::fmt::layer())
         .init();
 
+    let cli = Cli::parse();
+
     tracing::info!("Starting simple-idm-ssh-signer");
 
     // Načti konfiguraci
-    let config = SshSignerConfig::load()?;
-    tracing::info!("Loaded configuration from {}", config.config_source());
+    let mut config = SshSignerConfig::load(cli.config.as_deref())?;
+
+    // CLI overrides (highest priority)
+    if let Some(addr) = cli.listen_addr {
+        config.listen_addr = addr;
+    }
+    if let Some(issuer) = cli.oidc_issuer {
+        config.oidc_issuer = issuer;
+    }
+    if let Some(aud) = cli.expected_audience {
+        config.expected_audience = aud;
+    }
+    if let Some(key_path) = cli.ca_private_key_path {
+        config.ca_private_key_path = key_path.into();
+    }
+
+    tracing::info!("Configuration loaded");
+    tracing::info!("Listen address: {}", config.listen_addr);
     tracing::info!("OIDC Issuer: {}", config.oidc_issuer);
     tracing::info!("Expected Audience: {}", config.expected_audience);
     tracing::info!("CA Private Key: {:?}", config.ca_private_key_path);

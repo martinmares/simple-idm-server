@@ -16,17 +16,19 @@ ssh-keygen -t ed25519 -f /etc/simple-idm-ssh-signer/ca_key -C "simple-idm-ssh-ca
 
 ### 2. Configure SSH Servers
 
-On each SSH server, add to `/etc/ssh/sshd_config`:
+On each SSH server, add to `/etc/ssh/sshd_config` (or `/etc/ssh/sshd_config.d/99-simple-idm-ssh-signer.conf`):
 
 ```
 TrustedUserCAKeys /etc/ssh/simple-idm-ssh-signer.pub
 ```
 
+Read-write for root only `chmod 600 /etc/ssh/sshd_config.d/99-simple-idm-ssh-signer.conf`
+
 Copy `ca_key.pub` to `/etc/ssh/simple-idm-ssh-signer.pub` on all SSH servers.
 
-Restart sshd:
+Restart ssh (on Ubuntu LTS):
 ```bash
-systemctl restart sshd
+systemctl restart ssh
 ```
 
 ### 3. Configure Signer
