@@ -706,16 +706,25 @@ async fn handle_authorization_code_token(
         .into_response();
     }
 
-    // Validate redirect_uri if provided (required by spec if it was in auth request)
-    // Some OIDC clients don't send it for PKCE flows, so we make it optional
-    if let Some(req_redirect_uri) = req.redirect_uri {
-        if req_redirect_uri != auth_code.redirect_uri {
+    // Validate redirect_uri (REQUIRED by OAuth2 RFC 6749 section 4.1.3)
+    // "REQUIRED if the redirect_uri parameter was included in the authorization request"
+    let req_redirect_uri = match req.redirect_uri {
+        Some(uri) => uri,
+        None => {
             return Json(ErrorResponse {
-                error: "invalid_grant".to_string(),
-                error_description: "Redirect URI mismatch".to_string(),
+                error: "invalid_request".to_string(),
+                error_description: "Missing redirect_uri parameter (required by OAuth2 spec)".to_string(),
             })
-            .into_response();
+            .into_response()
         }
+    };
+
+    if req_redirect_uri != auth_code.redirect_uri {
+        return Json(ErrorResponse {
+            error: "invalid_grant".to_string(),
+            error_description: "Redirect URI mismatch".to_string(),
+        })
+        .into_response();
     }
 
     // Validace client credentials
