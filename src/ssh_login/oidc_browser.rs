@@ -14,6 +14,11 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tokio::sync::oneshot;
 
+use crate::oauth2::templates::callback_page;
+
+#[path = "../oauth2/templates.rs"]
+mod templates;
+
 #[derive(Clone)]
 struct CallbackState {
     tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<CallbackResult>>>>,
@@ -120,7 +125,8 @@ pub async fn browser_flow(
 
     // Wait for callback
     tracing::info!("Waiting for callback...");
-    let callback_result = match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+    let callback_result = match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await
+    {
         Ok(Ok(result)) => {
             tracing::info!("Callback received successfully");
             result
@@ -178,18 +184,31 @@ pub async fn browser_flow(
 async fn handle_callback(
     State(state): State<CallbackState>,
     Query(query): Query<CallbackQuery>,
-) -> Html<&'static str> {
+) -> Html<String> {
     if let Some(error) = query.error {
         let desc = query.error_description.unwrap_or_default();
         tracing::error!("OAuth error: {} - {}", error, desc);
-        return Html("<h1>❌ Authentication failed</h1><p>You can close this window.</p>");
+        // return Html(
+        //     "<h1>❌ Authentication failed</h1><p>You can close this window.</p>".to_string(),
+        // );
+
+        return callback_page(
+            false,
+            "Login",
+            "❌ Authentication failed! You can close this window.",
+        );
     }
 
     let code = match query.code {
         Some(c) => c,
         None => {
             tracing::error!("No code in callback");
-            return Html("<h1>❌ No authorization code received</h1>");
+            // return Html("<h1>❌ No authorization code received</h1>".to_string());
+            return callback_page(
+                false,
+                "Login",
+                "❌ No authorization code received! You can close this window.",
+            );
         }
     };
 
@@ -197,17 +216,25 @@ async fn handle_callback(
         Some(s) => s,
         None => {
             tracing::error!("No state in callback");
-            return Html("<h1>❌ No state parameter</h1>");
+            // return Html("<h1>❌ No state parameter</h1>".to_string());
+            return callback_page(
+                false,
+                "Login",
+                "❌ No state parameter! You can close this window.",
+            );
         }
     };
 
     // Send result back to main flow
     if let Some(tx) = state.tx.lock().await.take() {
         tracing::info!("Sending callback result to main flow");
-        if tx.send(CallbackResult {
-            code,
-            state: callback_state,
-        }).is_err() {
+        if tx
+            .send(CallbackResult {
+                code,
+                state: callback_state,
+            })
+            .is_err()
+        {
             tracing::error!("Failed to send callback result - receiver dropped");
         } else {
             tracing::info!("Callback result sent successfully");
@@ -216,5 +243,9 @@ async fn handle_callback(
         tracing::warn!("Callback handler already consumed");
     }
 
-    Html("<h1>✅ Authentication successful!</h1><p>You can close this window and return to the terminal.</p>")
+    callback_page(
+        true,
+        "Login",
+        "✓ Login successful! You can close this window.",
+    )
 }

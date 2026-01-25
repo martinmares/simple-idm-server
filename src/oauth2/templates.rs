@@ -1,4 +1,5 @@
 /// HTML templates for OAuth2 Authorization Code Flow
+use axum::response::Html;
 use std::collections::HashMap;
 
 /// Generate login page HTML
@@ -8,8 +9,14 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
     let state = params.get("state").map(|s| s.as_str()).unwrap_or("");
     let nonce = params.get("nonce").map(|s| s.as_str()).unwrap_or("");
     let scope = params.get("scope").map(|s| s.as_str()).unwrap_or("");
-    let code_challenge = params.get("code_challenge").map(|s| s.as_str()).unwrap_or("");
-    let code_challenge_method = params.get("code_challenge_method").map(|s| s.as_str()).unwrap_or("");
+    let code_challenge = params
+        .get("code_challenge")
+        .map(|s| s.as_str())
+        .unwrap_or("");
+    let code_challenge_method = params
+        .get("code_challenge_method")
+        .map(|s| s.as_str())
+        .unwrap_or("");
 
     let error_html = if let Some(err) = error {
         format!(
@@ -598,8 +605,7 @@ pub fn password_reset_page(token: &str, error: Option<&str>) -> String {
     </div>
 </body>
 </html>"#,
-        error_html,
-        token
+        error_html, token
     )
 }
 
@@ -754,7 +760,11 @@ pub fn password_reset_success_page() -> String {
 }
 
 /// Generate device verification form page HTML
-pub fn device_verify_page(user_code: Option<&str>, error: Option<&str>, success: Option<&str>) -> String {
+pub fn device_verify_page(
+    user_code: Option<&str>,
+    error: Option<&str>,
+    success: Option<&str>,
+) -> String {
     let error_html = if let Some(err) = error {
         format!(
             r#"<div class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
@@ -986,8 +996,151 @@ pub fn device_verify_page(user_code: Option<&str>, error: Option<&str>, success:
     </div>
 </body>
 </html>"#,
-        error_html,
-        success_html,
-        user_code_value
+        error_html, success_html, user_code_value
     )
+}
+
+/// Generate callback HTML
+/// This page will post a message to the opener window and close itself
+pub fn callback_page(success: bool, base_header: &str, detail: &str) -> Html<String> {
+    let (title, heading, box_classes, icon_svg) = if success {
+        (
+            "Login successful",
+            "Login successful!",
+            "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200",
+            r#"<svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.707a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 10-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
+               </svg>"#,
+        )
+    } else {
+        (
+            "Login failed",
+            "Login failed!",
+            "border-red-200 bg-red-50 text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200",
+            r#"<svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
+               </svg>"#,
+        )
+    };
+
+    // (Volitelné) velmi jednoduché HTML escaping, ať ti tam jednou nepřileze '<'
+    let detail = detail
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;");
+
+    Html(format!(
+        r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{title}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {{
+      darkMode: 'media',
+      theme: {{
+        extend: {{
+          fontFamily: {{
+            sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
+          }}
+        }}
+      }}
+    }}
+  </script>
+  <style>
+    :root {{
+      --bg-start: #f1f5f9;
+      --bg-mid: #e2e8f0;
+      --bg-end: #f1f5f9;
+      --streak-1: rgba(59, 130, 246, 0.25);
+      --streak-2: rgba(96, 165, 250, 0.35);
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg-start: #05080f;
+        --bg-mid: #080f1a;
+        --bg-end: #05080f;
+        --streak-1: rgba(84, 141, 214, 0.6);
+        --streak-2: rgba(120, 170, 235, 0.75);
+      }}
+    }}
+    .bg-shell {{
+      background: linear-gradient(135deg, var(--bg-start) 0%, var(--bg-mid) 50%, var(--bg-end) 100%);
+    }}
+    .bg-streak {{
+      position: absolute;
+      left: -30%;
+      top: -30%;
+      width: 200%;
+      height: 2px;
+      background: linear-gradient(90deg, transparent, var(--streak-1), var(--streak-2), transparent);
+      opacity: 0;
+      transform: rotate(35deg);
+      animation: streakMove 12s ease-in-out infinite;
+    }}
+    .bg-streak.streak-2 {{ animation-duration: 15s; animation-delay: 3s; height: 3px; }}
+    .bg-streak.streak-3 {{ animation-duration: 18s; animation-delay: 6s; height: 2px; }}
+    .bg-streak.streak-4 {{ animation-duration: 20s; animation-delay: 9s; height: 1px; }}
+    .bg-streak.streak-5 {{ animation-duration: 22s; animation-delay: 12s; height: 2px; }}
+    .bg-streak.streak-6 {{ animation-duration: 26s; animation-delay: 15s; height: 3px; }}
+    @keyframes streakMove {{
+      0% {{ transform: translate(-40%, -40%) rotate(35deg); opacity: 0; }}
+      8% {{ opacity: 0.9; }}
+      16% {{ opacity: 0; }}
+      100% {{ transform: translate(40%, 40%) rotate(35deg); opacity: 0; }}
+    }}
+  </style>
+</head>
+
+<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
+  <div class="absolute inset-0 -z-10 bg-shell"></div>
+  <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
+  <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
+  <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
+  <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
+  <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
+  <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
+
+  <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
+    <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
+      <div class="mb-6">
+        <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">{base_header}</p>
+        <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">{heading}</h1>
+        <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">{detail}</p>
+      </div>
+
+      <div class="rounded-xl border px-4 py-3 text-sm {box_classes}">
+        <div class="flex items-center gap-2">
+          {icon_svg}
+          <span>{detail}</span>
+        </div>
+      </div>
+
+      <div class="mt-6 flex flex-col gap-3">
+        <button type="button"
+          onclick="window.close();"
+          class="w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
+          Close window
+        </button>
+
+        <div class="text-center text-xs text-slate-500 dark:text-slate-400">
+          Protected by OAuth 2.0 Device Flow
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
+"#,
+        title = title,
+        base_header = base_header,
+        heading = heading,
+        detail = detail,
+        box_classes = box_classes,
+        icon_svg = icon_svg,
+    ))
 }
