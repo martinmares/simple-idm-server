@@ -1,25 +1,30 @@
 use anyhow::{anyhow, bail, Context, Result};
+use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
-use tabled::{settings::Style, Table, Tabled};
-use std::process::Command;
 use dirs::config_dir;
-use chrono::{DateTime, Utc, Duration};
-use tokio::sync::oneshot;
-use std::fs;
-use std::path::PathBuf;
-use std::collections::HashMap;
-use rand::Rng;
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreProviderMetadata},
     reqwest::async_http_client,
-    AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
-    PkceCodeVerifier, RedirectUrl, Scope,
+    AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
+    RedirectUrl, Scope,
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponseTrait};
 use qrcode::QrCode;
+use rand::Rng;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+// use simple_idm_server::oauth2::templates::callback_page;
+use std::collections::HashMap;
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+use tabled::{settings::Style, Table, Tabled};
+use tokio::sync::oneshot;
 
+use crate::templates::callback_page;
+
+#[path = "../oauth2/templates.rs"]
+mod templates;
 #[path = "../cli/tui.rs"]
 mod tui;
 
@@ -43,8 +48,7 @@ struct SessionsConfig {
 }
 
 fn sessions_file_path() -> Result<PathBuf> {
-    let config_dir = config_dir()
-        .ok_or_else(|| anyhow!("Could not determine config directory"))?;
+    let config_dir = config_dir().ok_or_else(|| anyhow!("Could not determine config directory"))?;
     Ok(config_dir.join("simple-idm-ctl").join("sessions.json"))
 }
 
@@ -112,7 +116,11 @@ fn is_session_valid(session: &Session) -> bool {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "simple-idm-ctl", version, about = "Admin CLI for simple-idm-server")]
+#[command(
+    name = "simple-idm-ctl",
+    version,
+    about = "Admin CLI for simple-idm-server"
+)]
 struct Cli {
     #[arg(long, global = true)]
     server: Option<String>,
@@ -496,8 +504,8 @@ struct OutputConfig {
 }
 
 fn generate_pkce_pair() -> (String, String) {
-    use sha2::{Sha256, Digest};
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use sha2::{Digest, Sha256};
 
     let code_verifier: String = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
@@ -512,8 +520,7 @@ fn generate_pkce_pair() -> (String, String) {
 }
 
 async fn discover_provider(base_url: &str, insecure: bool) -> Result<CoreProviderMetadata> {
-    let issuer_url = IssuerUrl::new(base_url.to_string())
-        .context("Invalid issuer URL")?;
+    let issuer_url = IssuerUrl::new(base_url.to_string()).context("Invalid issuer URL")?;
     if insecure {
         eprintln!("Warning: --insecure is not supported for OIDC discovery; proceeding with default TLS validation.");
     }
@@ -527,13 +534,11 @@ fn parse_raw_claims(id_token: &CoreIdToken) -> Result<HashMap<String, Value>> {
     if parts.len() != 3 {
         bail!("Invalid JWT format");
     }
-    let payload = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        parts[1],
-    )
-    .context("Failed to decode JWT payload")?;
-    let claims: HashMap<String, Value> = serde_json::from_slice(&payload)
-        .context("Failed to parse JWT claims")?;
+    let payload =
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, parts[1])
+            .context("Failed to decode JWT payload")?;
+    let claims: HashMap<String, Value> =
+        serde_json::from_slice(&payload).context("Failed to parse JWT claims")?;
     Ok(claims)
 }
 
@@ -554,9 +559,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match &cli.command {
-        Commands::Login { url, client, port, server, device } => {
+        Commands::Login {
+            url,
+            client,
+            port,
+            server,
+            device,
+        } => {
             if *device {
-                return handle_device_login(url, client, server, cli.insecure.unwrap_or(false)).await;
+                return handle_device_login(url, client, server, cli.insecure.unwrap_or(false))
+                    .await;
             }
             return handle_login(url, client, *port, server, cli.insecure.unwrap_or(false)).await;
         }
@@ -588,15 +600,19 @@ async fn main() -> Result<()> {
         Commands::UserGroups { command } => handle_user_groups(&http, output, command).await?,
         Commands::Tui => tui::run_tui(&http).await?,
         Commands::Ping => handle_ping(&http).await?,
-        Commands::Login { .. } | Commands::Logout { .. } | Commands::Sessions { .. } | Commands::Status => unreachable!(),
+        Commands::Login { .. }
+        | Commands::Logout { .. }
+        | Commands::Sessions { .. }
+        | Commands::Status => unreachable!(),
     }
 
     Ok(())
 }
 
 async fn resolve_auth(_cli: &Cli) -> Result<(String, String)> {
-    let mut session = get_active_session()?
-        .ok_or_else(|| anyhow!("Not logged in. Run 'simple-idm-ctl login --url <SERVER_URL>' first."))?;
+    let mut session = get_active_session()?.ok_or_else(|| {
+        anyhow!("Not logged in. Run 'simple-idm-ctl login --url <SERVER_URL>' first.")
+    })?;
 
     if !is_session_valid(&session) || (session.expires_at - Utc::now()).num_seconds() < 300 {
         let config = load_sessions()?;
@@ -607,13 +623,19 @@ async fn resolve_auth(_cli: &Cli) -> Result<(String, String)> {
     Ok((session.base_url.clone(), session.access_token))
 }
 
-async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &str, insecure: bool) -> Result<()> {
-    let provider_metadata = discover_provider(base_url, insecure).await
+async fn handle_login(
+    base_url: &str,
+    client_id: &str,
+    port: u16,
+    server_name: &str,
+    insecure: bool,
+) -> Result<()> {
+    let provider_metadata = discover_provider(base_url, insecure)
+        .await
         .context("Failed to discover OIDC provider metadata")?;
 
     let redirect_uri = format!("http://localhost:{}/callback", port);
-    let redirect_url = RedirectUrl::new(redirect_uri.clone())
-        .context("Invalid redirect URL")?;
+    let redirect_url = RedirectUrl::new(redirect_uri.clone()).context("Invalid redirect URL")?;
 
     let client = CoreClient::from_provider_metadata(
         provider_metadata,
@@ -623,9 +645,8 @@ async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &
     .set_redirect_uri(redirect_url);
 
     let (code_verifier, _code_challenge) = generate_pkce_pair();
-    let pkce_challenge = PkceCodeChallenge::from_code_verifier_sha256(
-        &PkceCodeVerifier::new(code_verifier.clone()),
-    );
+    let pkce_challenge =
+        PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(code_verifier.clone()));
 
     let (auth_url, csrf_state, nonce) = client
         .authorize_url(
@@ -645,20 +666,35 @@ async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &
 
     let callback_app = axum::Router::new().route(
         "/callback",
-        axum::routing::get(|axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>| async move {
-            let tx_clone = tx.clone();
-            if let (Some(code), Some(state)) = (params.get("code"), params.get("state")) {
-                if let Some(sender) = tx_clone.lock().await.take() {
-                    let _ = sender.send((code.clone(), state.clone()));
+        axum::routing::get(
+            |axum::extract::Query(params): axum::extract::Query<
+                std::collections::HashMap<String, String>,
+            >| async move {
+                let tx_clone = tx.clone();
+                if let (Some(code), Some(state)) = (params.get("code"), params.get("state")) {
+                    if let Some(sender) = tx_clone.lock().await.take() {
+                        let _ = sender.send((code.clone(), state.clone()));
+                    }
+                    //return "✓ Login successful! You can close this window.";
+                    return callback_page(
+                        true,
+                        "Login",
+                        "✓ Login successful! You can close this window.",
+                    );
                 }
-                return "✓ Login successful! You can close this window.";
-            }
-            "✗ Login failed: Missing authorization code or state."
-        }),
+                // "✗ Login failed: Missing authorization code or state."
+                callback_page(
+                    false,
+                    "Login",
+                    "✗ Login failed! Missing authorization code or state.",
+                )
+            },
+        ),
     );
 
     let addr = format!("127.0.0.1:{}", port);
-    let listener = tokio::net::TcpListener::bind(&addr).await
+    let listener = tokio::net::TcpListener::bind(&addr)
+        .await
         .context(format!("Failed to bind to {}. Try different --port", addr))?;
 
     tokio::spawn(async move {
@@ -672,10 +708,8 @@ async fn handle_login(base_url: &str, client_id: &str, port: u16, server_name: &
         eprintln!("Could not open browser: {}", e);
     }
 
-    let (code, returned_state) = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        rx
-    ).await
+    let (code, returned_state) = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
+        .await
         .context("Login timeout after 2 minutes")??;
 
     if returned_state != *csrf_state.secret() {
@@ -700,7 +734,12 @@ struct UserinfoResponse {
     groups: Option<Vec<String>>,
 }
 
-async fn handle_device_login(base_url: &str, client_id: &str, server_name: &str, insecure: bool) -> Result<()> {
+async fn handle_device_login(
+    base_url: &str,
+    client_id: &str,
+    server_name: &str,
+    insecure: bool,
+) -> Result<()> {
     use openidconnect::core::{
         CoreAuthDisplay, CoreClaimName, CoreClaimType, CoreClient, CoreClientAuthMethod,
         CoreDeviceAuthorizationResponse, CoreGrantType, CoreJsonWebKey, CoreJsonWebKeyType,
@@ -708,8 +747,8 @@ async fn handle_device_login(base_url: &str, client_id: &str, server_name: &str,
         CoreJwsSigningAlgorithm, CoreResponseMode, CoreResponseType, CoreSubjectIdentifierType,
     };
     use openidconnect::{
-        AdditionalProviderMetadata, ClientId, DeviceAuthorizationUrl, IssuerUrl,
-        ProviderMetadata, Scope, reqwest::async_http_client,
+        reqwest::async_http_client, AdditionalProviderMetadata, ClientId, DeviceAuthorizationUrl,
+        IssuerUrl, ProviderMetadata, Scope,
     };
     use serde::{Deserialize, Serialize};
 
@@ -739,8 +778,7 @@ async fn handle_device_login(base_url: &str, client_id: &str, server_name: &str,
     >;
 
     // Discover OIDC metadata
-    let issuer_url = IssuerUrl::new(base_url.to_string())
-        .context("Invalid issuer URL")?;
+    let issuer_url = IssuerUrl::new(base_url.to_string()).context("Invalid issuer URL")?;
 
     let metadata = DeviceProviderMetadata::discover_async(issuer_url, async_http_client)
         .await
@@ -791,7 +829,8 @@ async fn handle_device_login(base_url: &str, client_id: &str, server_name: &str,
         base_url,
         server_name,
         token_response.access_token().secret().to_string(),
-        token_response.expires_in()
+        token_response
+            .expires_in()
             .map(|d| d.as_secs() as i64)
             .unwrap_or(3600),
         insecure,
@@ -853,9 +892,7 @@ fn print_qr_code(url: &str) {
     let Ok(code) = QrCode::new(url.as_bytes()) else {
         return;
     };
-    let qr = code
-        .render::<qrcode::render::unicode::Dense1x2>()
-        .build();
+    let qr = code.render::<qrcode::render::unicode::Dense1x2>().build();
     println!("\n{}\n", qr);
 }
 
@@ -884,13 +921,14 @@ async fn exchange_code_for_tokens(
         .context("No ID token in response")?;
 
     let claims = id_token
-        .claims(&client.id_token_verifier(), move |nonce_opt: Option<&Nonce>| {
-            match nonce_opt {
+        .claims(
+            &client.id_token_verifier(),
+            move |nonce_opt: Option<&Nonce>| match nonce_opt {
                 Some(value) if value.secret() == nonce.secret() => Ok(()),
                 Some(_) => Err("Nonce mismatch".to_string()),
                 None => Err("No nonce in token".to_string()),
-            }
-        })
+            },
+        )
         .context("Failed to verify ID token")?;
 
     let email = claims
@@ -938,7 +976,11 @@ async fn exchange_code_for_tokens(
     Ok(())
 }
 
-async fn handle_users(http: &HttpClient, output: OutputConfig, command: UsersCommand) -> Result<()> {
+async fn handle_users(
+    http: &HttpClient,
+    output: OutputConfig,
+    command: UsersCommand,
+) -> Result<()> {
     match command {
         UsersCommand::List { page, limit } => {
             let path = append_pagination("/admin/users", page, limit);
@@ -976,7 +1018,9 @@ async fn handle_users(http: &HttpClient, output: OutputConfig, command: UsersCom
                 "password": password,
                 "is_active": is_active,
             });
-            let body = http.put_json(&format!("/admin/users/{id}"), payload).await?;
+            let body = http
+                .put_json(&format!("/admin/users/{id}"), payload)
+                .await?;
             print_table_item::<UserRow>(output, &body)?;
         }
         UsersCommand::Delete { id } => {
@@ -984,7 +1028,9 @@ async fn handle_users(http: &HttpClient, output: OutputConfig, command: UsersCom
             print_message(output, &body)?;
         }
         UsersCommand::ResetPassword { id, open } => {
-            let body = http.post_empty(&format!("/admin/users/{id}/password-reset")).await?;
+            let body = http
+                .post_empty(&format!("/admin/users/{id}/password-reset"))
+                .await?;
             let reset = parse_reset_row(&body)?;
             print_reset_output(output, &reset, &body)?;
             if open {
@@ -996,7 +1042,11 @@ async fn handle_users(http: &HttpClient, output: OutputConfig, command: UsersCom
     Ok(())
 }
 
-async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsCommand) -> Result<()> {
+async fn handle_groups(
+    http: &HttpClient,
+    output: OutputConfig,
+    command: GroupsCommand,
+) -> Result<()> {
     match command {
         GroupsCommand::List { page, limit } => {
             let path = append_pagination("/admin/groups", page, limit);
@@ -1005,7 +1055,11 @@ async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsC
                 serde_json::from_str(&body).context("Failed to parse response")?;
             print_table_rows_vec(output, rows)?;
         }
-        GroupsCommand::Create { name, description, is_virtual } => {
+        GroupsCommand::Create {
+            name,
+            description,
+            is_virtual,
+        } => {
             let payload = serde_json::json!({
                 "name": name,
                 "description": description,
@@ -1014,7 +1068,12 @@ async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsC
             let body = http.post_json("/admin/groups", payload).await?;
             print_table_item::<GroupRow>(output, &body)?;
         }
-        GroupsCommand::Update { id, name, description, is_virtual } => {
+        GroupsCommand::Update {
+            id,
+            name,
+            description,
+            is_virtual,
+        } => {
             if name.is_none() && description.is_none() && is_virtual.is_none() {
                 bail!("At least one field must be provided for update.");
             }
@@ -1023,7 +1082,9 @@ async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsC
                 "description": description,
                 "is_virtual": is_virtual,
             });
-            let body = http.put_json(&format!("/admin/groups/{id}"), payload).await?;
+            let body = http
+                .put_json(&format!("/admin/groups/{id}"), payload)
+                .await?;
             print_table_item::<GroupRow>(output, &body)?;
         }
         GroupsCommand::Delete { id } => {
@@ -1038,14 +1099,21 @@ async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsC
             let payload = serde_json::json!({
                 "child_group_id": child_id,
             });
-            let body = http.post_json(&format!("/admin/groups/{}/children", parent_id), payload).await?;
+            let body = http
+                .post_json(&format!("/admin/groups/{}/children", parent_id), payload)
+                .await?;
             print_message(output, &body)?;
         }
         GroupsCommand::RemoveChild { parent, child } => {
             let parent_id = resolve_group_id(http, &parent).await?;
             let child_id = resolve_group_id(http, &child).await?;
 
-            let body = http.delete(&format!("/admin/groups/{}/children/{}", parent_id, child_id)).await?;
+            let body = http
+                .delete(&format!(
+                    "/admin/groups/{}/children/{}",
+                    parent_id, child_id
+                ))
+                .await?;
             print_message(output, &body)?;
         }
         GroupsCommand::ListChildren { parent, expand } => {
@@ -1056,7 +1124,8 @@ async fn handle_groups(http: &HttpClient, output: OutputConfig, command: GroupsC
                 format!("/admin/groups/{}/children", parent_id)
             };
             let body = http.get(&path).await?;
-            let rows: Vec<GroupRow> = serde_json::from_str(&body).context("Failed to parse child groups")?;
+            let rows: Vec<GroupRow> =
+                serde_json::from_str(&body).context("Failed to parse child groups")?;
             print_table_rows_vec(output, rows)?;
         }
     }
@@ -1170,7 +1239,9 @@ async fn handle_clients(
                 "include_claim_maps": include_claim_maps,
                 "ignore_virtual_groups": ignore_virtual_groups,
             });
-            let body = http.put_json(&format!("/admin/oauth-clients/{id}"), payload).await?;
+            let body = http
+                .put_json(&format!("/admin/oauth-clients/{id}"), payload)
+                .await?;
             print_client_item(output, &body)?;
         }
         ClientsCommand::Delete { id } => {
@@ -1337,7 +1408,16 @@ fn handle_sessions(command: &SessionsCommand) -> Result<()> {
         SessionsCommand::Use { server } => {
             let mut config = load_sessions()?;
             if !config.servers.contains_key(server) {
-                bail!("Server '{}' not found. Available servers: {}", server, config.servers.keys().map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
+                bail!(
+                    "Server '{}' not found. Available servers: {}",
+                    server,
+                    config
+                        .servers
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
             config.active = server.clone();
             save_sessions(&config)?;
@@ -1349,17 +1429,33 @@ fn handle_sessions(command: &SessionsCommand) -> Result<()> {
 
 fn handle_status() -> Result<()> {
     let config = load_sessions()?;
-    let session = config.servers.get(&config.active)
+    let session = config
+        .servers
+        .get(&config.active)
         .ok_or_else(|| anyhow!("Not logged in"))?;
 
     let valid = is_session_valid(session);
     let expires_in = (session.expires_at - Utc::now()).num_seconds();
 
-    println!("Status: {}", if valid { "✓ Logged in" } else { "✗ Token expired" });
+    println!(
+        "Status: {}",
+        if valid {
+            "✓ Logged in"
+        } else {
+            "✗ Token expired"
+        }
+    );
     println!("Active server: {}", config.active);
     println!("Server URL: {}", session.base_url);
-    println!("Token expires in: {} seconds ({} minutes)", expires_in, expires_in / 60);
-    println!("Session created: {}", session.created_at.format("%Y-%m-%d %H:%M:%S"));
+    println!(
+        "Token expires in: {} seconds ({} minutes)",
+        expires_in,
+        expires_in / 60
+    );
+    println!(
+        "Session created: {}",
+        session.created_at.format("%Y-%m-%d %H:%M:%S")
+    );
 
     if !valid {
         println!("\nToken expired. Run 'simple-idm-ctl login' to re-authenticate.");
@@ -1370,17 +1466,14 @@ fn handle_status() -> Result<()> {
 
 async fn refresh_session_async(session: Session) -> Result<Session> {
     use openidconnect::core::{CoreClient, CoreProviderMetadata};
-    use openidconnect::{
-        ClientId, IssuerUrl, RefreshToken, reqwest::async_http_client,
-    };
+    use openidconnect::{reqwest::async_http_client, ClientId, IssuerUrl, RefreshToken};
 
     if session.refresh_token.trim().is_empty() {
         bail!("No refresh token available. Please login again with 'simple-idm-ctl login'");
     }
 
     // Discover OIDC metadata
-    let issuer_url = IssuerUrl::new(session.base_url.clone())
-        .context("Invalid issuer URL")?;
+    let issuer_url = IssuerUrl::new(session.base_url.clone()).context("Invalid issuer URL")?;
 
     let metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client)
         .await
@@ -1406,11 +1499,13 @@ async fn refresh_session_async(session: Session) -> Result<Session> {
             .refresh_token()
             .map(|t| t.secret().to_string())
             .unwrap_or(session.refresh_token),
-        expires_at: Utc::now() + Duration::seconds(
-            token_response.expires_in()
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(3600)
-        ),
+        expires_at: Utc::now()
+            + Duration::seconds(
+                token_response
+                    .expires_in()
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(3600),
+            ),
         base_url: session.base_url,
         created_at: session.created_at,
         user_email: session.user_email,
@@ -1608,7 +1703,10 @@ fn print_clients_output(output: OutputConfig, rows: Vec<ClientRow>) -> Result<()
                     KeyValueRow::new("is_active", client.is_active.to_string()),
                     KeyValueRow::new("groups_claim_mode", client.groups_claim_mode),
                     KeyValueRow::new("include_claim_maps", client.include_claim_maps.to_string()),
-                    KeyValueRow::new("ignore_virtual_groups", client.ignore_virtual_groups.to_string()),
+                    KeyValueRow::new(
+                        "ignore_virtual_groups",
+                        client.ignore_virtual_groups.to_string(),
+                    ),
                 ];
                 let mut table = Table::new(rows);
                 apply_style(&mut table, output.style);
@@ -1626,7 +1724,8 @@ fn print_client_item(output: OutputConfig, body: &str) -> Result<()> {
     match output.format {
         OutputFormat::Json => println!("{}", body),
         OutputFormat::Table => {
-            let client: ClientRow = serde_json::from_str(body).context("Failed to parse response")?;
+            let client: ClientRow =
+                serde_json::from_str(body).context("Failed to parse response")?;
             let rows = vec![
                 KeyValueRow::new("id", client.id),
                 KeyValueRow::new("client_id", client.client_id),
@@ -1637,7 +1736,10 @@ fn print_client_item(output: OutputConfig, body: &str) -> Result<()> {
                 KeyValueRow::new("is_active", client.is_active.to_string()),
                 KeyValueRow::new("groups_claim_mode", client.groups_claim_mode),
                 KeyValueRow::new("include_claim_maps", client.include_claim_maps.to_string()),
-                KeyValueRow::new("ignore_virtual_groups", client.ignore_virtual_groups.to_string()),
+                KeyValueRow::new(
+                    "ignore_virtual_groups",
+                    client.ignore_virtual_groups.to_string(),
+                ),
             ];
             let mut table = Table::new(rows);
             apply_style(&mut table, output.style);
@@ -1682,11 +1784,13 @@ impl HttpClient {
     }
 
     pub(crate) async fn get(&self, path: &str) -> Result<String> {
-        self.request_with_auth(self.client.get(self.url(path))).await
+        self.request_with_auth(self.client.get(self.url(path)))
+            .await
     }
 
     pub(crate) async fn delete(&self, path: &str) -> Result<String> {
-        self.request_with_auth(self.client.delete(self.url(path))).await
+        self.request_with_auth(self.client.delete(self.url(path)))
+            .await
     }
 
     pub(crate) async fn post_json<T: Serialize>(&self, path: &str, body: T) -> Result<String> {
@@ -1700,7 +1804,8 @@ impl HttpClient {
     }
 
     pub(crate) async fn post_empty(&self, path: &str) -> Result<String> {
-        self.request_with_auth(self.client.post(self.url(path))).await
+        self.request_with_auth(self.client.post(self.url(path)))
+            .await
     }
 
     async fn request_with_auth(&self, req: reqwest::RequestBuilder) -> Result<String> {
@@ -1731,8 +1836,7 @@ impl HttpClient {
 /// Lookup user UUID by username
 async fn lookup_user_id(http: &HttpClient, username: &str) -> Result<String> {
     let body = http.get("/admin/users?page=1&limit=1000").await?;
-    let users: Vec<UserRow> =
-        serde_json::from_str(&body).context("Failed to parse users list")?;
+    let users: Vec<UserRow> = serde_json::from_str(&body).context("Failed to parse users list")?;
 
     users
         .iter()
