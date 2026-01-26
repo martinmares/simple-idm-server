@@ -119,3 +119,13 @@ pub struct AuthenticationSession {
     pub created_at: DateTime<Utc>,
     pub last_used_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct UserGroupPattern {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub pattern: String,
+    pub is_include: bool,
+    pub priority: i32,
+    pub created_at: DateTime<Utc>,
+}

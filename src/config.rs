@@ -9,6 +9,7 @@ pub struct Config {
     pub rate_limit: RateLimitConfig,
     pub admin: AdminConfig,
     pub device_flow: DeviceFlowConfig,
+    pub group_patterns: GroupPatternsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,6 +56,11 @@ pub struct DeviceFlowConfig {
     pub user_code_format: String,
     pub cleanup_interval_seconds: u64,
     pub max_verification_attempts: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct GroupPatternsConfig {
+    pub sync_interval_seconds: u64,
 }
 
 impl Config {
@@ -134,6 +140,11 @@ impl Config {
             .parse()
             .unwrap_or(5);
 
+        let group_patterns_sync_interval = env::var("GROUP_PATTERNS_SYNC_INTERVAL_SECONDS")
+            .unwrap_or_else(|_| "300".to_string())
+            .parse()
+            .unwrap_or(300); // Default 5 minutes
+
         Ok(Config {
             server: ServerConfig {
                 host: server_host,
@@ -166,6 +177,9 @@ impl Config {
                 user_code_format: device_user_code_format,
                 cleanup_interval_seconds: device_cleanup_interval,
                 max_verification_attempts: device_max_attempts,
+            },
+            group_patterns: GroupPatternsConfig {
+                sync_interval_seconds: group_patterns_sync_interval,
             },
         })
     }

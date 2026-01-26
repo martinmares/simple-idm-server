@@ -2,6 +2,7 @@ mod admin;
 mod auth;
 mod config;
 mod db;
+mod group_patterns;
 mod jwks;
 mod oauth2;
 mod oidc;
@@ -126,6 +127,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    let group_patterns_sync_interval = config.group_patterns.sync_interval_seconds;
+    if group_patterns_sync_interval > 0 {
+        let sync_pool = db_pool.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                "Group patterns sync scheduler enabled (interval {}s)",
+                group_patterns_sync_interval
+            );
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(group_patterns_sync_interval));
+            loop {
+                interval.tick().await;
+                tracing::debug!("Running group patterns sync");
+                group_patterns::evaluate_and_sync_patterns(&sync_pool).await;
+            }
+        });
+    }
+
     // Vytvoř Admin auth state
     let admin_auth = admin::AdminAuth::new(&config, jwt_service.clone(), db_pool.clone());
 
@@ -168,6 +187,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             delete(admin::handlers::remove_user_from_group),
         )
         .route("/admin/user-groups", get(admin::handlers::list_user_groups))
+        // User Group Patterns management
+        .route(
+            "/admin/users/{id}/group-patterns",
+            post(admin::handlers::create_user_group_pattern),
+        )
+        .route(
+            "/admin/users/{id}/group-patterns",
+            get(admin::handlers::list_user_group_patterns),
+        )
+        .route(
+            "/admin/users/{user_id}/group-patterns/{pattern_id}",
+            put(admin::handlers::update_user_group_pattern),
+        )
+        .route(
+            "/admin/users/{user_id}/group-patterns/{pattern_id}",
+            delete(admin::handlers::delete_user_group_pattern),
+        )
         // OAuth client management
         .route(
             "/admin/oauth-clients",
