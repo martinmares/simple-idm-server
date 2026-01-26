@@ -51,9 +51,9 @@ pub fn evaluate_patterns(
     let mut groups_to_include: HashSet<Uuid> = HashSet::new();
     let mut groups_to_exclude: HashSet<Uuid> = HashSet::new();
 
-    // Sort patterns by priority (highest first)
+    // Sort patterns by priority (lowest number = highest priority)
     let mut sorted_patterns = patterns.to_vec();
-    sorted_patterns.sort_by(|a, b| b.priority.cmp(&a.priority));
+    sorted_patterns.sort_by(|a, b| a.priority.cmp(&b.priority));
 
     // For each group, find the first matching pattern (highest priority)
     for group in all_groups {
@@ -131,7 +131,7 @@ pub async fn evaluate_and_sync_patterns(pool: &DbPool) {
             SELECT id, user_id, pattern, is_include, priority, created_at
             FROM user_group_patterns
             WHERE user_id = $1
-            ORDER BY priority DESC
+            ORDER BY priority ASC
             "#,
             user_id
         )
