@@ -51,6 +51,8 @@ enum Mode {
     ClaimEditor,
     ClaimEntry,
     ClaimValueEditor,
+    ArrayEditor,
+    ScopeSelector,
 }
 
 #[derive(Clone, Debug)]
@@ -237,6 +239,8 @@ struct App {
     claim_editor: Option<ClaimEditorState>,
     claim_entry: Option<ClaimEntryState>,
     claim_value_editor: Option<ClaimValueEditorState>,
+    array_editor: Option<ArrayEditorState>,
+    scope_selector: Option<ScopeSelectorState>,
     pending_group_move: Option<GroupMoveRequest>,
     filter: Option<String>,
     filter_active: bool,
@@ -268,6 +272,8 @@ impl App {
             claim_editor: None,
             claim_entry: None,
             claim_value_editor: None,
+            array_editor: None,
+            scope_selector: None,
             pending_group_move: None,
             filter: None,
             filter_active: false,
@@ -747,6 +753,31 @@ struct ClaimValueEditorState {
 }
 
 #[derive(Clone, Debug)]
+struct ArrayEditorState {
+    title: String,
+    field_name: String,
+    values: Vec<Input>,
+    index: usize,
+    editing: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ScopeSelectorState {
+    standard_scopes: Vec<(String, bool)>, // (scope name, selected)
+    custom_scopes: Vec<String>,
+    custom_input: Input,
+    index: usize,
+    mode: ScopeSelectorMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScopeSelectorMode {
+    SelectStandard,
+    AddCustom,
+}
+
+#[derive(Clone, Debug)]
 struct GroupMoveRequest {
     child_id: String,
     new_parent_id: Option<String>,
@@ -866,6 +897,47 @@ async fn event_loop(
             let handled = handle_claim_entry_event(app, event, http).await?;
             if handled == ClaimEntryResult::Applied || handled == ClaimEntryResult::Cancelled {
                 app.mode = Mode::ClaimEditor;
+            }
+            continue;
+        }
+        if app.mode == Mode::ArrayEditor {
+            let handled = handle_array_editor_event(app, event)?;
+            if handled == ArrayEditorResult::Applied {
+                if let (Some(form), Some(editor)) = (app.form.as_mut(), app.array_editor.as_ref()) {
+                    if let Some(field) = form.fields.iter_mut().find(|f| f.label == editor.field_name) {
+                        let values: Vec<String> = editor.values.iter().map(|i| i.value().to_string()).collect();
+                        field.input = input_with_value(values.join(", "));
+                    }
+                }
+                app.array_editor = None;
+                app.mode = Mode::Form;
+            } else if handled == ArrayEditorResult::Cancelled {
+                app.array_editor = None;
+                app.mode = Mode::Form;
+            }
+            continue;
+        }
+        if app.mode == Mode::ScopeSelector {
+            let handled = handle_scope_selector_event(app, event)?;
+            if handled == ScopeSelectorResult::Applied {
+                if let (Some(form), Some(selector)) = (app.form.as_mut(), app.scope_selector.as_ref()) {
+                    let mut scopes: Vec<String> = selector
+                        .standard_scopes
+                        .iter()
+                        .filter(|(_, selected)| *selected)
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    scopes.extend(selector.custom_scopes.iter().cloned());
+
+                    if let Some(field) = form.fields.iter_mut().find(|f| f.label == "scope") {
+                        field.input = input_with_value(scopes.join(" "));
+                    }
+                }
+                app.scope_selector = None;
+                app.mode = Mode::Form;
+            } else if handled == ScopeSelectorResult::Cancelled {
+                app.scope_selector = None;
+                app.mode = Mode::Form;
             }
             continue;
         }
@@ -1597,6 +1669,157 @@ fn handle_claim_value_editor_event(
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArrayEditorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+fn handle_array_editor_event(app: &mut App, event: Event) -> Result<ArrayEditorResult> {
+    let Some(editor) = app.array_editor.as_mut() else {
+        return Ok(ArrayEditorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ArrayEditorResult::Continue);
+    };
+
+    if editor.editing {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                editor.editing = false;
+                return Ok(ArrayEditorResult::Continue);
+            }
+            _ => {
+                if let Some(input) = editor.values.get_mut(editor.index) {
+                    input.handle_event(&event);
+                }
+                return Ok(ArrayEditorResult::Continue);
+            }
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => Ok(ArrayEditorResult::Cancelled),
+        KeyCode::Up => {
+            editor.index = editor.index.saturating_sub(1);
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Down => {
+            if !editor.values.is_empty() {
+                editor.index = (editor.index + 1).min(editor.values.len() - 1);
+            }
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Char('a') => {
+            let insert_at = editor.index + 1;
+            editor.values.insert(insert_at, Input::default());
+            editor.index = insert_at;
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            if editor.values.len() > 1 {
+                editor.values.remove(editor.index);
+                if editor.index >= editor.values.len() {
+                    editor.index = editor.values.len() - 1;
+                }
+            } else if let Some(input) = editor.values.first_mut() {
+                *input = Input::default();
+            }
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            if editor.values.is_empty() {
+                editor.values.push(Input::default());
+            }
+            editor.editing = true;
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Enter => Ok(ArrayEditorResult::Applied),
+        _ => Ok(ArrayEditorResult::Continue),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScopeSelectorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+fn handle_scope_selector_event(app: &mut App, event: Event) -> Result<ScopeSelectorResult> {
+    let Some(selector) = app.scope_selector.as_mut() else {
+        return Ok(ScopeSelectorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ScopeSelectorResult::Continue);
+    };
+
+    match selector.mode {
+        ScopeSelectorMode::SelectStandard => match key.code {
+            KeyCode::Esc => Ok(ScopeSelectorResult::Cancelled),
+            KeyCode::Up => {
+                selector.index = selector.index.saturating_sub(1);
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Down => {
+                let max_index = selector.standard_scopes.len() + selector.custom_scopes.len();
+                if selector.index + 1 < max_index {
+                    selector.index += 1;
+                }
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Char(' ') => {
+                if selector.index < selector.standard_scopes.len() {
+                    selector.standard_scopes[selector.index].1 =
+                        !selector.standard_scopes[selector.index].1;
+                }
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Char('a') => {
+                selector.mode = ScopeSelectorMode::AddCustom;
+                selector.custom_input = Input::default();
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Char('d') => {
+                let standard_count = selector.standard_scopes.len();
+                if selector.index >= standard_count {
+                    let custom_index = selector.index - standard_count;
+                    if custom_index < selector.custom_scopes.len() {
+                        selector.custom_scopes.remove(custom_index);
+                        if selector.index > 0 {
+                            selector.index -= 1;
+                        }
+                    }
+                }
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Enter => Ok(ScopeSelectorResult::Applied),
+            _ => Ok(ScopeSelectorResult::Continue),
+        },
+        ScopeSelectorMode::AddCustom => match key.code {
+            KeyCode::Esc => {
+                selector.mode = ScopeSelectorMode::SelectStandard;
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Enter => {
+                let value = selector.custom_input.value().trim().to_string();
+                if !value.is_empty() && !selector.custom_scopes.contains(&value) {
+                    selector.custom_scopes.push(value);
+                }
+                selector.mode = ScopeSelectorMode::SelectStandard;
+                Ok(ScopeSelectorResult::Continue)
+            }
+            _ => {
+                selector.custom_input.handle_event(&event);
+                Ok(ScopeSelectorResult::Continue)
+            }
+        },
+    }
+}
+
 fn handle_password_gen_event(app: &mut App, event: Event) -> Result<PasswordGenResult> {
     let Some(gen) = app.password_gen.as_mut() else {
         return Ok(PasswordGenResult::Cancelled);
@@ -2196,9 +2419,9 @@ fn open_create_form(app: &mut App) -> Result<()> {
                 FormField::new("client_id", String::new()),
                 FormField::secret("client_secret", String::new()).optional(),
                 FormField::new("name", String::new()),
-                FormField::new("redirect_uris", String::new()).optional(),
+                FormField::new("redirect_uris", String::new()).optional().read_only(),
                 FormField::new("grant_types", String::new()),
-                FormField::new("scope", String::new()),
+                FormField::new("scope", String::new()).read_only(),
                 FormField::boolean("is_active", true),
                 FormField::boolean("is_public", false),
                 FormField::new("groups_claim_mode", "effective".to_string()),
@@ -2322,9 +2545,9 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 fields: vec![
                     FormField::new("name", client.name.clone()).optional(),
                     FormField::secret("client_secret", String::new()).optional(),
-                    FormField::new("redirect_uris", client.redirect_uris.join(", ")).optional(),
+                    FormField::new("redirect_uris", client.redirect_uris.join(", ")).optional().read_only(),
                     FormField::new("grant_types", client.grant_types.join(", ")).optional(),
-                    FormField::new("scope", client.scope.clone()).optional(),
+                    FormField::new("scope", client.scope.clone()).optional().read_only(),
                     FormField::boolean("is_active", client.is_active),
                     FormField::boolean("is_public", client.is_public).optional(),
                     FormField::new("groups_claim_mode", client.groups_claim_mode.clone())
@@ -2653,6 +2876,68 @@ async fn handle_form_event(
                 let current = form.fields[form.index].value();
                 app.picker = Some(PickerState::new_groups_claim_mode(&current));
                 app.mode = Mode::Picker;
+                return Ok(FormResult::Continue);
+            }
+        }
+        KeyCode::Char('u') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && label == Some("redirect_uris") {
+                // Open array editor for redirect_uris
+                let current_value = form.fields[form.index].value();
+                let values: Vec<Input> = if current_value.is_empty() {
+                    vec![]
+                } else {
+                    current_value
+                        .split(',')
+                        .map(|s| input_with_value(s.trim().to_string()))
+                        .collect()
+                };
+                app.array_editor = Some(ArrayEditorState {
+                    title: "Edit Redirect URIs".to_string(),
+                    field_name: "redirect_uris".to_string(),
+                    values,
+                    index: 0,
+                    editing: false,
+                    error: None,
+                });
+                app.mode = Mode::ArrayEditor;
+                return Ok(FormResult::Continue);
+            }
+        }
+        KeyCode::Char('o') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && label == Some("scope") {
+                // Open scope selector
+                let current_value = form.fields[form.index].value();
+                let current_scopes: HashSet<String> = current_value
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+
+                let standard = vec![
+                    "openid".to_string(),
+                    "profile".to_string(),
+                    "email".to_string(),
+                    "offline_access".to_string(),
+                ];
+
+                let standard_scopes: Vec<(String, bool)> = standard
+                    .iter()
+                    .map(|s| (s.clone(), current_scopes.contains(s)))
+                    .collect();
+
+                let custom_scopes: Vec<String> = current_scopes
+                    .iter()
+                    .filter(|s| !standard.contains(s))
+                    .cloned()
+                    .collect();
+
+                app.scope_selector = Some(ScopeSelectorState {
+                    standard_scopes,
+                    custom_scopes,
+                    custom_input: Input::default(),
+                    index: 0,
+                    mode: ScopeSelectorMode::SelectStandard,
+                });
+                app.mode = Mode::ScopeSelector;
                 return Ok(FormResult::Continue);
             }
         }
@@ -3525,6 +3810,12 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     if let Some(editor) = &app.claim_value_editor {
         draw_claim_value_editor(frame, size, editor, &mut cursor_visible);
     }
+    if let Some(editor) = &app.array_editor {
+        draw_array_editor(frame, size, editor, &mut cursor_visible);
+    }
+    if let Some(selector) = &app.scope_selector {
+        draw_scope_selector(frame, size, selector, &mut cursor_visible);
+    }
     if let Some(picker) = &app.picker {
         draw_picker(frame, size, picker);
     }
@@ -3991,9 +4282,21 @@ fn draw_form(
                 Style::default().fg(Color::DarkGray),
             ));
         }
+        if field.label == "redirect_uris" {
+            spans.push(Span::styled(
+                " (Ctrl+U edit)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
         if field.label == "grant_types" {
             spans.push(Span::styled(
                 " (Ctrl+G picker)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "scope" {
+            spans.push(Span::styled(
+                " (Ctrl+O edit)",
                 Style::default().fg(Color::DarkGray),
             ));
         }
@@ -5149,4 +5452,177 @@ fn format_other_label(label: &str, id: &str) -> String {
 
 fn mark(value: bool) -> char {
     if value { 'x' } else { ' ' }
+}
+
+fn draw_array_editor(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &ArrayEditorState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(editor.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let rows = editor
+        .values
+        .iter()
+        .enumerate()
+        .map(|(idx, input)| {
+            let label = format!("[{}]", idx + 1);
+            Row::new(vec![label, input.value().to_string()])
+        })
+        .collect::<Vec<_>>();
+    let mut state = TableState::default();
+    if !editor.values.is_empty() {
+        state.select(Some(editor.index));
+    }
+    let table = Table::new(
+        rows,
+        vec![Constraint::Length(6), Constraint::Percentage(94)],
+    )
+    .header(Row::new(vec!["#", "URI"]).style(Style::default().add_modifier(Modifier::BOLD)))
+    .highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(">> ");
+    frame.render_stateful_widget(table, inner[0], &mut state);
+
+    let error_lines = editor
+        .error
+        .as_ref()
+        .map(|err| {
+            err.lines()
+                .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Red))))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![Line::from("")]);
+    let error = Paragraph::new(error_lines).wrap(Wrap { trim: true });
+    frame.render_widget(error, inner[1]);
+
+    let footer = if editor.editing {
+        "Enter done | Esc cancel edit"
+    } else {
+        "a add | d delete | e edit | ↑↓ navigate | Enter apply | Esc cancel"
+    };
+    let footer = Paragraph::new(footer).alignment(Alignment::Center);
+    frame.render_widget(footer, inner[2]);
+
+    if editor.editing {
+        if let Some(input) = editor.values.get(editor.index) {
+            let cursor_x = inner[0].x + 3 + 6 + 1 + input.cursor() as u16;
+            let cursor_y = inner[0].y + editor.index as u16 + 1;
+            frame.set_cursor(cursor_x, cursor_y);
+            *cursor_visible = true;
+        }
+    }
+}
+
+fn draw_scope_selector(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    selector: &ScopeSelectorState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(60, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Select Scopes");
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    match selector.mode {
+        ScopeSelectorMode::SelectStandard => {
+            // Display standard and custom scopes
+            let mut rows = Vec::new();
+
+            // Standard scopes
+            for (scope, selected) in &selector.standard_scopes {
+                rows.push(Row::new(vec![
+                    format!("[{}]", mark(*selected)),
+                    scope.clone(),
+                    "standard".to_string(),
+                ]));
+            }
+
+            // Custom scopes
+            for scope in &selector.custom_scopes {
+                rows.push(Row::new(vec![
+                    "[x]".to_string(),
+                    scope.clone(),
+                    "custom".to_string(),
+                ]));
+            }
+
+            let mut state = TableState::default();
+            state.select(Some(selector.index));
+
+            let table = Table::new(
+                rows,
+                vec![
+                    Constraint::Length(5),
+                    Constraint::Percentage(70),
+                    Constraint::Percentage(25),
+                ],
+            )
+            .header(
+                Row::new(vec!["Sel", "Scope", "Type"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+            frame.render_stateful_widget(table, inner[0], &mut state);
+
+            let info = Paragraph::new(Line::from("Space to toggle | a add custom | d delete custom"))
+                .alignment(Alignment::Center);
+            frame.render_widget(info, inner[1]);
+
+            let footer = Paragraph::new("↑↓ navigate | Enter apply | Esc cancel")
+                .alignment(Alignment::Center);
+            frame.render_widget(footer, inner[2]);
+        }
+        ScopeSelectorMode::AddCustom => {
+            let prompt = Paragraph::new("Add custom scope:");
+            frame.render_widget(prompt, inner[0]);
+
+            let input_area = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .margin(1)
+                .split(inner[1]);
+
+            let input_widget = Paragraph::new(selector.custom_input.value());
+            frame.render_widget(input_widget, input_area[1]);
+
+            let cursor_x = input_area[1].x + selector.custom_input.cursor() as u16;
+            let cursor_y = input_area[1].y;
+            frame.set_cursor(cursor_x, cursor_y);
+            *cursor_visible = true;
+
+            let footer = Paragraph::new("Enter confirm | Esc cancel")
+                .alignment(Alignment::Center);
+            frame.render_widget(footer, inner[2]);
+        }
+    }
 }
