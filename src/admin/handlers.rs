@@ -2056,3 +2056,288 @@ pub async fn list_child_groups(
         }
     }
 }
+
+// ============================================================================
+// User Group Patterns Management
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CreateUserGroupPatternRequest {
+    pub pattern: String,
+    pub is_include: Option<bool>,
+    pub priority: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserGroupPatternResponse {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub pattern: String,
+    pub is_include: bool,
+    pub priority: i32,
+    pub created_at: String,
+}
+
+/// Create a new group pattern for a user
+/// POST /admin/users/{id}/group-patterns
+pub async fn create_user_group_pattern(
+    State(db_pool): State<DbPool>,
+    Path(user_id): Path<Uuid>,
+    Json(req): Json<CreateUserGroupPatternRequest>,
+) -> impl IntoResponse {
+    let is_include = req.is_include.unwrap_or(true);
+    let priority = req.priority.unwrap_or(0);
+
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO user_group_patterns (user_id, pattern, is_include, priority)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, user_id, pattern, is_include, priority, created_at
+        "#,
+        user_id,
+        req.pattern,
+        is_include,
+        priority
+    )
+    .fetch_one(&db_pool)
+    .await;
+
+    match result {
+        Ok(row) => {
+            let response = UserGroupPatternResponse {
+                id: row.id,
+                user_id: row.user_id,
+                pattern: row.pattern,
+                is_include: row.is_include,
+                priority: row.priority,
+                created_at: row.created_at.to_rfc3339(),
+            };
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to create user group pattern: {:?}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to create pattern: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// List all group patterns for a user
+/// GET /admin/users/{id}/group-patterns
+pub async fn list_user_group_patterns(
+    State(db_pool): State<DbPool>,
+    Path(user_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = sqlx::query!(
+        r#"
+        SELECT id, user_id, pattern, is_include, priority, created_at
+        FROM user_group_patterns
+        WHERE user_id = $1
+        ORDER BY priority DESC, created_at ASC
+        "#,
+        user_id
+    )
+    .fetch_all(&db_pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let patterns: Vec<UserGroupPatternResponse> = rows
+                .into_iter()
+                .map(|row| UserGroupPatternResponse {
+                    id: row.id,
+                    user_id: row.user_id,
+                    pattern: row.pattern,
+                    is_include: row.is_include,
+                    priority: row.priority,
+                    created_at: row.created_at.to_rfc3339(),
+                })
+                .collect();
+            (StatusCode::OK, Json(patterns)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to list user group patterns: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to list patterns".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Update a group pattern
+/// PUT /admin/users/{user_id}/group-patterns/{pattern_id}
+#[derive(Debug, Deserialize)]
+pub struct UpdateUserGroupPatternRequest {
+    pub pattern: Option<String>,
+    pub is_include: Option<bool>,
+    pub priority: Option<i32>,
+}
+
+pub async fn update_user_group_pattern(
+    State(db_pool): State<DbPool>,
+    Path((user_id, pattern_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<UpdateUserGroupPatternRequest>,
+) -> impl IntoResponse {
+    // Verify the pattern belongs to the user
+    let exists = sqlx::query!(
+        "SELECT id FROM user_group_patterns WHERE id = $1 AND user_id = $2",
+        pattern_id,
+        user_id
+    )
+    .fetch_optional(&db_pool)
+    .await;
+
+    match exists {
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "not_found".to_string(),
+                    error_description: "Pattern not found or does not belong to user".to_string(),
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to check pattern existence: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Database error".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Ok(Some(_)) => {
+            // Continue with update
+        }
+    }
+
+    // Build dynamic update query
+    let mut updates = vec![];
+    if req.pattern.is_some() {
+        updates.push("pattern = COALESCE($3, pattern)");
+    }
+    if req.is_include.is_some() {
+        updates.push("is_include = COALESCE($4, is_include)");
+    }
+    if req.priority.is_some() {
+        updates.push("priority = COALESCE($5, priority)");
+    }
+
+    if updates.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".to_string(),
+                error_description: "No fields to update".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let result = sqlx::query!(
+        r#"
+        UPDATE user_group_patterns
+        SET pattern = COALESCE($3, pattern),
+            is_include = COALESCE($4, is_include),
+            priority = COALESCE($5, priority)
+        WHERE id = $1 AND user_id = $2
+        RETURNING id, user_id, pattern, is_include, priority, created_at
+        "#,
+        pattern_id,
+        user_id,
+        req.pattern,
+        req.is_include,
+        req.priority
+    )
+    .fetch_one(&db_pool)
+    .await;
+
+    match result {
+        Ok(row) => {
+            let response = UserGroupPatternResponse {
+                id: row.id,
+                user_id: row.user_id,
+                pattern: row.pattern,
+                is_include: row.is_include,
+                priority: row.priority,
+                created_at: row.created_at.to_rfc3339(),
+            };
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to update user group pattern: {:?}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to update pattern: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Delete a group pattern
+/// DELETE /admin/users/{user_id}/group-patterns/{pattern_id}
+pub async fn delete_user_group_pattern(
+    State(db_pool): State<DbPool>,
+    Path((user_id, pattern_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let result = sqlx::query!(
+        "DELETE FROM user_group_patterns WHERE id = $1 AND user_id = $2",
+        pattern_id,
+        user_id
+    )
+    .execute(&db_pool)
+    .await;
+
+    match result {
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: "not_found".to_string(),
+                        error_description: "Pattern not found or does not belong to user"
+                            .to_string(),
+                    }),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::OK,
+                    Json(SuccessResponse {
+                        message: "Pattern deleted successfully".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete user group pattern: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to delete pattern".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}

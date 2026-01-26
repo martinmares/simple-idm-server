@@ -4,6 +4,7 @@ pub mod admin;
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod group_patterns;
 pub mod jwks;
 pub mod oauth2;
 pub mod oidc;
