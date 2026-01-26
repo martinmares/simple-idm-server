@@ -53,6 +53,8 @@ enum Mode {
     ClaimValueEditor,
     ArrayEditor,
     ScopeSelector,
+    UserPatternsManager,
+    PatternForm,
 }
 
 #[derive(Clone, Debug)]
@@ -164,6 +166,7 @@ struct FormState {
     fields: Vec<FormField>,
     index: usize,
     error: Option<String>,
+    patterns: Option<Vec<UserGroupPatternRow>>, // For Create/Update User forms
 }
 
 struct EntityState<T> {
@@ -241,6 +244,8 @@ struct App {
     claim_value_editor: Option<ClaimValueEditorState>,
     array_editor: Option<ArrayEditorState>,
     scope_selector: Option<ScopeSelectorState>,
+    user_patterns_manager: Option<UserPatternsManagerState>,
+    pattern_form: Option<PatternFormState>,
     pending_group_move: Option<GroupMoveRequest>,
     filter: Option<String>,
     filter_active: bool,
@@ -274,6 +279,8 @@ impl App {
             claim_value_editor: None,
             array_editor: None,
             scope_selector: None,
+            user_patterns_manager: None,
+            pattern_form: None,
             pending_group_move: None,
             filter: None,
             filter_active: false,
@@ -792,6 +799,33 @@ fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
         ("device_code", "urn:ietf:params:oauth:grant-type:device_code"),
     ]
 }
+#[derive(Clone, Debug, serde::Deserialize)]
+struct UserGroupPatternRow {
+    id: String,
+    user_id: String,
+    pattern: String,
+    is_include: bool,
+    priority: i32,
+    created_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct UserPatternsManagerState {
+    user_id: String,
+    username: String,
+    patterns: Vec<UserGroupPatternRow>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PatternFormState {
+    user_id: String,
+    pattern_id: Option<String>, // None for create, Some for edit
+    fields: Vec<FormField>,
+    index: usize,
+    error: Option<String>,
+}
+
 #[derive(Clone, Debug)]
 struct SelectHint {
     tab: Tab,
@@ -938,6 +972,33 @@ async fn event_loop(
             } else if handled == ScopeSelectorResult::Cancelled {
                 app.scope_selector = None;
                 app.mode = Mode::Form;
+            }
+            continue;
+        }
+        if app.mode == Mode::UserPatternsManager {
+            let handled = handle_user_patterns_manager_event(app, event, http).await?;
+            if handled == UserPatternsManagerResult::Closed {
+                // Copy patterns back to form before closing
+                if let (Some(manager), Some(form)) = (&app.user_patterns_manager, &mut app.form) {
+                    form.patterns = Some(manager.patterns.clone());
+                }
+                app.user_patterns_manager = None;
+                app.mode = Mode::Form;  // Return to Form mode, not Normal
+            }
+            continue;
+        }
+        if app.mode == Mode::PatternForm {
+            let handled = handle_pattern_form_event(app, event, http).await?;
+            match handled {
+                PatternFormResult::Saved => {
+                    app.pattern_form = None;
+                    app.mode = Mode::UserPatternsManager;
+                }
+                PatternFormResult::Cancelled => {
+                    app.pattern_form = None;
+                    app.mode = Mode::UserPatternsManager;
+                }
+                PatternFormResult::Continue => {}
             }
             continue;
         }
@@ -1820,6 +1881,286 @@ fn handle_scope_selector_event(app: &mut App, event: Event) -> Result<ScopeSelec
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UserPatternsManagerResult {
+    Continue,
+    Closed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PatternFormResult {
+    Continue,
+    Saved,
+    Cancelled,
+}
+
+async fn handle_user_patterns_manager_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<UserPatternsManagerResult> {
+    let Some(manager) = app.user_patterns_manager.as_mut() else {
+        return Ok(UserPatternsManagerResult::Closed);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(UserPatternsManagerResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => Ok(UserPatternsManagerResult::Closed),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !manager.patterns.is_empty() {
+                manager.index = manager.index.saturating_sub(1);
+            }
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !manager.patterns.is_empty() {
+                manager.index = (manager.index + 1).min(manager.patterns.len() - 1);
+            }
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('n') => {
+            // Open create pattern form
+            app.pattern_form = Some(PatternFormState {
+                user_id: manager.user_id.clone(),
+                pattern_id: None,
+                fields: vec![
+                    FormField::new("pattern", String::new()),
+                    FormField::boolean("is_include", true),
+                    FormField::new("priority", "0".to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::PatternForm;
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            // Open edit pattern form
+            if manager.patterns.is_empty() {
+                return Ok(UserPatternsManagerResult::Continue);
+            }
+            let pattern = &manager.patterns[manager.index];
+            app.pattern_form = Some(PatternFormState {
+                user_id: manager.user_id.clone(),
+                pattern_id: Some(pattern.id.clone()),
+                fields: vec![
+                    FormField::new("pattern", pattern.pattern.clone()),
+                    FormField::boolean("is_include", pattern.is_include),
+                    FormField::new("priority", pattern.priority.to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::PatternForm;
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            // Delete pattern
+            if manager.patterns.is_empty() {
+                return Ok(UserPatternsManagerResult::Continue);
+            }
+
+            let pattern = &manager.patterns[manager.index];
+            let url = format!(
+                "{}/admin/users/{}/group-patterns/{}",
+                http.base_url, manager.user_id, pattern.id
+            );
+
+            let response = http
+                .client
+                .delete(&url)
+                .header("Authorization", format!("Bearer {}", http.token))
+                .send()
+                .await
+                .context("Failed to delete pattern")?;
+
+            if response.status().is_success() {
+                // Refresh patterns list
+                let url = format!(
+                    "{}/admin/users/{}/group-patterns",
+                    http.base_url, manager.user_id
+                );
+                let response = http
+                    .client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .send()
+                    .await?;
+
+                if response.status().is_success() {
+                    let patterns: Vec<UserGroupPatternRow> = response.json().await?;
+                    manager.patterns = patterns;
+                    if manager.index >= manager.patterns.len() && manager.index > 0 {
+                        manager.index -= 1;
+                    }
+                    app.set_status("Pattern deleted successfully".to_string());
+                }
+            } else {
+                app.set_status(format!("Failed to delete pattern: HTTP {}", response.status()));
+            }
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        _ => Ok(UserPatternsManagerResult::Continue),
+    }
+}
+
+async fn handle_pattern_form_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<PatternFormResult> {
+    let Some(pattern_form) = app.pattern_form.as_mut() else {
+        return Ok(PatternFormResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(PatternFormResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => Ok(PatternFormResult::Cancelled),
+        KeyCode::Up => {
+            if pattern_form.index > 0 {
+                pattern_form.index -= 1;
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            if pattern_form.index < pattern_form.fields.len() - 1 {
+                pattern_form.index += 1;
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Char(' ') => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if matches!(field.kind, FieldKind::Bool) {
+                let current = field.value() == "true";
+                field.input = input_with_value((!current).to_string());
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Char(c) => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::InsertChar(c));
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Backspace => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::DeletePrevChar);
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Delete => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::DeleteNextChar);
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Left => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::GoToPrevChar);
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Right => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::GoToNextChar);
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Enter => {
+            // Submit form
+            let pattern = pattern_form.fields[0].value().to_string();
+            let is_include = pattern_form.fields[1].value() == "true";
+            let priority: i32 = pattern_form.fields[2].value().parse().unwrap_or(0);
+
+            if pattern.is_empty() {
+                pattern_form.error = Some("Pattern cannot be empty".to_string());
+                return Ok(PatternFormResult::Continue);
+            }
+
+            let result = if let Some(pattern_id) = &pattern_form.pattern_id {
+                // Update existing pattern
+                let url = format!(
+                    "{}/admin/users/{}/group-patterns/{}",
+                    http.base_url, pattern_form.user_id, pattern_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .put(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            } else {
+                // Create new pattern
+                let url = format!(
+                    "{}/admin/users/{}/group-patterns",
+                    http.base_url, pattern_form.user_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            };
+
+            match result {
+                Ok(response) if response.status().is_success() => {
+                    // Refresh patterns in manager
+                    if let Some(manager) = app.user_patterns_manager.as_mut() {
+                        let url = format!(
+                            "{}/admin/users/{}/group-patterns",
+                            http.base_url, manager.user_id
+                        );
+                        if let Ok(response) = http
+                            .client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {}", http.token))
+                            .send()
+                            .await
+                        {
+                            if let Ok(patterns) = response.json::<Vec<UserGroupPatternRow>>().await {
+                                manager.patterns = patterns;
+                            }
+                        }
+                    }
+                    app.set_status("Pattern saved successfully".to_string());
+                    Ok(PatternFormResult::Saved)
+                }
+                Ok(response) => {
+                    pattern_form.error = Some(format!("HTTP {}", response.status()));
+                    Ok(PatternFormResult::Continue)
+                }
+                Err(err) => {
+                    pattern_form.error = Some(err.to_string());
+                    Ok(PatternFormResult::Continue)
+                }
+            }
+        }
+        _ => Ok(PatternFormResult::Continue),
+    }
+}
+
 fn handle_password_gen_event(app: &mut App, event: Event) -> Result<PasswordGenResult> {
     let Some(gen) = app.password_gen.as_mut() else {
         return Ok(PasswordGenResult::Cancelled);
@@ -2400,6 +2741,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             ],
             index: 0,
             error: None,
+            patterns: Some(Vec::new()), // New user has no patterns yet
         },
         Tab::Groups => FormState {
             title: "Create group".to_string(),
@@ -2411,6 +2753,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             ],
             index: 0,
             error: None,
+            patterns: None,
         },
         Tab::Clients => FormState {
             title: "Create client".to_string(),
@@ -2430,6 +2773,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             ],
             index: 0,
             error: None,
+            patterns: None,
         },
         Tab::ClientClaims | Tab::GroupClaims => {
             open_claim_editor(app)?;
@@ -2444,6 +2788,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             ],
             index: 0,
             error: None,
+            patterns: None,
         },
         Tab::GroupUsers => {
             let fields = vec![
@@ -2456,6 +2801,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
                 fields,
                 index: 0,
                 error: None,
+                patterns: None,
             }
         }
     };
@@ -2477,6 +2823,7 @@ fn open_create_subgroup_form(app: &mut App) -> Result<()> {
         ],
         index: 0,
         error: None,
+        patterns: None,
     };
     app.mode = Mode::Form;
     app.form = Some(form);
@@ -2510,6 +2857,20 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
     let form = match app.tab {
         Tab::Users => {
             let user = selected_item(&app.users.items, app.users.selected())?;
+
+            // Fetch patterns for this user
+            let url = format!("{}/admin/users/{}/group-patterns", http.base_url, user.id);
+            let patterns = http
+                .client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", http.token))
+                .send()
+                .await
+                .context("Failed to fetch user group patterns")?
+                .json::<Vec<UserGroupPatternRow>>()
+                .await
+                .ok();
+
             FormState {
                 title: "Update user".to_string(),
                 action: FormAction::UpdateUser(user.id.clone()),
@@ -2520,6 +2881,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 ],
                 index: 0,
                 error: None,
+                patterns,
             }
         }
         Tab::Groups => {
@@ -2535,6 +2897,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 ],
                 index: 0,
                 error: None,
+                patterns: None,
             }
         }
         Tab::Clients => {
@@ -2559,6 +2922,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 ],
                 index: 0,
                 error: None,
+                patterns: None,
             }
         }
         Tab::ClientClaims | Tab::GroupClaims => {
@@ -2623,6 +2987,7 @@ fn open_delete_form(app: &mut App) -> Result<()> {
                 fields: vec![FormField::boolean("confirm", false)],
                 index: 0,
                 error: None,
+                patterns: None,
             }
         }
         Tab::Groups => {
@@ -2633,6 +2998,7 @@ fn open_delete_form(app: &mut App) -> Result<()> {
                 fields: vec![FormField::boolean("confirm", false)],
                 index: 0,
                 error: None,
+                patterns: None,
             }
         }
         Tab::Clients => {
@@ -2643,6 +3009,7 @@ fn open_delete_form(app: &mut App) -> Result<()> {
                 fields: vec![FormField::boolean("confirm", false)],
                 index: 0,
                 error: None,
+                patterns: None,
             }
         }
         Tab::ClientClaims | Tab::GroupClaims => {
@@ -2692,6 +3059,7 @@ fn open_add_user_group(app: &mut App) -> Result<()> {
         fields,
         index: 0,
         error: None,
+        patterns: None,
     };
     app.mode = Mode::Form;
     app.form = Some(form);
@@ -2730,9 +3098,46 @@ fn open_remove_user_group(app: &mut App) -> Result<()> {
         fields,
         index: 0,
         error: None,
+        patterns: None,
     };
     app.mode = Mode::Form;
     app.form = Some(form);
+    Ok(())
+}
+
+async fn open_user_patterns_manager(app: &mut App, _http: &HttpClient) -> Result<()> {
+    // This should only be called from Create/Update User form
+    let form = app.form.as_ref().context("No active form")?;
+
+    let (user_id, username) = match &form.action {
+        FormAction::CreateUser => {
+            // For new user, use empty ID and get username from form
+            let username = form.fields.iter()
+                .find(|f| f.label == "username")
+                .map(|f| f.value().to_string())
+                .unwrap_or_else(|| "<new user>".to_string());
+            (String::new(), username)
+        }
+        FormAction::UpdateUser(id) => {
+            // For existing user, get from users list
+            let user = app.users.items.iter()
+                .find(|u| &u.id == id)
+                .context("User not found")?;
+            (user.id.clone(), user.username.clone())
+        }
+        _ => bail!("Patterns manager only available for Create/Update User"),
+    };
+
+    let patterns = form.patterns.clone().unwrap_or_default();
+
+    app.user_patterns_manager = Some(UserPatternsManagerState {
+        user_id,
+        username,
+        patterns,
+        index: 0,
+    });
+    app.mode = Mode::UserPatternsManager;
+
     Ok(())
 }
 
@@ -2939,6 +3344,17 @@ async fn handle_form_event(
                 });
                 app.mode = Mode::ScopeSelector;
                 return Ok(FormResult::Continue);
+            }
+        }
+        KeyCode::Char('p') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Open user patterns manager from Create/Update User form
+                if matches!(form.action, FormAction::CreateUser | FormAction::UpdateUser(_)) {
+                    if let Err(err) = open_user_patterns_manager(app, http).await {
+                        app.set_status(format!("Failed to open patterns manager: {}", err));
+                    }
+                    return Ok(FormResult::Continue);
+                }
             }
         }
         KeyCode::Char('m') => {
@@ -3816,6 +4232,12 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     if let Some(selector) = &app.scope_selector {
         draw_scope_selector(frame, size, selector, &mut cursor_visible);
     }
+    if let Some(manager) = &app.user_patterns_manager {
+        draw_user_patterns_manager(frame, size, manager);
+    }
+    if let Some(pattern_form) = &app.pattern_form {
+        draw_pattern_form(frame, size, pattern_form, &mut cursor_visible);
+    }
     if let Some(picker) = &app.picker {
         draw_picker(frame, size, picker);
     }
@@ -4155,6 +4577,7 @@ fn help_lines(tab: Tab) -> Vec<Line<'static>> {
             lines.push(Line::from("n new user"));
             lines.push(Line::from("e edit user"));
             lines.push(Line::from("d delete user"));
+            lines.push(Line::from("Ctrl+P manage group patterns (in list or edit)"));
         }
         Tab::Clients => {
             lines.push(Line::from("n new client"));
@@ -4324,6 +4747,45 @@ fn draw_form(
         lines.push(Line::from(spans));
     }
 
+    // Show patterns table for Create/Update User forms
+    if let Some(patterns) = &form.patterns {
+        lines.push(Line::from("")); // Empty line
+        lines.push(Line::from(Span::styled(
+            "Group Patterns:",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+
+        if patterns.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no patterns defined - use Ctrl+P to add)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  # | Pattern              | Type    | Priority",
+                Style::default().fg(Color::Cyan),
+            )));
+            for (idx, pattern) in patterns.iter().enumerate() {
+                let type_str = if pattern.is_include { "include" } else { "exclude" };
+                let line_text = format!(
+                    "  {} | {:<20} | {:<7} | {}",
+                    idx + 1,
+                    pattern.pattern,
+                    type_str,
+                    pattern.priority
+                );
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(Color::White),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "  (Ctrl+P to edit patterns)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
     if let Some(error) = &form.error {
         lines.push(Line::from(Span::styled(
             error.clone(),
@@ -4346,7 +4808,9 @@ fn draw_form(
         }
     }
 
-    let footer_text = if form
+    let footer_text = if matches!(form.action, FormAction::CreateUser | FormAction::UpdateUser(_)) {
+        "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns | Ctrl+G secret | Ctrl+V reveal"
+    } else if form
         .fields
         .iter()
         .any(|field| field.label == "groups_claim_mode" || field.label == "grant_types")
@@ -5621,4 +6085,165 @@ fn draw_scope_selector(
             frame.render_widget(footer, inner[2]);
         }
     }
+}
+
+fn draw_user_patterns_manager(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    manager: &UserPatternsManagerState,
+) {
+    let popup = centered_rect(60, 50, area);  // Smaller dialog
+    frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "Group Patterns for user: {}",
+        manager.username
+    ));
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    if manager.patterns.is_empty() {
+        let empty = Paragraph::new("No patterns defined. Press 'n' to create one.")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty, inner[0]);
+    } else {
+        let rows = manager
+            .patterns
+            .iter()
+            .map(|p| {
+                let include_exclude = if p.is_include { "Include" } else { "Exclude" };
+                Row::new(vec![
+                    p.priority.to_string(),
+                    p.pattern.clone(),
+                    include_exclude.to_string(),
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        state.select(Some(manager.index));
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(10),
+                Constraint::Percentage(60),
+                Constraint::Percentage(30),
+            ],
+        )
+        .header(
+            Row::new(vec!["Priority", "Pattern", "Action"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+        frame.render_stateful_widget(table, inner[0], &mut state);
+    }
+
+    let footer = Paragraph::new("n new | e edit | d delete | ↑↓ navigate | Esc close")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_pattern_form(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    pattern_form: &PatternFormState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(50, 40, area);  // Even smaller than patterns manager
+    frame.render_widget(Clear, popup);
+
+    let title = if pattern_form.pattern_id.is_some() {
+        "Edit Pattern"
+    } else {
+        "New Pattern"
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title);
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let mut lines = Vec::new();
+    let mut cursor = None;
+
+    for (idx, field) in pattern_form.fields.iter().enumerate() {
+        let is_active = idx == pattern_form.index;
+        let prefix = if is_active { "> " } else { "  " };
+        let value = field.display();
+
+        let label_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let value_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}: ", field.label), label_style),
+            Span::styled(value, value_style),
+        ];
+
+        if matches!(field.kind, FieldKind::Bool) {
+            spans.push(Span::styled(
+                " (space toggles)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        if is_active && !matches!(field.kind, FieldKind::Bool) {
+            let cursor_offset = field.input.cursor();
+            let cursor_x = inner[0].x
+                + (prefix.len() + field.label.len() + 2 + cursor_offset) as u16;
+            let cursor_y = inner[0].y + idx as u16;
+            cursor = Some((cursor_x, cursor_y));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(error) = &pattern_form.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    if let Some((x, y)) = cursor {
+        frame.set_cursor(x, y);
+        *cursor_visible = true;
+    }
+
+    let footer = Paragraph::new("Enter save | Esc cancel | ↑↓ navigate")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
 }

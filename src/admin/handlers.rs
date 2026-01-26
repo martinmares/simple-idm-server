@@ -2139,7 +2139,7 @@ pub async fn list_user_group_patterns(
         SELECT id, user_id, pattern, is_include, priority, created_at
         FROM user_group_patterns
         WHERE user_id = $1
-        ORDER BY priority DESC, created_at ASC
+        ORDER BY priority ASC, created_at ASC
         "#,
         user_id
     )
