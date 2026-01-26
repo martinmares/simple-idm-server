@@ -4229,18 +4229,14 @@ fn draw_form(
         let is_active = idx == form.index;
         let prefix = if is_active { "> " } else { "  " };
         let value = field.display();
-        let label_style = if field.read_only {
-            Style::default().fg(Color::DarkGray)
-        } else if is_active {
+        let label_style = if is_active {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default().fg(Color::White)
         };
-        let value_style = if field.read_only {
-            Style::default().fg(Color::DarkGray)
-        } else if is_active {
+        let value_style = if is_active {
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
