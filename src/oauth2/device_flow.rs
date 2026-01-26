@@ -47,6 +47,8 @@ pub struct DeviceTokenResponse {
     pub token_type: String,
     pub expires_in: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }
 
@@ -546,8 +548,8 @@ pub async fn handle_device_token_internal(
         Some(user.email.clone()),
         Some(user.username.clone()),
         Some(device_code.scope.clone()),
-        user_group_names,
-        custom_claims,
+        user_group_names.clone(),
+        custom_claims.clone(),
         state.access_token_expiry,
     ) {
         Ok(token) => token,
@@ -563,6 +565,35 @@ pub async fn handle_device_token_internal(
         }
     };
 
+    // Vytvoř ID token (pokud scope obsahuje "openid")
+    let id_token = if device_code.scope.contains("openid") {
+        match state.jwt_service.create_id_token(
+            user.id,
+            client.client_id.clone(),
+            Some(user.email.clone()),
+            Some(user.username.clone()),
+            user_group_names,
+            custom_claims,
+            None, // device flow nemá nonce
+            state.access_token_expiry,
+        ) {
+            Ok(token) => Some(token),
+            Err(e) => {
+                tracing::error!("Failed to create ID token for device flow: {:?}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Failed to create ID token".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        None
+    };
+
     // Smaž použitý device code
     let _ = sqlx::query("DELETE FROM device_codes WHERE device_code = $1")
         .bind(&req.device_code)
@@ -573,6 +604,7 @@ pub async fn handle_device_token_internal(
         access_token,
         token_type: "Bearer".to_string(),
         expires_in: state.access_token_expiry,
+        id_token,
         scope: Some(device_code.scope),
     })
     .into_response()
