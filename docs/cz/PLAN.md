@@ -19,53 +19,55 @@
 
 ## 🎯 Plán implementace
 
-### Priorita 1 - Database & Backend
+### Priorita 1 - Database & Backend ✅ HOTOVO
 
 #### 1.1 Database migrace
-- [ ] Vytvořit migraci pro `user_group_patterns` tabulku
+- ✅ Vytvořit migraci pro `user_group_patterns` tabulku (022_add_user_group_patterns.sql)
   - Sloupce: `id`, `user_id`, `pattern`, `is_include`, `priority`, `created_at`
   - Foreign key na `users(id)` s ON DELETE CASCADE
+  - Indexy na `user_id` a `priority DESC`
 
 #### 1.2 Datový model
-- [ ] Přidat `user_group_patterns` do diesel schema
-- [ ] Vytvořit struct `UserGroupPattern` v models
-- [ ] Implementovat CRUD operace v repository vrstvě
+- ✅ Přidat `UserGroupPattern` struct do db/models.rs
+- ✅ Implementováno s sqlx (PostgreSQL)
 
 #### 1.3 Pattern matching logika
-- [ ] Implementovat funkci pro matching patternu (`ssh:*` matches `ssh:role:admin`)
-- [ ] Implementovat evaluaci s prioritami (nejvyšší priorita vyhrává)
-- [ ] Rozlišit include/exclude logiku
+- ✅ Implementováno v src/group_patterns.rs
+- ✅ Funkce `pattern_matches()` s podporou wildcards
+- ✅ Evaluace s prioritami (nejvyšší priorita vyhrává)
+- ✅ Include/exclude logika
 
 #### 1.4 Background job
-- [ ] Implementovat job pro evaluaci všech patterns
-- [ ] Synchronizace `user_groups` tabulky podle výsledků evaluace
-- [ ] Naplánovat pravidelné spouštění (cron/scheduler)
+- ✅ Implementován `evaluate_and_sync_patterns()` v src/group_patterns.rs
+- ✅ Synchronizace `user_groups` tabulky
+- ✅ Scheduler v main.rs s konfigurovatelným intervalem
+- ✅ Config: `GROUP_PATTERNS_SYNC_INTERVAL_SECONDS` (default 300s)
 
 #### 1.5 API endpointy
-- [ ] `POST /api/users/:id/group-patterns` - vytvoření patternu
-- [ ] `GET /api/users/:id/group-patterns` - seznam patterns uživatele
-- [ ] `PUT /api/users/:id/group-patterns/:pattern_id` - úprava patternu
-- [ ] `DELETE /api/users/:id/group-patterns/:pattern_id` - smazání patternu
+- ✅ `POST /admin/users/:id/group-patterns` - vytvoření patternu
+- ✅ `GET /admin/users/:id/group-patterns` - seznam patterns
+- ✅ `PUT /admin/users/:user_id/group-patterns/:pattern_id` - úprava
+- ✅ `DELETE /admin/users/:user_id/group-patterns/:pattern_id` - smazání
 
-### Priorita 2 - TUI Vylepšení
+### Priorita 2 - TUI Vylepšení ✅ HOTOVO
 
 #### 2.1 Array editor pro redirect_uris
-- [ ] Vytvořit nový dialog komponentu pro editaci array hodnot
-- [ ] Přidat klávesovou zkratku Ctrl+U v Create/Update client formuláři
-- [ ] Zobrazit `redirect_uris` jako read-only čárkami oddělený seznam
-- [ ] Umožnit přidání/odebrání/úpravu jednotlivých URI v dialogu
+- ✅ Vytvořen `ArrayEditorState` a rendering funkce
+- ✅ Klávesová zkratka Ctrl+U v Create/Update client formuláři
+- ✅ `redirect_uris` pole je read-only s hintem "(Ctrl+U edit)"
+- ✅ Dialog podporuje: a-add, d-delete, e-edit, ↑↓-navigate
 
 #### 2.2 Scope selector dialog
-- [ ] Vytvořit dialog s předvyplněnými standardními scopes
-  - `openid`, `profile`, `email`, `offline_access`
-- [ ] Přidat možnost zadat custom scope
-- [ ] Přidat klávesovou zkratku Ctrl+O v Create/Update client formuláři
-- [ ] Zobrazit `scope` jako read-only seznam v hlavním formuláři
+- ✅ Vytvořen `ScopeSelectorState` s režimy SelectStandard/AddCustom
+- ✅ Standardní scopes: `openid`, `profile`, `email`, `offline_access`
+- ✅ Možnost přidat custom scope (klávesa 'a')
+- ✅ Klávesová zkratka Ctrl+O v Create/Update client formuláři
+- ✅ `scope` pole je read-only s hintem "(Ctrl+O edit)"
 
 #### 2.3 Úprava formulářů
-- [ ] Upravit Create client formulář (read-only pro `redirect_uris` a `scope`)
-- [ ] Upravit Update client formulář (read-only pro `redirect_uris` a `scope`)
-- [ ] Přidat nápovědu k novým klávesovým zkratkám
+- ✅ Create client formulář - `redirect_uris` a `scope` jsou read-only
+- ✅ Update client formulář - `redirect_uris` a `scope` jsou read-only
+- ✅ Přidány nápovědy k novým zkratkám v UI
 
 ### Priorita 3 - Testing & Dokumentace
 
@@ -86,6 +88,27 @@
 
 ## 📝 Poznámky
 
-- **4% týdenního limitu zbývá** - implementace po malých krocích nebo čekat na reset
+- **Implementace dokončena 2026-01-26**
 - **TIMEZONE fix v c2b42c9** - hotovo, nesahat
-- Zachovat konzistenci s existujícím kódem (diesel, actix-web, ratatui)
+- Použité technologie: sqlx + PostgreSQL, actix-web, ratatui
+- Token usage: ~86K/200K (57% zbývá)
+
+## 🎉 Shrnutí implementace
+
+### Backend (Group Patterns)
+- ✅ Kompletní CRUD API endpointy
+- ✅ Pattern matching s wildcards (`ssh:*`, `*:admin`, `ssh:*:admin`)
+- ✅ Priority system (vyšší číslo = vyšší priorita)
+- ✅ Background job synchronizace každých 5 minut (konfigurovatelné)
+- ✅ Migrace 022 aplikována v databázi
+
+### Frontend (TUI)
+- ✅ Array editor pro redirect_uris (Ctrl+U)
+- ✅ Scope selector s předvyplněnými scopes (Ctrl+O)
+- ✅ Read-only zobrazení s hinty v formulářích
+- ✅ Plně funkční dialogy s navigací
+
+### Co zbývá (Priorita 3)
+- Unit testy pro pattern matching
+- Integration testy pro API a background job
+- Aktualizace README s příklady použití
