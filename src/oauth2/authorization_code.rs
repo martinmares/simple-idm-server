@@ -2,7 +2,8 @@ use crate::auth::{
     build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
     get_user_group_names, verify_password, JwtService,
 };
-use crate::db::models::{AuthenticationSession, AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User};
+use crate::client_group_filters::apply_client_group_filters;
+use crate::db::models::{AuthenticationSession, AuthorizationCode, OAuthClient, OAuthClientGroupPattern, RefreshToken, UsedRefreshToken, User};
 use axum::{
     body::Bytes,
     extract::{Query, State},
@@ -882,6 +883,34 @@ async fn handle_authorization_code_token(
         },
     };
 
+    // Apply client group filtering patterns (if any)
+    let filtered_group_names = match sqlx::query_as!(
+        OAuthClientGroupPattern,
+        r#"
+        SELECT id, client_id, pattern, is_include, priority, created_at
+        FROM oauth_client_group_patterns
+        WHERE client_id = $1
+        ORDER BY priority ASC
+        "#,
+        client.id
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(patterns) => {
+            if patterns.is_empty() {
+                user_group_names
+            } else {
+                apply_client_group_filters(&user_group_names, &patterns)
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch client group patterns: {:?}", e);
+            // Fallback to unfiltered groups on error
+            user_group_names
+        }
+    };
+
     // Vytvoř custom claims pomocí claim maps (pokud povoleno)
     let custom_claims = if client.include_claim_maps {
         let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
@@ -913,7 +942,7 @@ async fn handle_authorization_code_token(
         user_id = %user.id,
         username = %user.username,
         client_id = %client.client_id,
-        groups = ?user_group_names,
+        groups = ?filtered_group_names,
         custom_claims = ?custom_claims,
         "Issuing JWT token"
     );
@@ -925,7 +954,7 @@ async fn handle_authorization_code_token(
         Some(user.email.clone()),
         Some(user.username.clone()),
         Some(auth_code.scope.clone()),
-        user_group_names.clone(),
+        filtered_group_names.clone(),
         custom_claims.clone(),
         state.access_token_expiry,
     ) {
@@ -944,7 +973,7 @@ async fn handle_authorization_code_token(
         client.client_id.clone(),
         Some(user.email.clone()),
         Some(user.username.clone()),
-        user_group_names,
+        filtered_group_names,
         custom_claims,
         auth_code.nonce.clone(),
         state.access_token_expiry,
@@ -1169,6 +1198,33 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await.unwrap_or_default(),
     };
 
+    // Apply client group filtering patterns (if any)
+    let filtered_group_names = match sqlx::query_as!(
+        OAuthClientGroupPattern,
+        r#"
+        SELECT id, client_id, pattern, is_include, priority, created_at
+        FROM oauth_client_group_patterns
+        WHERE client_id = $1
+        ORDER BY priority ASC
+        "#,
+        client.id
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(patterns) => {
+            if patterns.is_empty() {
+                user_group_names
+            } else {
+                apply_client_group_filters(&user_group_names, &patterns)
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch client group patterns: {:?}", e);
+            user_group_names
+        }
+    };
+
     let custom_claims = if client.include_claim_maps {
         let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
             .await
@@ -1185,7 +1241,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         user_id = %user.id,
         username = %user.username,
         client_id = %client.client_id,
-        groups = ?user_group_names,
+        groups = ?filtered_group_names,
         custom_claims = ?custom_claims,
         "Issuing JWT token (refresh)"
     );
@@ -1197,7 +1253,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         Some(user.email.clone()),
         Some(user.username.clone()),
         Some(refresh_token.scope.clone()),
-        user_group_names,
+        filtered_group_names,
         custom_claims,
         state.access_token_expiry,
     ) {
