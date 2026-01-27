@@ -162,6 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         // Group management
         .route("/admin/groups", post(admin::handlers::create_group))
         .route("/admin/groups", get(admin::handlers::list_groups))
+        .route("/admin/groups/tree", get(admin::handlers::get_groups_tree))
         .route("/admin/groups/{id}", put(admin::handlers::update_group))
         .route("/admin/groups/{id}", delete(admin::handlers::delete_group))
         // Nested groups (group-group relationships)

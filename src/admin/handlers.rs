@@ -106,6 +106,15 @@ pub struct GroupResponse {
     pub is_virtual: bool,
 }
 
+#[derive(Debug, Serialize)]
+pub struct GroupTreeResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub is_virtual: bool,
+    pub children: Vec<Uuid>, // IDs of direct children
+}
+
 // User-Group assignment
 #[derive(Debug, Deserialize)]
 pub struct AssignGroupRequest {
@@ -2340,4 +2349,86 @@ pub async fn delete_user_group_pattern(
                 .into_response()
         }
     }
+}
+
+/// Get all groups with their parent-child relationships in a single request
+/// Returns a flat list of groups with each group containing its direct children IDs
+pub async fn get_groups_tree(State(db_pool): State<DbPool>) -> impl IntoResponse {
+    // Fetch all groups
+    let groups_result = sqlx::query!(
+        r#"
+        SELECT id, name, description, is_virtual
+        FROM groups
+        ORDER BY name
+        "#
+    )
+    .fetch_all(&db_pool)
+    .await;
+
+    let groups = match groups_result {
+        Ok(g) => g,
+        Err(e) => {
+            tracing::error!("Failed to fetch groups: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to fetch groups".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Fetch all group relationships (parent -> children)
+    let relationships_result = sqlx::query!(
+        r#"
+        SELECT parent_group_id, child_group_id
+        FROM group_groups
+        "#
+    )
+    .fetch_all(&db_pool)
+    .await;
+
+    let relationships = match relationships_result {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to fetch group relationships: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to fetch group relationships".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Build children map
+    let mut children_map: std::collections::HashMap<Uuid, Vec<Uuid>> =
+        std::collections::HashMap::new();
+    for rel in relationships {
+        children_map
+            .entry(rel.parent_group_id)
+            .or_insert_with(Vec::new)
+            .push(rel.child_group_id);
+    }
+
+    // Build response
+    let tree: Vec<GroupTreeResponse> = groups
+        .into_iter()
+        .map(|g| {
+            let children = children_map.get(&g.id).cloned().unwrap_or_default();
+            GroupTreeResponse {
+                id: g.id,
+                name: g.name,
+                description: g.description,
+                is_virtual: g.is_virtual,
+                children,
+            }
+        })
+        .collect();
+
+    (StatusCode::OK, Json(tree)).into_response()
 }

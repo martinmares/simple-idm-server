@@ -2543,25 +2543,50 @@ async fn fetch_users(http: &HttpClient, page: usize) -> Result<Vec<UserRow>> {
 }
 
 async fn fetch_groups_tree(http: &HttpClient) -> Result<(Vec<GroupRow>, HashMap<String, usize>)> {
-    let groups = fetch_groups_for_selector(http).await?;
-    if groups.is_empty() {
+    // Fetch complete tree in single API call
+    let body = http.get("/admin/groups/tree").await?;
+
+    #[derive(serde::Deserialize)]
+    struct GroupTreeItem {
+        id: String,
+        name: String,
+        description: Option<String>,
+        is_virtual: bool,
+        children: Vec<String>,
+    }
+
+    let tree: Vec<GroupTreeItem> = serde_json::from_str(&body)
+        .map_err(|e| anyhow!("Failed to parse groups tree: {e}"))?;
+
+    if tree.is_empty() {
         return Ok((Vec::new(), HashMap::new()));
     }
 
     let mut group_map: HashMap<String, GroupRow> = HashMap::new();
-    for group in &groups {
-        group_map.insert(group.id.clone(), group.clone());
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+
+    // First pass: build group_map
+    for item in &tree {
+        group_map.insert(
+            item.id.clone(),
+            GroupRow {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                description: item.description.clone(),
+                is_virtual: item.is_virtual,
+            },
+        );
     }
 
-    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
-    for group in &groups {
-        let path = format!("/admin/groups/{}/children", group.id);
-        let body = http.get(&path).await?;
-        let mut children: Vec<GroupRow> =
-            serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse group children: {e}"))?;
-        children.sort_by(|a, b| a.name.cmp(&b.name));
-        let child_ids = children.into_iter().map(|child| child.id).collect::<Vec<_>>();
-        children_map.insert(group.id.clone(), child_ids);
+    // Second pass: build children_map with sorted children
+    for item in tree {
+        let mut sorted_children = item.children;
+        sorted_children.sort_by(|a, b| {
+            let name_a = group_map.get(a).map(|g| g.name.as_str()).unwrap_or("");
+            let name_b = group_map.get(b).map(|g| g.name.as_str()).unwrap_or("");
+            name_a.cmp(name_b)
+        });
+        children_map.insert(item.id, sorted_children);
     }
 
     let mut child_set: HashSet<String> = HashSet::new();
@@ -2571,8 +2596,8 @@ async fn fetch_groups_tree(http: &HttpClient) -> Result<(Vec<GroupRow>, HashMap<
         }
     }
 
-    let mut root_ids: Vec<String> = groups
-        .iter()
+    let mut root_ids: Vec<String> = group_map
+        .values()
         .filter(|group| !child_set.contains(&group.id))
         .map(|group| group.id.clone())
         .collect();
@@ -2631,8 +2656,8 @@ async fn fetch_groups_tree(http: &HttpClient) -> Result<(Vec<GroupRow>, HashMap<
         );
     }
 
-    let mut remaining: Vec<String> = groups
-        .iter()
+    let mut remaining: Vec<String> = group_map
+        .values()
         .filter(|group| !visited.contains(&group.id))
         .map(|group| group.id.clone())
         .collect();
