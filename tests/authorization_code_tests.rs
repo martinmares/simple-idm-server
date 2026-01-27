@@ -37,24 +37,33 @@ impl TestEnvironment {
         }
     }
 
+    fn run_compose(args: &[&str]) -> Result<std::process::Output, std::io::Error> {
+        let mut cmd = Command::new("docker");
+        cmd.arg("compose")
+            .arg("-f")
+            .arg(DOCKER_COMPOSE_FILE);
+        cmd.args(args);
+        cmd.output().or_else(|_| {
+            let mut cmd = Command::new("docker-compose");
+            cmd.arg("-f").arg(DOCKER_COMPOSE_FILE);
+            cmd.args(args);
+            cmd.output()
+        })
+    }
+
     /// Start Docker Compose services
     async fn start_docker(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Starting Docker services...");
 
         // Stop any existing containers
-        let _ = Command::new("docker-compose")
-            .arg("-f")
-            .arg(DOCKER_COMPOSE_FILE)
-            .arg("down")
-            .output();
+        let _ = Self::run_compose(&["down"]);
 
         // Start services
-        Command::new("docker-compose")
-            .arg("-f")
-            .arg(DOCKER_COMPOSE_FILE)
-            .arg("up")
-            .arg("-d")
-            .output()?;
+        let output = Self::run_compose(&["up", "-d"])?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("docker compose up failed: {}", stderr.trim()).into());
+        }
 
         println!("Docker services started");
         Ok(())
@@ -64,10 +73,16 @@ impl TestEnvironment {
     async fn wait_for_postgres(&self) -> Result<(), Box<dyn std::error::Error>> {
         println!("Waiting for PostgreSQL to be ready...");
 
-        let max_attempts = 90;
+        let max_attempts = 120;
         let mut attempts = 0;
 
         loop {
+            if let Ok(stream) = tokio::net::TcpStream::connect("127.0.0.1:5432").await {
+                drop(stream);
+                println!("PostgreSQL is ready!");
+                return Ok(());
+            }
+
             let health = Command::new("docker")
                 .arg("inspect")
                 .arg("-f")
@@ -82,6 +97,23 @@ impl TestEnvironment {
                         println!("PostgreSQL is ready!");
                         return Ok(());
                     }
+                }
+            }
+
+            let exec_check = Command::new("docker")
+                .args([
+                    "exec",
+                    "simple-idm-postgres",
+                    "pg_isready",
+                    "-U",
+                    "postgres",
+                ])
+                .output();
+
+            if let Ok(output) = exec_check {
+                if output.status.success() {
+                    println!("PostgreSQL is ready!");
+                    return Ok(());
                 }
             }
 
@@ -120,10 +152,19 @@ impl TestEnvironment {
         let output = Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "docker-compose -f {} exec -T postgres psql -U postgres -d simple_idm < {}",
+                "docker compose -f {} exec -T postgres psql -U postgres -d simple_idm < {}",
                 DOCKER_COMPOSE_FILE, INIT_SCRIPT
             ))
-            .output()?;
+            .output()
+            .or_else(|_| {
+                Command::new("bash")
+                    .arg("-c")
+                    .arg(format!(
+                        "docker-compose -f {} exec -T postgres psql -U postgres -d simple_idm < {}",
+                        DOCKER_COMPOSE_FILE, INIT_SCRIPT
+                    ))
+                    .output()
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -278,7 +319,7 @@ async fn login_and_get_code(
         ("password".to_string(), password.to_string()),
         ("client_id".to_string(), TEST_CLIENT_ID.to_string()),
         ("redirect_uri".to_string(), TEST_REDIRECT_URI.to_string()),
-        ("scope".to_string(), "openid profile email".to_string()),
+        ("scope".to_string(), "openid profile email groups".to_string()),
     ];
 
     if let Some(challenge) = code_challenge {
@@ -338,7 +379,7 @@ async fn test_authorization_code_flow_success() {
         ("response_type", "code"),
         ("client_id", TEST_CLIENT_ID),
         ("redirect_uri", TEST_REDIRECT_URI),
-        ("scope", "openid profile email"),
+        ("scope", "openid profile email groups"),
         ("state", "test-state-123"),
     ])
     .expect("Failed to encode authorize query");
