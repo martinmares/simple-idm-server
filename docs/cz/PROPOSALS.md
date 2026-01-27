@@ -67,3 +67,27 @@ Takže editaci toho `redirect_uris` bych udělal podobně, vyskočí nové edita
 Tedy položka `redirect_uris` není editovatelná přímo jako `String`, ale je nutné přidat nějaou další klávesovou zkratku, třeba `Ctrl+U` na kterou se otevře ten nový editační dialog pro `Array`.
 
 Dále, opět ve formulářích "Create client" a "Update client" máme položku `scope`, tu vůbec nevalidujeme (nebo možná ano), a tím páděm uživatel si tam může napsat co chce. Preferoval bych podobně jako je u `grant_type` uživateli se po stisku klávesové zkratky (např. Ctrl+O) otevře nějaké nové okno jen s hodnotami, které může vyplnit, (podobně jako máme u `grant_types`). Tedy prostě potřebuju řídit obsah striktně jen možnosti, které dávají smysl. Tedy položka `scope` bude pro uživatele jen read-only (jen uvidí výsledek), a hodnoty může měnit jen po stisku Ctrl+O přes samostatný dialog, rozumíme si?
+
+# 2026-01-27
+
+Teď budeme chvilku diskutovat, mám takovou myšlenku, jak zmenšit velikost toho JWT tokenu:
+
+1. V oauth2_clients (v TUI tab "Clients"), když založím klienta, tak ho můžu přes "patterns" specifikovat, co se může v položce "groups" poslat (dnes neexistuje pro klienty, je to jiný patterns než pro user groups!). Tedy "use case" by byl takový, že pro tohoto klienta nemá smysl posílat žádné jiné groups (ve kterých je uživatel, než jen ty, které vyhoví "patterm"). Logika vyhodnocení by byla podobná jako u user groups patternu: tedy seřadít podle priority a pak pokud je "exclude" tak vyhazuješ, když je "include", tak přidávaš (logika je identická).
+
+2. V claim_maps (v TUI "Client claims") je dnes vazba "clent_id" + "group_id" a nabízí se tady možnost mít něco podobného jako v "user groups", tedy pattern, s úplně tou samou logikou. Někde bych specifikovat "patterns" -> třeba "ssh:*". Fungovalo by to takto:
+
+  - dnes mám tuto "claim map":
+    - claim_name = app_role
+    - claim_value = Admin
+    - group_id (target) = eb030dd8-a3ba-4273-abe9-f9621b849ce2
+  - a mohla by vypadat takto (kdybychom tam měli patterns):
+    - claim_name = app_role
+    - claim_value = Admin
+    - patterns:
+      - priority=1, pattern=*:admin:*, is_include=true
+      - priority=2, pattern=ssh:admin:*, is_include=false
+      - priority=2, pattern=datalite:admin:*, is_include=true
+
+Oba ty body bych řešil asi opět podobně jako "user groups", prostě přes schedulery. Klidně nové tabulky, ale tak, aby to neporušilo stávající koncept.
+
+POZOR: tahle změna (2) musí být udělána šetrně, tak abychom nějak neporušily stávající datový model, a musí být v návaznosti na TUI, tak jsou dva pohledy "Client claims" a "Group claims".

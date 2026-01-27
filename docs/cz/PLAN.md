@@ -126,3 +126,258 @@
 - Unit testy pro pattern matching
 - Integration testy pro API a background job
 - Move up/down pro změnu priority patterns (odloženo)
+
+---
+
+# 2026-01-27
+
+## 🎯 JWT Token Optimization - Enterprise Features
+
+### Přehled
+Implementace funkcí pro redukci velikosti JWT tokenů:
+1. **Client-Level Group Filtering** - klient dostane jen relevantní groups
+2. **Pattern-Based Claim Maps** - dynamické mapování pomocí patterns
+3. **Token Compression** - komprese opakujících se prefixů
+
+### Architektura
+
+```
+User Groups → User Patterns (sync job) → User Effective Groups
+                                              ↓
+                                    Client Patterns (runtime)
+                                              ↓
+                                    Claim Map Evaluation (runtime)
+                                              ↓
+                                    Compression (runtime, if enabled)
+                                              ↓
+                                         JWT Token
+```
+
+---
+
+## 📋 Implementační plán
+
+### Phase 1: Client-Level Group Filtering (High Priority)
+
+#### 1.1 Database migrace
+- [ ] Vytvořit migraci `023_add_oauth_client_group_patterns.sql`
+  - Tabulka `oauth_client_group_patterns` (client_id, pattern, is_include, priority)
+  - Foreign key na `oauth_clients(id)` s ON DELETE CASCADE
+  - Indexy na `client_id` a `(client_id, priority ASC)`
+
+#### 1.2 Datový model
+- [ ] Přidat `OAuthClientGroupPattern` struct do `db/models.rs`
+- [ ] CRUD operace v databázi (create, list, update, delete)
+
+#### 1.3 Pattern matching pro client filtering
+- [ ] Vytvořit `src/client_group_filters.rs` modul
+- [ ] Funkce `apply_client_group_filters()` - aplikuje client patterns na groups
+  - Input: Vec<String> groups (user's effective groups)
+  - Input: Vec<OAuthClientGroupPattern> patterns
+  - Output: Vec<String> (filtered groups)
+  - Logika: Sequential application podle priority (ASC)
+
+#### 1.4 Integrace do token generation
+- [ ] Modifikovat `src/oauth2/authorization_code.rs`:
+  - V `handle_authorization_code_token()` (po získání user groups):
+    1. Načti client group patterns z DB
+    2. Aplikuj filtering přes `apply_client_group_filters()`
+    3. Použij filtrované groups pro JWT
+  - V `handle_refresh_token()` - stejná logika
+
+- [ ] Modifikovat `src/oauth2/device_flow.rs`:
+  - V `handle_device_token_internal()` - stejná logika
+
+#### 1.5 API endpointy
+- [ ] `POST /admin/oauth-clients/{id}/group-patterns` - vytvoření patternu
+- [ ] `GET /admin/oauth-clients/{id}/group-patterns` - seznam patterns
+- [ ] `PUT /admin/oauth-clients/{client_id}/group-patterns/{pattern_id}` - úprava
+- [ ] `DELETE /admin/oauth-clients/{client_id}/group-patterns/{pattern_id}` - smazání
+
+#### 1.6 TUI integrace
+- [ ] Přidat field `client_group_patterns` do Create/Update Client forms (read-only)
+- [ ] Klávesová zkratka (např. Ctrl+G) pro otevření Client Group Patterns Manager
+- [ ] Dialog podobný User Patterns Manager
+
+---
+
+### Phase 2: Pattern-Based Claim Maps (High Priority)
+
+#### 2.1 Database migrace
+- [ ] Vytvořit migraci `024_add_claim_map_patterns.sql`
+  - Tabulka `claim_map_patterns` (claim_map_id, pattern, is_include, priority)
+  - Foreign key na `claim_maps(id)` s ON DELETE CASCADE
+  - Indexy na `claim_map_id` a `(claim_map_id, priority ASC)`
+
+#### 2.2 Datový model
+- [ ] Přidat `ClaimMapPattern` struct do `db/models.rs`
+- [ ] CRUD operace v databázi
+
+#### 2.3 Claim map evaluation s patterns
+- [ ] Rozšířit `src/auth/claims.rs`:
+  - Funkce `evaluate_claim_map_patterns()` - aplikuje patterns na user groups
+  - Modifikovat `build_custom_claims()`:
+    1. Pro každý claim map: načti jeho patterns (pokud existují)
+    2. Pokud má patterns: evaluuj je proti user groups
+    3. Pokud má `group_id`: check direct match
+    4. Kombinuj výsledky (union)
+
+#### 2.4 API endpointy
+- [ ] `POST /admin/claim-maps/{id}/patterns` - vytvoření patternu
+- [ ] `GET /admin/claim-maps/{id}/patterns` - seznam patterns
+- [ ] `PUT /admin/claim-maps/{claim_map_id}/patterns/{pattern_id}` - úprava
+- [ ] `DELETE /admin/claim-maps/{claim_map_id}/patterns/{pattern_id}` - smazání
+
+#### 2.5 TUI integrace
+- [ ] Přidat možnost vytvořit claim map bez `group_id` (pattern-based only)
+- [ ] Upravit Create/Update Claim Map forms:
+  - `group_id` je optional
+  - Přidat field `patterns` (read-only)
+  - Ctrl+P pro otevření Claim Map Patterns Manager
+- [ ] Dialog pro editaci patterns
+
+---
+
+### Phase 3: Token Compression (Medium Priority)
+
+#### 3.1 Database migrace
+- [ ] Vytvořit migraci `025_add_compression_support.sql`
+  - Tabulka `group_compression_rules` (client_id nullable, pattern, compressed_format, priority)
+  - Foreign key na `oauth_clients(id)` s ON DELETE CASCADE (nullable)
+  - Indexy na `client_id` a `priority ASC`
+  - Sloupec `oauth_clients.use_compressed_groups BOOLEAN DEFAULT false`
+  - Sloupec `claim_maps.use_compression BOOLEAN DEFAULT false`
+
+#### 3.2 Datový model
+- [ ] Přidat `GroupCompressionRule` struct do `db/models.rs`
+- [ ] Přidat fields do `OAuthClient` a `ClaimMap` structs
+- [ ] CRUD operace
+
+#### 3.3 Compression algoritmus
+- [ ] Vytvořit `src/compression.rs` modul
+- [ ] Funkce `compress_groups()`:
+  - Input: Vec<String> groups, Vec<GroupCompressionRule> rules
+  - Output: Vec<String> (compressed)
+  - Logika:
+    1. Seřaď rules podle priority ASC
+    2. Pro každé rule:
+       - Match groups podle pattern
+       - Pokud více matches → zkomprimuj do `prefix:{val1,val2,...}`
+       - Pokud jeden match → použij compressed_format
+    3. Return compressed groups
+
+- [ ] Funkce `decompress_groups()` (pro testování/validaci):
+  - Input: Vec<String> compressed
+  - Output: Vec<String> expanded
+
+#### 3.4 Integrace do token generation
+- [ ] Modifikovat `src/oauth2/authorization_code.rs`:
+  - Po application client group filters
+  - Pokud `client.use_compressed_groups == true`:
+    1. Načti compression rules (globální + client-specific)
+    2. Aplikuj `compress_groups()`
+    3. Použij compressed groups pro JWT
+
+- [ ] Modifikovat `src/auth/claims.rs`:
+  - V `build_custom_claims()`:
+  - Pokud `claim_map.use_compression == true` a hodnota je array:
+    1. Načti compression rules
+    2. Aplikuj kompresi na array values
+
+#### 3.5 API endpointy
+- [ ] `POST /admin/compression-rules` - vytvoření globálního pravidla
+- [ ] `POST /admin/oauth-clients/{id}/compression-rules` - client-specific
+- [ ] `GET /admin/compression-rules` - seznam globálních
+- [ ] `GET /admin/oauth-clients/{id}/compression-rules` - client-specific
+- [ ] `PUT /admin/compression-rules/{id}` - úprava
+- [ ] `DELETE /admin/compression-rules/{id}` - smazání
+
+#### 3.6 TUI integrace
+- [ ] Nový top-level tab "Compression" pro globální pravidla
+- [ ] V Create/Update Client: checkbox `use_compressed_groups`
+- [ ] Ctrl+C v Client form → otevře Client Compression Rules Manager
+- [ ] V Create/Update Claim Map: checkbox `use_compression`
+
+---
+
+## 🧪 Testing
+
+### Unit testy (Phase 1)
+- [ ] Test `apply_client_group_filters()` - sequential pattern application
+- [ ] Test include/exclude logika
+- [ ] Test priority ordering
+
+### Unit testy (Phase 2)
+- [ ] Test `evaluate_claim_map_patterns()`
+- [ ] Test hybrid model (group_id + patterns)
+
+### Unit testy (Phase 3)
+- [ ] Test `compress_groups()` - různé compression rules
+- [ ] Test `decompress_groups()` - roundtrip
+- [ ] Test edge cases (žádné matches, partial matches)
+
+### Integration testy
+- [ ] Test celého flow: user patterns → client filtering → claim maps → compression → JWT
+- [ ] Test API endpointů pro všechny nové entity
+- [ ] Performance test s velkým množstvím groups
+
+---
+
+## 📝 Dokumentace
+
+- [ ] Aktualizovat README.md:
+  - Client-Level Group Filtering sekce
+  - Pattern-Based Claim Maps sekce
+  - Token Compression sekce
+  - Příklady use-cases
+
+- [ ] API dokumentace:
+  - Všechny nové endpointy
+  - Request/response examples
+
+- [ ] TUI dokumentace:
+  - Nové klávesové zkratky
+  - Dialogs usage
+
+---
+
+## 🎯 Prioritizace
+
+### Sprint 1 (High Priority)
+1. Phase 1.1-1.4: Client-Level Group Filtering (core functionality)
+2. Phase 2.1-2.3: Pattern-Based Claim Maps (core functionality)
+
+### Sprint 2 (Medium Priority)
+3. Phase 1.5-1.6: Client filtering API + TUI
+4. Phase 2.4-2.5: Claim map patterns API + TUI
+
+### Sprint 3 (Medium Priority)
+5. Phase 3.1-3.4: Token Compression (core functionality)
+6. Phase 3.5-3.6: Compression API + TUI
+
+### Sprint 4 (Low Priority)
+7. Testing (všechny unit a integration testy)
+8. Dokumentace
+
+---
+
+## ⚠️ Rizika a poznámky
+
+### Performance
+- Client filtering je runtime → musí být rychlý (in-memory pattern matching)
+- Compression pravidel může být hodně → optimalizovat lookup (indexy, cache)
+
+### Backwards Compatibility
+- Všechny nové features jsou opt-in
+- Default behavior se nemění
+- Migration musí být bezpečné (žádné breaking changes)
+
+### Security
+- Patterns nesmí být příliš široké (validace)
+- Client filtering nesmí být bypassnutelný
+- Compression musí být deterministická (žádné information leaks)
+
+### TUI Complexity
+- Už máme: User Patterns Manager, Array Editor, Scope Selector
+- Přidáváme: Client Group Patterns, Claim Map Patterns, Compression Rules
+- Zvážit konsolidaci UI patterns (reusable komponenty)
