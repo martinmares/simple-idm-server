@@ -69,8 +69,10 @@ Options:
   --browser         Force browser flow
   --device          Force device flow
   --issuer <URL>    Override OIDC issuer
+  --client-id <ID>  Override OIDC client ID
   --signer-url <URL> Override signer URL
   --ttl-seconds <N> Override certificate TTL
+  --scopes <LIST>   Override OIDC scopes (comma-separated)
 ```
 
 **Příklady:**
@@ -84,6 +86,9 @@ simple-idm-ssh-login login --device
 
 # Custom TTL (8 hours)
 simple-idm-ssh-login login --ttl-seconds 28800
+
+# Override scopes
+simple-idm-ssh-login login --scopes openid,profile,email,groups
 ```
 
 ### `status`
