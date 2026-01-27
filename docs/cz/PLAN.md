@@ -25,7 +25,7 @@
 - ✅ Vytvořit migraci pro `user_group_patterns` tabulku (022_add_user_group_patterns.sql)
   - Sloupce: `id`, `user_id`, `pattern`, `is_include`, `priority`, `created_at`
   - Foreign key na `users(id)` s ON DELETE CASCADE
-  - Indexy na `user_id` a `priority DESC`
+  - Indexy na `user_id` a `priority ASC`
 
 #### 1.2 Datový model
 - ✅ Přidat `UserGroupPattern` struct do db/models.rs
@@ -34,7 +34,7 @@
 #### 1.3 Pattern matching logika
 - ✅ Implementováno v src/group_patterns.rs
 - ✅ Funkce `pattern_matches()` s podporou wildcards
-- ✅ Evaluace s prioritami (nejvyšší priorita vyhrává)
+- ✅ Evaluace s prioritami (nižší číslo = vyšší priorita)
 - ✅ Include/exclude logika
 
 #### 1.4 Background job
@@ -187,7 +187,7 @@ User Groups → User Patterns (sync job) → User Effective Groups
   - V `handle_refresh_token()` - stejná logika
 
 - ✅ Modifikovat `src/oauth2/device_flow.rs`:
-  - V `handle_device_token_internal()` - stejná logika
+  - V `handle_device_token()` - stejná logika
 
 #### 1.5 API endpointy
 - ✅ `POST /admin/oauth-clients/{id}/group-patterns` - vytvoření patternu

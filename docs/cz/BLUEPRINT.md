@@ -14,7 +14,7 @@ Tento dokument popisuje, co musí typický klient splnit a co mu simple-idm-serv
   - `authorization_code` (webové aplikace)
   - `refresh_token` (obnova session)
   - `client_credentials` (machine-to-machine)
-  - `urn:ietf:params:oauth:grant-type:device_code` (device flow – zatím připravené)
+  - `urn:ietf:params:oauth:grant-type:device_code` (device flow – implementované)
 
 ### 3) Scope
 - Povinné pro OIDC: `openid`
@@ -67,4 +67,4 @@ Tento dokument popisuje, co musí typický klient splnit a co mu simple-idm-serv
 
 - **Je možné použít username místo emailu?** Ano, ale doporučuje se `sub`.
 - **Můžu použít vlastní scope?** Ano, pokud ho validuješ na straně aplikace.
-- **Device flow?** Zatím není hotový, ale je připravený.
+- **Device flow?** Ano, je dostupný (device_code grant).

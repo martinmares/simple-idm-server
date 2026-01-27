@@ -451,7 +451,7 @@ let access_token = state.jwt_service.create_access_token(
 - Stejná logika, řádky ~1164-1181 + ~1220-1239
 
 **Device Flow (src/oauth2/device_flow.rs):**
-- `handle_device_token_internal()`, podobné místo
+- `handle_device_token()`, podobné místo
 
 ---
 

@@ -11,12 +11,12 @@ Potřeba automaticky přiřadit uživatele do všech budoucích groups s určit�
 
 ```sql
 CREATE TABLE user_group_patterns (
-    id INTEGER PRIMARY KEY,
-    user_id INTEGER NOT NULL,
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL,
     pattern TEXT NOT NULL,              -- např. "ssh:*" nebo "team:backend:*"
     is_include BOOLEAN NOT NULL DEFAULT true,  -- true = grant, false = deny
-    priority INTEGER NOT NULL DEFAULT 0,        -- vyšší číslo = vyšší priorita
-    created_at TIMESTAMP NOT NULL,
+    priority INTEGER NOT NULL DEFAULT 0,        -- nižší číslo = vyšší priorita
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 ```
@@ -27,9 +27,9 @@ CREATE TABLE user_group_patterns (
 
 1. Načti všechny existující groups z databáze
 2. Pro každého uživatele, který má záznamy v `user_group_patterns`:
-   - Seřaď jeho patterny podle `priority DESC` (nejvyšší priorita vyhrává)
+   - Seřaď jeho patterny podle `priority ASC` (nižší číslo = vyšší priorita)
    - Pro každou existující group:
-     - Projdi patterny od nejvyšší priority k nejnižší
+     - Projdi patterny od nejvyšší priority k nejnižší (tj. od nejnižšího čísla)
      - První matching pattern určí výsledek
      - Pokud `is_include=true` → vytvoř záznam v `user_groups` (pokud neexistuje)
      - Pokud `is_include=false` → smaž záznam z `user_groups` (pokud existuje)
