@@ -1096,6 +1096,29 @@ async fn event_loop(
             }
             continue;
         }
+        if app.mode == Mode::ClaimMapPatternsManager {
+            let handled = handle_claim_map_patterns_manager_event(app, event, http).await?;
+            if handled == ClaimMapPatternsManagerResult::Closed {
+                app.claim_map_patterns_manager = None;
+                app.mode = Mode::ClaimEditor;  // Return to ClaimEditor
+            }
+            continue;
+        }
+        if app.mode == Mode::ClaimMapPatternForm {
+            let handled = handle_claim_map_pattern_form_event(app, event, http).await?;
+            match handled {
+                ClaimMapPatternFormResult::Saved => {
+                    app.claim_map_pattern_form = None;
+                    app.mode = Mode::ClaimMapPatternsManager;
+                }
+                ClaimMapPatternFormResult::Cancelled => {
+                    app.claim_map_pattern_form = None;
+                    app.mode = Mode::ClaimMapPatternsManager;
+                }
+                ClaimMapPatternFormResult::Continue => {}
+            }
+            continue;
+        }
         if app.mode == Mode::ClaimValueEditor {
             let handled = handle_claim_value_editor_event(app, event)?;
             if handled == ClaimValueEditorResult::Applied {
@@ -1482,6 +1505,20 @@ async fn handle_claim_editor_event(
             app.pending_select = Some(claim_editor_hint(&editor.mode));
             app.claim_editor = None;
             return Ok(ClaimEditorResult::Applied);
+        }
+        KeyCode::Char('p') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Open patterns manager for selected claim
+                match open_claim_map_patterns_manager(app, http).await {
+                    Ok(_) => {}
+                    Err(err) => {
+                        if let Some(editor) = app.claim_editor.as_mut() {
+                            editor.error = Some(format!("Failed to open patterns manager: {}", err));
+                        }
+                    }
+                }
+                return Ok(ClaimEditorResult::Continue);
+            }
         }
         _ => {}
     }
@@ -1999,6 +2036,267 @@ enum ClientPatternFormResult {
     Continue,
     Saved,
     Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimMapPatternsManagerResult {
+    Continue,
+    Closed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimMapPatternFormResult {
+    Continue,
+    Saved,
+    Cancelled,
+}
+
+async fn handle_claim_map_patterns_manager_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClaimMapPatternsManagerResult> {
+    let Some(manager) = app.claim_map_patterns_manager.as_mut() else {
+        return Ok(ClaimMapPatternsManagerResult::Closed);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimMapPatternsManagerResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => Ok(ClaimMapPatternsManagerResult::Closed),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !manager.patterns.is_empty() {
+                manager.index = manager.index.saturating_sub(1);
+            }
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !manager.patterns.is_empty() {
+                manager.index = (manager.index + 1).min(manager.patterns.len() - 1);
+            }
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('n') => {
+            // Open create pattern form
+            app.claim_map_pattern_form = Some(ClaimMapPatternFormState {
+                claim_map_id: manager.claim_map_id.clone(),
+                pattern_id: None,
+                fields: vec![
+                    FormField::new("pattern", String::new()),
+                    FormField::boolean("is_include", true),
+                    FormField::new("priority", "0".to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::ClaimMapPatternForm;
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            // Open edit pattern form
+            if manager.patterns.is_empty() {
+                return Ok(ClaimMapPatternsManagerResult::Continue);
+            }
+            let pattern = &manager.patterns[manager.index];
+            app.claim_map_pattern_form = Some(ClaimMapPatternFormState {
+                claim_map_id: manager.claim_map_id.clone(),
+                pattern_id: Some(pattern.id.clone()),
+                fields: vec![
+                    FormField::new("pattern", pattern.pattern.clone()),
+                    FormField::boolean("is_include", pattern.is_include),
+                    FormField::new("priority", pattern.priority.to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::ClaimMapPatternForm;
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            // Delete pattern
+            if manager.patterns.is_empty() {
+                return Ok(ClaimMapPatternsManagerResult::Continue);
+            }
+
+            let pattern = &manager.patterns[manager.index];
+            let url = format!(
+                "{}/admin/claim-maps/{}/patterns/{}",
+                http.base_url, manager.claim_map_id, pattern.id
+            );
+
+            let response = http
+                .client
+                .delete(&url)
+                .header("Authorization", format!("Bearer {}", http.token))
+                .send()
+                .await
+                .context("Failed to delete pattern")?;
+
+            if response.status().is_success() {
+                // Refresh patterns list
+                let url = format!(
+                    "{}/admin/claim-maps/{}/patterns",
+                    http.base_url, manager.claim_map_id
+                );
+                let response = http
+                    .client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .send()
+                    .await?;
+
+                if response.status().is_success() {
+                    let patterns: Vec<ClaimMapPatternRow> = response.json().await?;
+                    manager.patterns = patterns;
+                    if manager.index >= manager.patterns.len() && manager.index > 0 {
+                        manager.index -= 1;
+                    }
+                    app.set_status("Pattern deleted successfully".to_string());
+                }
+            } else {
+                app.set_status(format!("Failed to delete pattern: HTTP {}", response.status()));
+            }
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        _ => Ok(ClaimMapPatternsManagerResult::Continue),
+    }
+}
+
+async fn handle_claim_map_pattern_form_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClaimMapPatternFormResult> {
+    let Some(pattern_form) = app.claim_map_pattern_form.as_mut() else {
+        return Ok(ClaimMapPatternFormResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimMapPatternFormResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => Ok(ClaimMapPatternFormResult::Cancelled),
+        KeyCode::Up => {
+            pattern_form.index = pattern_form.index.saturating_sub(1);
+            Ok(ClaimMapPatternFormResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            pattern_form.index = (pattern_form.index + 1).min(pattern_form.fields.len() - 1);
+            Ok(ClaimMapPatternFormResult::Continue)
+        }
+        KeyCode::Char(c) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(ClaimMapPatternFormResult::Continue);
+            }
+
+            let field = &mut pattern_form.fields[pattern_form.index];
+            match field.kind {
+                FieldKind::Text => {
+                    field.input.handle(tui_input::InputRequest::InsertChar(c));
+                }
+                FieldKind::Bool => {
+                    if c == ' ' {
+                        field.toggle_bool();
+                    }
+                }
+                _ => {}
+            }
+            Ok(ClaimMapPatternFormResult::Continue)
+        }
+        KeyCode::Backspace => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if matches!(field.kind, FieldKind::Text) {
+                field
+                    .input
+                    .handle(tui_input::InputRequest::DeletePrevChar);
+            }
+            Ok(ClaimMapPatternFormResult::Continue)
+        }
+        KeyCode::Enter => {
+            // Submit form
+            let pattern = pattern_form.fields[0].value().to_string();
+            let is_include = pattern_form.fields[1].value() == "true";
+            let priority: i32 = pattern_form.fields[2].value().parse().unwrap_or(0);
+
+            if pattern.is_empty() {
+                pattern_form.error = Some("Pattern cannot be empty".to_string());
+                return Ok(ClaimMapPatternFormResult::Continue);
+            }
+
+            let result = if let Some(pattern_id) = &pattern_form.pattern_id {
+                // Update existing pattern
+                let url = format!(
+                    "{}/admin/claim-maps/{}/patterns/{}",
+                    http.base_url, pattern_form.claim_map_id, pattern_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .put(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            } else {
+                // Create new pattern
+                let url = format!(
+                    "{}/admin/claim-maps/{}/patterns",
+                    http.base_url, pattern_form.claim_map_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            };
+
+            match result {
+                Ok(response) if response.status().is_success() => {
+                    // Refresh patterns in manager
+                    if let Some(manager) = app.claim_map_patterns_manager.as_mut() {
+                        let url = format!(
+                            "{}/admin/claim-maps/{}/patterns",
+                            http.base_url, manager.claim_map_id
+                        );
+                        if let Ok(response) = http
+                            .client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {}", http.token))
+                            .send()
+                            .await
+                        {
+                            if let Ok(patterns) = response.json::<Vec<ClaimMapPatternRow>>().await {
+                                manager.patterns = patterns;
+                            }
+                        }
+                    }
+                    app.set_status("Pattern saved successfully".to_string());
+                    Ok(ClaimMapPatternFormResult::Saved)
+                }
+                Ok(response) => {
+                    pattern_form.error = Some(format!("HTTP {}", response.status()));
+                    Ok(ClaimMapPatternFormResult::Continue)
+                }
+                Err(err) => {
+                    pattern_form.error = Some(err.to_string());
+                    Ok(ClaimMapPatternFormResult::Continue)
+                }
+            }
+        }
+        _ => Ok(ClaimMapPatternFormResult::Continue),
+    }
 }
 
 async fn handle_user_patterns_manager_event(
@@ -3618,8 +3916,19 @@ async fn open_claim_map_patterns_manager(app: &mut App, http: &HttpClient) -> Re
     let claim_map_id = claim.id.as_ref().context("Cannot manage patterns for unsaved claim")?;
 
     // Fetch patterns from API
-    let url = format!("/admin/claim-maps/{}/patterns", claim_map_id);
-    let patterns: Vec<ClaimMapPatternRow> = http.get(&url).await?;
+    let url = format!("{}/admin/claim-maps/{}/patterns", http.base_url, claim_map_id);
+    let response = http
+        .client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", http.token))
+        .send()
+        .await?;
+
+    let patterns: Vec<ClaimMapPatternRow> = if response.status().is_success() {
+        response.json().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     app.claim_map_patterns_manager = Some(ClaimMapPatternsManagerState {
         claim_map_id: claim_map_id.clone(),
@@ -4740,6 +5049,13 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     }
     if let Some(pattern_form) = &app.client_pattern_form {
         draw_client_pattern_form(frame, size, pattern_form, &mut cursor_visible);
+    }
+    if let Some(manager) = &app.claim_map_patterns_manager {
+        draw_claim_map_patterns_manager(frame, size, manager);
+        cursor_visible = false;
+    }
+    if let Some(pattern_form) = &app.claim_map_pattern_form {
+        draw_claim_map_pattern_form(frame, size, pattern_form, &mut cursor_visible);
     }
     if let Some(picker) = &app.picker {
         draw_picker(frame, size, picker);
@@ -6864,6 +7180,168 @@ fn draw_client_pattern_form(
     frame: &mut ratatui::Frame,
     area: Rect,
     pattern_form: &ClientPatternFormState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(50, 40, area);
+    frame.render_widget(Clear, popup);
+
+    let title = if pattern_form.pattern_id.is_some() {
+        "Edit Pattern"
+    } else {
+        "New Pattern"
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title);
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let mut lines = Vec::new();
+    let mut cursor = None;
+
+    for (idx, field) in pattern_form.fields.iter().enumerate() {
+        let is_active = idx == pattern_form.index;
+        let prefix = if is_active { "> " } else { "  " };
+        let value = field.display();
+
+        let label_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let value_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}: ", field.label), label_style),
+            Span::styled(value, value_style),
+        ];
+
+        if matches!(field.kind, FieldKind::Bool) {
+            spans.push(Span::styled(
+                " (space toggles)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        if is_active && !matches!(field.kind, FieldKind::Bool) {
+            let cursor_offset = field.input.cursor();
+            let cursor_x = inner[0].x
+                + (prefix.len() + field.label.len() + 2 + cursor_offset) as u16;
+            let cursor_y = inner[0].y + idx as u16;
+            cursor = Some((cursor_x, cursor_y));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(error) = &pattern_form.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    if let Some((x, y)) = cursor {
+        frame.set_cursor(x, y);
+        *cursor_visible = true;
+    }
+
+    let footer = Paragraph::new("Enter save | Esc cancel | ↑↓ navigate")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+
+fn draw_claim_map_patterns_manager(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    manager: &ClaimMapPatternsManagerState,
+) {
+    let popup = centered_rect(60, 50, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "Group Patterns for claim: {}",
+        manager.claim_name
+    ));
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    if manager.patterns.is_empty() {
+        let empty = Paragraph::new("No patterns defined. Press 'n' to create one.")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty, inner[0]);
+    } else {
+        let rows = manager
+            .patterns
+            .iter()
+            .map(|p| {
+                let include_exclude = if p.is_include { "Include" } else { "Exclude" };
+                Row::new(vec![
+                    p.priority.to_string(),
+                    p.pattern.clone(),
+                    include_exclude.to_string(),
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        state.select(Some(manager.index));
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(10),
+                Constraint::Percentage(60),
+                Constraint::Percentage(30),
+            ],
+        )
+        .header(
+            Row::new(vec!["Priority", "Pattern", "Action"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+        frame.render_stateful_widget(table, inner[0], &mut state);
+    }
+
+    let footer = Paragraph::new("n new | e edit | d delete | ↑↓ navigate | Enter/Esc close")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_claim_map_pattern_form(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    pattern_form: &ClaimMapPatternFormState,
     cursor_visible: &mut bool,
 ) {
     let popup = centered_rect(50, 40, area);
