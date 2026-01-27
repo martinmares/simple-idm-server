@@ -163,27 +163,9 @@ async fn setup() -> Arc<TestEnvironment> {
 }
 
 async fn get_admin_token() -> String {
-    let client = Client::new();
-
-    // Get access token for admin user
-    let token_resp = client
-        .post(format!("{}/oauth2/token", BASE_URL))
-        .form(&[
-            ("grant_type", "password"),
-            ("username", ADMIN_USERNAME),
-            ("password", ADMIN_PASSWORD),
-            ("client_id", "webapp_dashboard"),
-            ("client_secret", "client_secret_123"),
-        ])
-        .send()
-        .await
-        .expect("Failed to get token");
-
-    let token_data: Value = token_resp.json().await.expect("Failed to parse token");
-    token_data["access_token"]
-        .as_str()
-        .expect("No access token")
-        .to_string()
+    // Use admin root token from .env for admin API access
+    // This is simpler than OAuth2 flows for testing admin endpoints
+    "dev-admin-token-123".to_string()
 }
 
 // Helper to create test data
