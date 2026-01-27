@@ -7,8 +7,9 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx;
+use sqlx::{self, Row};
 use std::env;
 use url::Url;
 use uuid::Uuid;
@@ -2350,6 +2351,301 @@ pub async fn delete_user_group_pattern(
         }
     }
 }
+
+// ============================================================================
+// OAuth Client Group Patterns Management
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CreateClientGroupPatternRequest {
+    pub pattern: String,
+    pub is_include: Option<bool>,
+    pub priority: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClientGroupPatternResponse {
+    pub id: Uuid,
+    pub client_id: Uuid,
+    pub pattern: String,
+    pub is_include: bool,
+    pub priority: i32,
+    pub created_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateClientGroupPatternRequest {
+    pub pattern: Option<String>,
+    pub is_include: Option<bool>,
+    pub priority: Option<i32>,
+}
+
+/// Create a new group pattern for an OAuth client
+/// POST /admin/oauth-clients/{id}/group-patterns
+pub async fn create_client_group_pattern(
+    State(db_pool): State<DbPool>,
+    Path(client_id): Path<Uuid>,
+    Json(req): Json<CreateClientGroupPatternRequest>,
+) -> impl IntoResponse {
+    let is_include = req.is_include.unwrap_or(true);
+    let priority = req.priority.unwrap_or(0);
+
+    let result = sqlx::query!(
+        r#"
+        INSERT INTO oauth_client_group_patterns (client_id, pattern, is_include, priority)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, client_id, pattern, is_include, priority, created_at
+        "#,
+        client_id,
+        req.pattern,
+        is_include,
+        priority
+    )
+    .fetch_one(&db_pool)
+    .await;
+
+    match result {
+        Ok(row) => {
+            let response = ClientGroupPatternResponse {
+                id: row.id,
+                client_id: row.client_id,
+                pattern: row.pattern,
+                is_include: row.is_include,
+                priority: row.priority,
+                created_at: row.created_at.to_rfc3339(),
+            };
+            (StatusCode::CREATED, Json(response)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to create client group pattern: {:?}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to create pattern: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// List all group patterns for an OAuth client
+/// GET /admin/oauth-clients/{id}/group-patterns
+pub async fn list_client_group_patterns(
+    State(db_pool): State<DbPool>,
+    Path(client_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = sqlx::query!(
+        r#"
+        SELECT id, client_id, pattern, is_include, priority, created_at
+        FROM oauth_client_group_patterns
+        WHERE client_id = $1
+        ORDER BY priority ASC, created_at ASC
+        "#,
+        client_id
+    )
+    .fetch_all(&db_pool)
+    .await;
+
+    match result {
+        Ok(rows) => {
+            let patterns: Vec<ClientGroupPatternResponse> = rows
+                .into_iter()
+                .map(|row| ClientGroupPatternResponse {
+                    id: row.id,
+                    client_id: row.client_id,
+                    pattern: row.pattern,
+                    is_include: row.is_include,
+                    priority: row.priority,
+                    created_at: row.created_at.to_rfc3339(),
+                })
+                .collect();
+            Json(patterns).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch client group patterns: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to fetch patterns".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Update a client group pattern
+/// PUT /admin/oauth-clients/{client_id}/group-patterns/{pattern_id}
+pub async fn update_client_group_pattern(
+    State(db_pool): State<DbPool>,
+    Path((client_id, pattern_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<UpdateClientGroupPatternRequest>,
+) -> impl IntoResponse {
+    // Verify pattern belongs to client
+    let verify = sqlx::query!(
+        "SELECT id FROM oauth_client_group_patterns WHERE id = $1 AND client_id = $2",
+        pattern_id,
+        client_id
+    )
+    .fetch_optional(&db_pool)
+    .await;
+
+    match verify {
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "not_found".to_string(),
+                    error_description: "Pattern not found or does not belong to client".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to verify client group pattern: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to verify pattern".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Ok(Some(_)) => {}
+    }
+
+    // Build dynamic update query
+    let mut update_parts = Vec::new();
+    let mut param_count = 1;
+
+    if req.pattern.is_some() {
+        update_parts.push(format!("pattern = ${}", param_count));
+        param_count += 1;
+    }
+    if req.is_include.is_some() {
+        update_parts.push(format!("is_include = ${}", param_count));
+        param_count += 1;
+    }
+    if req.priority.is_some() {
+        update_parts.push(format!("priority = ${}", param_count));
+        param_count += 1;
+    }
+
+    if update_parts.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".to_string(),
+                error_description: "No fields to update".to_string(),
+            }),
+        )
+            .into_response();
+    }
+
+    let query_str = format!(
+        "UPDATE oauth_client_group_patterns SET {} WHERE id = ${} RETURNING id, client_id, pattern, is_include, priority, created_at",
+        update_parts.join(", "),
+        param_count
+    );
+
+    let mut query = sqlx::query(&query_str);
+
+    if let Some(pattern) = req.pattern {
+        query = query.bind(pattern);
+    }
+    if let Some(is_include) = req.is_include {
+        query = query.bind(is_include);
+    }
+    if let Some(priority) = req.priority {
+        query = query.bind(priority);
+    }
+    query = query.bind(pattern_id);
+
+    let result = query.fetch_one(&db_pool).await;
+
+    match result {
+        Ok(row) => {
+            let response = ClientGroupPatternResponse {
+                id: row.get("id"),
+                client_id: row.get("client_id"),
+                pattern: row.get("pattern"),
+                is_include: row.get("is_include"),
+                priority: row.get("priority"),
+                created_at: row.get::<DateTime<Utc>, _>("created_at").to_rfc3339(),
+            };
+            Json(response).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to update client group pattern: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to update pattern".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// Delete a client group pattern
+/// DELETE /admin/oauth-clients/{client_id}/group-patterns/{pattern_id}
+pub async fn delete_client_group_pattern(
+    State(db_pool): State<DbPool>,
+    Path((client_id, pattern_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let result = sqlx::query!(
+        "DELETE FROM oauth_client_group_patterns WHERE id = $1 AND client_id = $2",
+        pattern_id,
+        client_id
+    )
+    .execute(&db_pool)
+    .await;
+
+    match result {
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: "not_found".to_string(),
+                        error_description: "Pattern not found or does not belong to client"
+                            .to_string(),
+                    }),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::OK,
+                    Json(SuccessResponse {
+                        message: "Pattern deleted successfully".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete client group pattern: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to delete pattern".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ============================================================================
+// Groups Tree Endpoint
+// ============================================================================
 
 /// Get all groups with their parent-child relationships in a single request
 /// Returns a flat list of groups with each group containing its direct children IDs
