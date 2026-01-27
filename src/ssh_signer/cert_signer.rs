@@ -153,11 +153,13 @@ impl CertSigner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn test_validate_public_key_valid() {
+        let ca_key = NamedTempFile::new().expect("create temp ca key");
         let signer = CertSigner::new(
-            PathBuf::from("/tmp/ca_key"), // doesn't need to exist for this test
+            ca_key.path().to_path_buf(),
             3600,
             28800,
             30,
@@ -175,7 +177,8 @@ mod tests {
 
     #[test]
     fn test_validate_public_key_invalid() {
-        let signer = CertSigner::new(PathBuf::from("/tmp/ca_key"), 3600, 28800, 30).ok();
+        let ca_key = NamedTempFile::new().expect("create temp ca key");
+        let signer = CertSigner::new(ca_key.path().to_path_buf(), 3600, 28800, 30).ok();
 
         // Missing key data
         assert!(signer.as_ref().unwrap().validate_public_key("ssh-ed25519").is_err());
