@@ -57,6 +57,8 @@ enum Mode {
     PatternForm,
     ClientPatternsManager,
     ClientPatternForm,
+    ClaimMapPatternsManager,
+    ClaimMapPatternForm,
 }
 
 #[derive(Clone, Debug)]
@@ -251,6 +253,8 @@ struct App {
     pattern_form: Option<PatternFormState>,
     client_patterns_manager: Option<ClientPatternsManagerState>,
     client_pattern_form: Option<ClientPatternFormState>,
+    claim_map_patterns_manager: Option<ClaimMapPatternsManagerState>,
+    claim_map_pattern_form: Option<ClaimMapPatternFormState>,
     pending_group_move: Option<GroupMoveRequest>,
     filter: Option<String>,
     filter_active: bool,
@@ -288,6 +292,8 @@ impl App {
             pattern_form: None,
             client_patterns_manager: None,
             client_pattern_form: None,
+            claim_map_patterns_manager: None,
+            claim_map_pattern_form: None,
             pending_group_move: None,
             filter: None,
             filter_active: false,
@@ -826,6 +832,16 @@ struct ClientGroupPatternRow {
     created_at: String,
 }
 
+#[derive(Clone, Debug, serde::Deserialize)]
+struct ClaimMapPatternRow {
+    id: String,
+    claim_map_id: String,
+    pattern: String,
+    is_include: bool,
+    priority: i32,
+    created_at: String,
+}
+
 #[derive(Clone, Debug)]
 struct UserPatternsManagerState {
     user_id: String,
@@ -849,6 +865,23 @@ struct ClientPatternsManagerState {
     client_name: String,
     patterns: Vec<ClientGroupPatternRow>,
     index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimMapPatternsManagerState {
+    claim_map_id: String,
+    claim_name: String,
+    patterns: Vec<ClaimMapPatternRow>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimMapPatternFormState {
+    claim_map_id: String,
+    pattern_id: Option<String>, // None for create, Some for edit
+    fields: Vec<FormField>,
+    index: usize,
+    error: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -3567,6 +3600,34 @@ async fn open_client_patterns_manager(app: &mut App, _http: &HttpClient) -> Resu
         index: 0,
     });
     app.mode = Mode::ClientPatternsManager;
+
+    Ok(())
+}
+
+async fn open_claim_map_patterns_manager(app: &mut App, http: &HttpClient) -> Result<()> {
+    // This should be called from ClaimEditor mode
+    let claim_editor = app.claim_editor.as_ref().context("No claim editor active")?;
+
+    // Get selected claim
+    let selected_idx = claim_editor.index;
+    if selected_idx >= claim_editor.items.len() {
+        bail!("No claim selected");
+    }
+
+    let claim = &claim_editor.items[selected_idx];
+    let claim_map_id = claim.id.as_ref().context("Cannot manage patterns for unsaved claim")?;
+
+    // Fetch patterns from API
+    let url = format!("/admin/claim-maps/{}/patterns", claim_map_id);
+    let patterns: Vec<ClaimMapPatternRow> = http.get(&url).await?;
+
+    app.claim_map_patterns_manager = Some(ClaimMapPatternsManagerState {
+        claim_map_id: claim_map_id.clone(),
+        claim_name: claim.claim_name.clone(),
+        patterns,
+        index: 0,
+    });
+    app.mode = Mode::ClaimMapPatternsManager;
 
     Ok(())
 }
