@@ -8,8 +8,8 @@ use tokio::time::{sleep, Duration};
 
 // Test configuration
 const DOCKER_COMPOSE_FILE: &str = "docker-compose.yml";
-const BASE_URL: &str = "http://127.0.0.1:8080";
-const HEALTH_CHECK_URL: &str = "http://127.0.0.1:8080/health";
+const BASE_URL: &str = "http://127.0.0.1:3003";
+const HEALTH_CHECK_URL: &str = "http://127.0.0.1:3003/health";
 
 // Admin credentials for API access
 const ADMIN_USERNAME: &str = "admin";
