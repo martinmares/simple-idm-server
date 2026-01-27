@@ -2,7 +2,8 @@ use crate::auth::{
     build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
     get_user_group_names,
 };
-use crate::db::models::{DeviceCode, OAuthClient, User};
+use crate::client_group_filters::apply_client_group_filters;
+use crate::db::models::{DeviceCode, OAuthClient, OAuthClientGroupPattern, User};
 use axum::{
     extract::{Query, State},
     response::{Html, IntoResponse},
@@ -519,6 +520,33 @@ pub async fn handle_device_token_internal(
         _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await.unwrap_or_default(),
     };
 
+    // Apply client group filtering patterns (if any)
+    let filtered_group_names = match sqlx::query_as!(
+        OAuthClientGroupPattern,
+        r#"
+        SELECT id, client_id, pattern, is_include, priority, created_at
+        FROM oauth_client_group_patterns
+        WHERE client_id = $1
+        ORDER BY priority ASC
+        "#,
+        client.id
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(patterns) => {
+            if patterns.is_empty() {
+                user_group_names
+            } else {
+                apply_client_group_filters(&user_group_names, &patterns)
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch client group patterns: {:?}", e);
+            user_group_names
+        }
+    };
+
     // Vytvoř custom claims
     let custom_claims = if client.include_claim_maps {
         let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
@@ -536,7 +564,7 @@ pub async fn handle_device_token_internal(
         user_id = %user.id,
         username = %user.username,
         client_id = %client.client_id,
-        groups = ?user_group_names,
+        groups = ?filtered_group_names,
         custom_claims = ?custom_claims,
         "Issuing JWT token (device flow)"
     );
@@ -548,7 +576,7 @@ pub async fn handle_device_token_internal(
         Some(user.email.clone()),
         Some(user.username.clone()),
         Some(device_code.scope.clone()),
-        user_group_names.clone(),
+        filtered_group_names.clone(),
         custom_claims.clone(),
         state.access_token_expiry,
     ) {
@@ -572,7 +600,7 @@ pub async fn handle_device_token_internal(
             client.client_id.clone(),
             Some(user.email.clone()),
             Some(user.username.clone()),
-            user_group_names,
+            filtered_group_names,
             custom_claims,
             None, // device flow nemá nonce
             state.access_token_expiry,
