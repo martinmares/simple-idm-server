@@ -3254,6 +3254,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 index: 0,
                 error: None,
                 patterns,
+                client_patterns: None,
             }
         }
         Tab::Groups => {
@@ -3714,27 +3715,32 @@ async fn handle_form_event(
             }
         }
         KeyCode::Char('u') => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) && label == Some("redirect_uris") {
-                // Open array editor for redirect_uris
-                let current_value = form.fields[form.index].value();
-                let values: Vec<Input> = if current_value.is_empty() {
-                    vec![]
-                } else {
-                    current_value
-                        .split(',')
-                        .map(|s| input_with_value(s.trim().to_string()))
-                        .collect()
-                };
-                app.array_editor = Some(ArrayEditorState {
-                    title: "Edit Redirect URIs".to_string(),
-                    field_name: "redirect_uris".to_string(),
-                    values,
-                    index: 0,
-                    editing: false,
-                    error: None,
-                });
-                app.mode = Mode::ArrayEditor;
-                return Ok(FormResult::Continue);
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if label == Some("redirect_uris") {
+                    // Open array editor for redirect_uris
+                    let current_value = form.fields[form.index].value();
+                    let values: Vec<Input> = if current_value.is_empty() {
+                        vec![]
+                    } else {
+                        current_value
+                            .split(',')
+                            .map(|s| input_with_value(s.trim().to_string()))
+                            .collect()
+                    };
+                    app.array_editor = Some(ArrayEditorState {
+                        title: "Edit Redirect URIs".to_string(),
+                        field_name: "redirect_uris".to_string(),
+                        values,
+                        index: 0,
+                        editing: false,
+                        error: None,
+                    });
+                    app.mode = Mode::ArrayEditor;
+                    return Ok(FormResult::Continue);
+                } else if is_add_remove && label == Some("user_id") {
+                    request_selector =
+                        Some((SelectorKind::Users, SelectorTarget::FormField("user_id")));
+                }
             }
         }
         KeyCode::Char('o') => {
@@ -3804,14 +3810,6 @@ async fn handle_form_event(
                 app.picker = Some(PickerState::new_groups_claim_mode(&current));
                 app.mode = Mode::Picker;
                 return Ok(FormResult::Continue);
-            }
-        }
-        KeyCode::Char('u') => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                if is_add_remove && label == Some("user_id") {
-                    request_selector =
-                        Some((SelectorKind::Users, SelectorTarget::FormField("user_id")));
-                }
             }
         }
         _ => {}
@@ -6813,12 +6811,12 @@ fn draw_client_pattern_form(
         let display_value = match &field.kind {
             FieldKind::Bool => {
                 if value == "true" {
-                    "[X]"
+                    "[X]".to_string()
                 } else {
-                    "[ ]"
+                    "[ ]".to_string()
                 }
             }
-            _ => value,
+            _ => value.to_string(),
         };
 
         let label = format!("{}: ", field.label);
