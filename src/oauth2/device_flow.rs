@@ -66,6 +66,7 @@ pub struct DevicePageQuery {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 pub struct DeviceVerifyResponse {
     pub success: bool,
     pub message: String,

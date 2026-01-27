@@ -26,6 +26,7 @@ pub struct Group {
 }
 
 #[derive(Debug, Clone, FromRow)]
+#[allow(dead_code)]
 pub struct UserGroup {
     pub user_id: Uuid,
     pub group_id: Uuid,
@@ -64,6 +65,7 @@ pub struct ClaimMap {
 }
 
 #[derive(Debug, Clone, FromRow)]
+#[allow(dead_code)]
 pub struct AuthorizationCode {
     pub code: String,
     pub client_id: Uuid,
@@ -78,6 +80,7 @@ pub struct AuthorizationCode {
 }
 
 #[derive(Debug, Clone, FromRow)]
+#[allow(dead_code)]
 pub struct RefreshToken {
     pub token: String,
     pub client_id: Uuid,
@@ -88,6 +91,7 @@ pub struct RefreshToken {
 }
 
 #[derive(Debug, Clone, FromRow)]
+#[allow(dead_code)]
 pub struct UsedRefreshToken {
     pub token: String,
     pub client_id: Uuid,
@@ -98,6 +102,7 @@ pub struct UsedRefreshToken {
 }
 
 #[derive(Debug, Clone, FromRow)]
+#[allow(dead_code)]
 pub struct DeviceCode {
     pub device_code: String,
     pub user_code: String,

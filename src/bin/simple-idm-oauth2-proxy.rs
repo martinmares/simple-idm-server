@@ -7,7 +7,6 @@ use axum::{
     Router,
 };
 use base64::Engine;
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 

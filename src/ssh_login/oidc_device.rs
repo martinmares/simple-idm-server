@@ -19,6 +19,7 @@ struct DeviceTokenRequest {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TokenResponse {
     id_token: Option<String>,
     access_token: Option<String>,

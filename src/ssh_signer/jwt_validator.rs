@@ -29,6 +29,7 @@ struct Jwks {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 struct JwksKey {
     kid: String,
     kty: String,

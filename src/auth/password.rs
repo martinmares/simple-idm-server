@@ -4,6 +4,7 @@ use argon2::{
 };
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum PasswordError {
     #[error("Failed to hash password: {0}")]
     HashError(String),

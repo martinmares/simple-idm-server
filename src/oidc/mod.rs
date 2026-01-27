@@ -58,6 +58,7 @@ pub struct OidcDiscovery {
 
 /// Error response for discovery endpoint
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 pub struct ErrorResponse {
     pub error: String,
     pub error_description: String,
