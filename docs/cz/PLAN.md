@@ -81,34 +81,48 @@
 - [ ] Test API endpointů pro pattern management
 - [ ] Test TUI dialogů (pokud možné)
 
-#### 3.3 Dokumentace
-- [ ] Aktualizovat README s novými features
-- [ ] Přidat příklady použití group patterns
-- [ ] Dokumentovat nové klávesové zkratky v TUI
+#### 3.3 Dokumentace ✅ HOTOVO
+- ✅ Aktualizovat README s novými features
+- ✅ Přidat příklady použití group patterns
+- ✅ Dokumentovat nové klávesové zkratky v TUI
 
 ## 📝 Poznámky
 
-- **Implementace dokončena 2026-01-26**
+- **Implementace dokončena 2026-01-27**
 - **TIMEZONE fix v c2b42c9** - hotovo, nesahat
-- Použité technologie: sqlx + PostgreSQL, actix-web, ratatui
-- Token usage: ~86K/200K (57% zbývá)
+- Použité technologie: sqlx + PostgreSQL, axum, ratatui
+- Priority logic opravena: nižší číslo = vyšší priorita, patterns se aplikují sekvenčně
+- Groups tab optimalizace: N+1 API calls → 1 bulk endpoint
 
 ## 🎉 Shrnutí implementace
 
 ### Backend (Group Patterns)
 - ✅ Kompletní CRUD API endpointy
 - ✅ Pattern matching s wildcards (`ssh:*`, `*:admin`, `ssh:*:admin`)
-- ✅ Priority system (vyšší číslo = vyšší priorita)
+- ✅ Priority system (nižší číslo = vyšší priorita, sekvenční aplikace)
 - ✅ Background job synchronizace každých 5 minut (konfigurovatelné)
 - ✅ Migrace 022 aplikována v databázi
+- ✅ Info-level logging pro sync job
 
 ### Frontend (TUI)
 - ✅ Array editor pro redirect_uris (Ctrl+U)
 - ✅ Scope selector s předvyplněnými scopes (Ctrl+O)
 - ✅ Read-only zobrazení s hinty v formulářích
 - ✅ Plně funkční dialogy s navigací
+- ✅ Patterns Manager (Ctrl+P v Create/Update User)
+  - Dialog zobrazuje patterns uživatele v tabulce
+  - Klávesy: n (new), e (edit), d (delete), Enter/Esc (close)
+  - Pattern Form pro vytváření/editaci patterns
+  - Patterns zobrazeny přímo v User formuláři
+- ✅ Groups tab optimalizace (1 API call místo N+1)
+
+### Performance Improvements
+- ✅ Groups tree endpoint (`GET /admin/groups/tree`)
+  - Vrací všechny groups + jejich children relationships v jednom requestu
+  - Redukuje N+1 API calls na jediný bulk endpoint
+  - Výrazně rychlejší načítání Groups tabu
 
 ### Co zbývá (Priorita 3)
 - Unit testy pro pattern matching
 - Integration testy pro API a background job
-- Aktualizace README s příklady použití
+- Move up/down pro změnu priority patterns (odloženo)

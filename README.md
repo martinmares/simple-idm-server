@@ -9,11 +9,13 @@ A simple OAuth2/OIDC Identity Provider Server written in Rust.
 - **TV/Device Flow** - OAuth2 Device Authorization Grant (RFC 8628) (experimental)
 - **OAuth2 Authentication Proxy** - Add OIDC to legacy applications (nginx auth_request)
 - **Custom Claim Mapping** - Similar to Kanidm, allows filtering groups/claims per application
+- **Group Patterns** - Automatic group assignment using wildcard patterns (e.g., `ssh:*`)
 - **JWT tokens** - RS256 with asymmetric keys
 - **Refresh tokens** - For long-term sessions
 - **OIDC Discovery** - `/.well-known/openid-configuration`
 - **JWKS Endpoint** - `/.well-known/jwks.json`
 - **Admin API** - Complete REST API for managing users, groups, clients, and claim maps
+- **TUI Client** - Terminal UI for administration (`simple-idm-ctl tui`)
 
 ## Requirements
 
@@ -573,6 +575,85 @@ cargo test
 ```bash
 cargo build --release
 ```
+
+## Group Patterns
+
+Automatically assign groups to users based on wildcard patterns. Useful for managing large numbers of groups systematically.
+
+### How It Works
+
+1. Define patterns for a user (via TUI or API)
+2. Background job evaluates patterns every 5 minutes (configurable)
+3. Groups matching patterns are automatically assigned/removed
+
+### Pattern Syntax
+
+- `ssh:*` - Matches all groups starting with `ssh:`
+- `*:admin` - Matches all groups ending with `:admin`
+- `ssh:*:admin` - Matches groups like `ssh:role:admin`, `ssh:principal:admin`
+- `exact-match` - Matches only exact group name
+
+### Priority System
+
+Patterns are applied **sequentially** in priority order (lower number = higher priority):
+
+```
+Priority 1: ssh:* (include)         → Adds all ssh:* groups
+Priority 2: ssh:role:admin (exclude) → Removes ssh:role:admin from result
+Priority 10: encjson:* (include)     → Adds all encjson:* groups
+```
+
+### Example Usage
+
+#### Via TUI (simple-idm-ctl tui)
+
+1. Navigate to **Users** tab
+2. Select user and press **e** (edit)
+3. Press **Ctrl+P** to open Patterns Manager
+4. Press **n** to create new pattern:
+   - Pattern: `ssh:*`
+   - Type: Include
+   - Priority: 1
+5. Press **n** again for exclusion:
+   - Pattern: `ssh:role:admin`
+   - Type: Exclude
+   - Priority: 2
+
+#### Via API
+
+```bash
+# Create include pattern
+curl -X POST http://localhost:8080/admin/users/{user_id}/group-patterns \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pattern": "ssh:*", "is_include": true, "priority": 1}'
+
+# Create exclude pattern
+curl -X POST http://localhost:8080/admin/users/{user_id}/group-patterns \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"pattern": "ssh:role:admin", "is_include": false, "priority": 2}'
+
+# List user patterns
+curl http://localhost:8080/admin/users/{user_id}/group-patterns \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### Configuration
+
+```bash
+# .env file
+GROUP_PATTERNS_SYNC_INTERVAL_SECONDS=300  # Default: 5 minutes, 0 = disabled
+```
+
+### TUI Keyboard Shortcuts
+
+- **Ctrl+P** - Open Patterns Manager (in Create/Update User form)
+- **n** - New pattern
+- **e** - Edit pattern
+- **d** - Delete pattern
+- **Enter/Esc** - Close manager
+
 ## TODO
 
 ### Core Features
