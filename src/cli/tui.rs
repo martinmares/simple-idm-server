@@ -205,31 +205,7 @@ impl<T> EntityState<T> {
         }
     }
 
-    #[allow(dead_code)]
-    fn select_next(&mut self) {
-        if self.items.is_empty() {
-            self.state.select(None);
-            return;
-        }
-        let next = match self.state.selected() {
-            Some(idx) => (idx + 1).min(self.items.len() - 1),
-            None => 0,
-        };
-        self.state.select(Some(next));
-    }
-
-    #[allow(dead_code)]
-    fn select_prev(&mut self) {
-        if self.items.is_empty() {
-            self.state.select(None);
-            return;
-        }
-        let prev = match self.state.selected() {
-            Some(idx) => idx.saturating_sub(1),
-            None => 0,
-        };
-        self.state.select(Some(prev));
-    }
+    
 }
 
 struct App {
@@ -4093,7 +4069,7 @@ fn open_claim_editor(app: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn selected_item<'a, T>(items: &'a [T], idx: Option<usize>) -> Result<&'a T> {
+fn selected_item<T>(items: &[T], idx: Option<usize>) -> Result<&T> {
     idx.and_then(|i| items.get(i))
         .ok_or_else(|| anyhow!("No row selected"))
 }
@@ -4228,7 +4204,7 @@ async fn handle_form_event(
                     .map(|s| s.to_string())
                     .collect();
 
-                let standard = vec![
+                let standard = [
                     "openid".to_string(),
                     "profile".to_string(),
                     "email".to_string(),
@@ -4904,8 +4880,7 @@ fn generate_password(gen: &PasswordGenState) -> Result<String> {
         .value()
         .parse()
         .unwrap_or(16)
-        .max(8)
-        .min(128);
+        .clamp(8, 128);
 
     let mut charset = String::new();
     if gen.include_upper {
@@ -5832,9 +5807,13 @@ fn draw_form(
         }
     }
 
-    let footer_text = if matches!(form.action, FormAction::CreateUser | FormAction::UpdateUser(_)) {
-        "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns | Ctrl+G secret | Ctrl+V reveal"
-    } else if matches!(form.action, FormAction::CreateClient | FormAction::UpdateClient(_)) {
+    let footer_text = if matches!(
+        form.action,
+        FormAction::CreateUser
+            | FormAction::UpdateUser(_)
+            | FormAction::CreateClient
+            | FormAction::UpdateClient(_)
+    ) {
         "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns | Ctrl+G secret | Ctrl+V reveal"
     } else if matches!(form.action, FormAction::UpdateClaimMap(_)) {
         "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns"
@@ -6062,7 +6041,7 @@ fn ensure_selection_in_filtered(app: &mut App, filtered: &[usize]) {
     let selected = state.selected();
     if selected.is_none()
         || selected
-            .map(|idx| !filtered.iter().any(|&value| value == idx))
+            .map(|idx| !filtered.contains(&idx))
             .unwrap_or(true)
     {
         state.select(Some(filtered[0]));
@@ -6929,9 +6908,7 @@ fn draw_claim_value_editor(
 }
 
 fn format_other_label(label: &str, id: &str) -> String {
-    if id.is_empty() {
-        label.to_string()
-    } else if label == id {
+    if id.is_empty() || label == id {
         label.to_string()
     } else {
         format!("{label} ({id})")

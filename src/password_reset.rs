@@ -10,7 +10,6 @@ use chrono::{DateTime, Duration, Utc};
 use rand::RngCore;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
-use sqlx;
 use uuid::Uuid;
 
 use crate::auth::password::hash_password;

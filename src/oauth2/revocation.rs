@@ -35,7 +35,7 @@ pub async fn handle_revoke(
 ) -> impl IntoResponse {
     let mut req = match parse_revocation_request(&headers, &body) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     apply_client_auth(&mut req.client_id, &mut req.client_secret, &headers);
@@ -205,7 +205,7 @@ pub async fn handle_revoke(
 fn parse_revocation_request(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<RevocationRequest, axum::response::Response> {
+) -> Result<RevocationRequest, Box<axum::response::Response>> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
@@ -221,24 +221,28 @@ fn parse_revocation_request(
             .map_err(|_| ())
             .or_else(|_| serde_urlencoded::from_bytes::<RevocationRequest>(body).map_err(|_| ()))
     } else {
-        return Err((
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json(ErrorResponse {
-                error: "unsupported_media_type".to_string(),
-                error_description: "Expected Content-Type application/json or application/x-www-form-urlencoded".to_string(),
-            }),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(ErrorResponse {
+                    error: "unsupported_media_type".to_string(),
+                    error_description: "Expected Content-Type application/json or application/x-www-form-urlencoded".to_string(),
+                }),
+            )
+                .into_response(),
+        ));
     };
 
     parsed.map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "invalid_request".to_string(),
-                error_description: "Failed to parse revocation request".to_string(),
-            }),
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_request".to_string(),
+                    error_description: "Failed to parse revocation request".to_string(),
+                }),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }

@@ -74,6 +74,7 @@ impl JwtService {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_access_token(
         &self,
         user_id: Uuid,
@@ -108,6 +109,7 @@ impl JwtService {
             .map_err(|e| JwtError::EncodeError(e.to_string()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn create_id_token(
         &self,
         user_id: Uuid,

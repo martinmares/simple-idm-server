@@ -1,7 +1,7 @@
-/// Claim Map Pattern evaluation module
-///
-/// This module provides pattern matching for claim maps, allowing dynamic
-/// claim assignment based on user's group names.
+//! Claim Map Pattern evaluation module.
+//!
+//! This module provides pattern matching for claim maps, allowing dynamic
+//! claim assignment based on user's group names.
 
 use crate::db::models::ClaimMapPattern;
 
@@ -34,15 +34,13 @@ fn pattern_matches(pattern: &str, group_name: &str) -> bool {
                 if !group_part.contains(substring) {
                     return false;
                 }
-            } else if pattern_part.starts_with('*') {
+            } else if let Some(suffix) = pattern_part.strip_prefix('*') {
                 // *suffix - suffix match
-                let suffix = &pattern_part[1..];
                 if !group_part.ends_with(suffix) {
                     return false;
                 }
-            } else if pattern_part.ends_with('*') {
+            } else if let Some(prefix) = pattern_part.strip_suffix('*') {
                 // prefix* - prefix match
-                let prefix = &pattern_part[..pattern_part.len() - 1];
                 if !group_part.starts_with(prefix) {
                     return false;
                 }

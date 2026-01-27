@@ -77,10 +77,9 @@ pub async fn handle_userinfo(
                     .into_response();
             }
 
-            let aud_valid = match has_valid_audience(&state.db_pool, &claims.aud).await {
-                Ok(valid) => valid,
-                Err(_) => false,
-            };
+            let aud_valid = has_valid_audience(&state.db_pool, &claims.aud)
+                .await
+                .unwrap_or_default();
 
             if !aud_valid {
                 return (
