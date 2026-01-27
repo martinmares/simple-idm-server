@@ -1,0 +1,56 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE claim_map_patterns\n        SET pattern = $1, is_include = $2, priority = $3\n        WHERE id = $4 AND claim_map_id = $5\n        RETURNING id, claim_map_id, pattern, is_include, priority, created_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "claim_map_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "pattern",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_include",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "priority",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Bool",
+        "Int4",
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5686bed9dd121ffbe114c30117c66f419a0533893f0a3e9c6ff9d81cab18670d"
+}

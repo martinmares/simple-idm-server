@@ -55,7 +55,7 @@ pub struct OAuthClient {
 pub struct ClaimMap {
     pub id: Uuid,
     pub client_id: Uuid,
-    pub group_id: Uuid,
+    pub group_id: Option<Uuid>, // Optional - can use patterns instead
     pub claim_name: String,
     pub claim_value: Option<String>,
     pub claim_value_kind: String, // 'single' or 'array'
@@ -134,6 +134,16 @@ pub struct UserGroupPattern {
 pub struct OAuthClientGroupPattern {
     pub id: Uuid,
     pub client_id: Uuid,
+    pub pattern: String,
+    pub is_include: bool,
+    pub priority: i32,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ClaimMapPattern {
+    pub id: Uuid,
+    pub claim_map_id: Uuid,
     pub pattern: String,
     pub is_include: bool,
     pub priority: i32,

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM claim_map_patterns WHERE id = $1 AND claim_map_id = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bb5bfc1aa0c2a3f932e0da1d011adc965f2dc56dc956ca2cb43c5ef30760f04c"
+}
