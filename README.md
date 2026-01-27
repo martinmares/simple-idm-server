@@ -696,7 +696,7 @@ See `.tmp/CODEX_INSTRUCTIONS_BIG_simple-idm-server.md` for details:
 - [ ] **Naming conventions** - enforce `app:ns:X`, `app:role:Y`, `team:Z` pattern
 
 ### Nice to have
-- [ ] Web UI for device verification
+- [x] Web UI for device verification (`GET /device` + `POST /device`)
 - [ ] Publish Docker image
 - [ ] Expand integration documentation
 - [ ] Export/Import feature (backup/restore)
