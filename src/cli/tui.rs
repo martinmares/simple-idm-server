@@ -3790,10 +3790,6 @@ async fn handle_form_event(
                     }
                     return Ok(FormResult::Continue);
                 }
-            }
-        }
-        KeyCode::Char('t') => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
                 // Open client patterns manager from Create/Update Client form
                 if matches!(form.action, FormAction::CreateClient | FormAction::UpdateClient(_)) {
                     if let Err(err) = open_client_patterns_manager(app, http).await {
@@ -5029,7 +5025,7 @@ fn help_lines(tab: Tab) -> Vec<Line<'static>> {
             lines.push(Line::from("n new client"));
             lines.push(Line::from("e edit client"));
             lines.push(Line::from("d delete client"));
-            lines.push(Line::from("Ctrl+T manage group patterns (in list or edit)"));
+            lines.push(Line::from("Ctrl+P manage group patterns (in list or edit)"));
         }
     }
 
@@ -5233,6 +5229,45 @@ fn draw_form(
         }
     }
 
+    // Show patterns table for Create/Update Client forms
+    if let Some(client_patterns) = &form.client_patterns {
+        lines.push(Line::from("")); // Empty line
+        lines.push(Line::from(Span::styled(
+            "Group Patterns:",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+
+        if client_patterns.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no patterns defined - use Ctrl+P to add)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  # | Pattern              | Type    | Priority",
+                Style::default().fg(Color::Cyan),
+            )));
+            for (idx, pattern) in client_patterns.iter().enumerate() {
+                let type_str = if pattern.is_include { "include" } else { "exclude" };
+                let line_text = format!(
+                    "  {} | {:<20} | {:<7} | {}",
+                    idx + 1,
+                    pattern.pattern,
+                    type_str,
+                    pattern.priority
+                );
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(Color::White),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "  (Ctrl+P to edit patterns)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
     if let Some(error) = &form.error {
         lines.push(Line::from(Span::styled(
             error.clone(),
@@ -5258,7 +5293,7 @@ fn draw_form(
     let footer_text = if matches!(form.action, FormAction::CreateUser | FormAction::UpdateUser(_)) {
         "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns | Ctrl+G secret | Ctrl+V reveal"
     } else if matches!(form.action, FormAction::CreateClient | FormAction::UpdateClient(_)) {
-        "Enter next/submit | Tab switch | Esc cancel | Ctrl+T manage patterns | Ctrl+G secret | Ctrl+V reveal"
+        "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns | Ctrl+G secret | Ctrl+V reveal"
     } else if form
         .fields
         .iter()
@@ -6790,74 +6825,67 @@ fn draw_client_pattern_form(
         .margin(1)
         .split(popup);
 
-    // Draw form fields
-    let fields_area = inner[0];
-    let fields_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints(vec![
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Length(3),
-            Constraint::Min(1),
-        ])
-        .split(fields_area);
+    let mut lines = Vec::new();
+    let mut cursor = None;
 
-    for (i, field) in pattern_form.fields.iter().enumerate() {
-        if i >= fields_chunks.len() {
-            break;
-        }
-        let is_selected = i == pattern_form.index;
-        let value = field.value();
-        let display_value = match &field.kind {
-            FieldKind::Bool => {
-                if value == "true" {
-                    "[X]".to_string()
-                } else {
-                    "[ ]".to_string()
-                }
-            }
-            _ => value.to_string(),
-        };
+    for (idx, field) in pattern_form.fields.iter().enumerate() {
+        let is_active = idx == pattern_form.index;
+        let prefix = if is_active { "> " } else { "  " };
+        let value = field.display();
 
-        let label = format!("{}: ", field.label);
-        let style = if is_selected {
+        let label_style = if is_active {
             Style::default()
-                .fg(Color::Yellow)
+                .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default()
+            Style::default().fg(Color::White)
         };
 
-        let paragraph = Paragraph::new(format!("{}{}", label, display_value)).style(style);
-        frame.render_widget(paragraph, fields_chunks[i]);
+        let value_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
 
-        if is_selected && !matches!(field.kind, FieldKind::Bool) {
-            let cursor_offset = label.len() + field.input.cursor();
-            let x = fields_chunks[i].x + cursor_offset as u16;
-            let y = fields_chunks[i].y;
-            frame.set_cursor(x, y);
-            *cursor_visible = true;
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}: ", field.label), label_style),
+            Span::styled(value, value_style),
+        ];
+
+        if matches!(field.kind, FieldKind::Bool) {
+            spans.push(Span::styled(
+                " (space toggles)",
+                Style::default().fg(Color::DarkGray),
+            ));
         }
+
+        if is_active && !matches!(field.kind, FieldKind::Bool) {
+            let cursor_offset = field.input.cursor();
+            let cursor_x = inner[0].x
+                + (prefix.len() + field.label.len() + 2 + cursor_offset) as u16;
+            let cursor_y = inner[0].y + idx as u16;
+            cursor = Some((cursor_x, cursor_y));
+        }
+
+        lines.push(Line::from(spans));
     }
 
-    // Show error if any
     if let Some(error) = &pattern_form.error {
-        let error_area = fields_chunks[3];
-        let error_text = Paragraph::new(error.as_str())
-            .style(Style::default().fg(Color::Red));
-        frame.render_widget(error_text, error_area);
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
     }
 
-    if pattern_form.index == pattern_form.fields.len().saturating_sub(1)
-        && !matches!(pattern_form.fields.last().map(|f| &f.kind), Some(FieldKind::Bool))
-    {
-        if let Some(field) = pattern_form.fields.last() {
-            let cursor_offset = format!("{}: ", field.label).len() + field.input.cursor();
-            let x = fields_chunks[pattern_form.index].x + cursor_offset as u16;
-            let y = fields_chunks[pattern_form.index].y;
-            frame.set_cursor(x, y);
-            *cursor_visible = true;
-        }
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    if let Some((x, y)) = cursor {
+        frame.set_cursor(x, y);
+        *cursor_visible = true;
     }
 
     let footer = Paragraph::new("Enter save | Esc cancel | ↑↓ navigate")
