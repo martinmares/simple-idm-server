@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod client_group_filters;
 mod config;
 mod db;
 mod group_patterns;
@@ -204,6 +205,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/admin/users/{user_id}/group-patterns/{pattern_id}",
             delete(admin::handlers::delete_user_group_pattern),
+        )
+        // OAuth Client Group Patterns management
+        .route(
+            "/admin/oauth-clients/{id}/group-patterns",
+            post(admin::handlers::create_client_group_pattern),
+        )
+        .route(
+            "/admin/oauth-clients/{id}/group-patterns",
+            get(admin::handlers::list_client_group_patterns),
+        )
+        .route(
+            "/admin/oauth-clients/{client_id}/group-patterns/{pattern_id}",
+            put(admin::handlers::update_client_group_pattern),
+        )
+        .route(
+            "/admin/oauth-clients/{client_id}/group-patterns/{pattern_id}",
+            delete(admin::handlers::delete_client_group_pattern),
         )
         // OAuth client management
         .route(
