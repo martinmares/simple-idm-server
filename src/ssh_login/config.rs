@@ -8,7 +8,6 @@ pub struct SshLoginConfig {
     pub scopes: Vec<String>,
     pub signer_url: String,
     pub ttl_seconds: u64,
-    pub ssh_key_path: PathBuf,
 }
 
 impl SshLoginConfig {
@@ -53,10 +52,6 @@ impl SshLoginConfig {
             ],
             signer_url: "http://localhost:9222".to_string(),
             ttl_seconds: 3600,
-            ssh_key_path: dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ssh")
-                .join("id_simpleidm"),
         };
 
         Self::apply_env_overrides(config)
@@ -77,22 +72,27 @@ impl SshLoginConfig {
                 config.ttl_seconds = ttl_num;
             }
         }
-        if let Ok(key_path) = std::env::var("SSH_KEY_PATH") {
-            config.ssh_key_path = PathBuf::from(key_path);
-        }
 
         config
     }
 
+    pub fn ssh_key_path(&self) -> PathBuf {
+        let base_dir = dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("simple-idm-ssh-login")
+            .join("keys");
+        base_dir.join("id_simpleidm")
+    }
+
     pub fn cert_path(&self) -> PathBuf {
-        let mut path = self.ssh_key_path.clone();
+        let mut path = self.ssh_key_path();
         let filename = path.file_name().unwrap().to_str().unwrap();
         path.set_file_name(format!("{}-cert.pub", filename));
         path
     }
 
     pub fn public_key_path(&self) -> PathBuf {
-        let mut path = self.ssh_key_path.clone();
+        let mut path = self.ssh_key_path();
         let filename = path.file_name().unwrap().to_str().unwrap();
         path.set_file_name(format!("{}.pub", filename));
         path

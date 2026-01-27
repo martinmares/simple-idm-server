@@ -12,7 +12,8 @@ pub async fn login(
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
     // Ensure SSH keypair exists
-    keypair::ensure_keypair(&config.ssh_key_path)?;
+    let key_path = config.ssh_key_path();
+    keypair::ensure_keypair(&key_path)?;
 
     // Read public key
     let public_key = keypair::read_public_key(&config.public_key_path())?;
@@ -121,7 +122,7 @@ pub fn logout(config: &SshLoginConfig) -> Result<(), String> {
 }
 
 pub fn print_ssh_config(config: &SshLoginConfig) {
-    let key_path = config.ssh_key_path.clone();
+    let key_path = config.ssh_key_path();
     let cert_path = config.cert_path();
 
     println!("\n# Add this to your ~/.ssh/config:\n");
@@ -200,7 +201,7 @@ pub async fn ssh(
     // Spusť SSH s certifikátem
     println!("\n🔌 Connecting via SSH...\n");
 
-    let key_path = config.ssh_key_path.clone();
+    let key_path = config.ssh_key_path();
 
     let err = Command::new("ssh")
         .arg("-i")
