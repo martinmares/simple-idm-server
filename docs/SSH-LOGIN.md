@@ -51,8 +51,8 @@ Nebo manuálně přidejte do `~/.ssh/config`:
 
 ```sshconfig
 Host *.corp *.example.com
-  IdentityFile ~/.ssh/id_simpleidm
-  CertificateFile ~/.ssh/id_simpleidm-cert.pub
+  IdentityFile ~/Library/Application Support/simple-idm-ssh-login/keys/id_simpleidm
+  CertificateFile ~/Library/Application Support/simple-idm-ssh-login/keys/id_simpleidm-cert.pub
   IdentitiesOnly yes
 ```
 
@@ -152,7 +152,6 @@ signer_url = "https://ssh-signer.cloud-app.cz"
 ttl_seconds = 3600
 
 # Optional: custom SSH key path
-# ssh_key_path = "/home/user/.ssh/id_simpleidm"
 ```
 
 ### Environment Variables
@@ -161,7 +160,6 @@ ttl_seconds = 3600
 - `CLIENT_ID` - OAuth2 client ID
 - `SIGNER_URL` - SSH signer URL
 - `TTL_SECONDS` - Certificate TTL
-- `SSH_KEY_PATH` - Custom SSH key path
 
 **Příklad:**
 
@@ -175,9 +173,12 @@ simple-idm-ssh-login login
 
 Default cesty:
 
-- Private key: `~/.ssh/id_simpleidm`
-- Public key: `~/.ssh/id_simpleidm.pub`
-- Certificate: `~/.ssh/id_simpleidm-cert.pub`
+- Private key (macOS): `~/Library/Application Support/simple-idm-ssh-login/keys/id_simpleidm`
+- Public key (macOS): `~/Library/Application Support/simple-idm-ssh-login/keys/id_simpleidm.pub`
+- Certificate (macOS): `~/Library/Application Support/simple-idm-ssh-login/keys/id_simpleidm-cert.pub`
+- Private key (Linux): `~/.local/share/simple-idm-ssh-login/keys/id_simpleidm`
+- Public key (Linux): `~/.local/share/simple-idm-ssh-login/keys/id_simpleidm.pub`
+- Certificate (Linux): `~/.local/share/simple-idm-ssh-login/keys/id_simpleidm-cert.pub`
 
 Certifikát je automaticky přepsán při každém `login`.
 
@@ -346,7 +347,7 @@ RUST_LOG=simple_idm_ssh_login=debug \
 
 ```bash
 # Inspect certificate
-ssh-keygen -L -f ~/.ssh/id_simpleidm-cert.pub
+ssh-keygen -L -f ~/Library/Application\ Support/simple-idm-ssh-login/keys/id_simpleidm-cert.pub
 
 # Test SSH (verbose)
 ssh -v your-server.com

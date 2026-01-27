@@ -12,5 +12,6 @@ signer_url = "https://ssh-signer.cloud-app.cz"
 # Certificate TTL (in seconds)
 ttl_seconds = 3600  # 1 hour
 
-# SSH key path (optional, defaults to ~/.ssh/id_simpleidm)
-# ssh_key_path = "/home/user/.ssh/id_simpleidm"
+# SSH keys are stored in the app data directory:
+#   macOS: ~/Library/Application Support/simple-idm-ssh-login/keys/id_simpleidm
+#   Linux: ~/.local/share/simple-idm-ssh-login/keys/id_simpleidm
