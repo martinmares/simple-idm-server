@@ -52,12 +52,12 @@ INSERT INTO oauth_clients (id, client_id, client_secret_hash, name, redirect_uri
  'api:read api:write',
  true),
 
--- Web application (authorization code flow)
+-- Web application (authorization code flow + password for tests)
 ('20000000-0000-0000-0000-000000000002', 'webapp_dashboard',
  '$argon2id$v=19$m=65536,t=3,p=4$+t1hwSa3uKlBfxgUbjpi2g$OQu5+EbwAmcVfV2DI8Eodi8gUgPb1pRSzT8T3PMPsjk',
  'Dashboard Web App',
  ARRAY['http://localhost:3000/callback', 'http://localhost:3000/auth/callback'],
- ARRAY['authorization_code', 'refresh_token'],
+ ARRAY['authorization_code', 'refresh_token', 'password'],
  'openid profile email',
  true),
 
