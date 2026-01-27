@@ -1,6 +1,6 @@
 use crate::auth::{
     build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
-    get_user_group_names, verify_password, JwtService,
+    get_user_group_names, verify_password,
 };
 use crate::client_group_filters::apply_client_group_filters;
 use crate::db::models::{AuthenticationSession, AuthorizationCode, OAuthClient, OAuthClientGroupPattern, RefreshToken, UsedRefreshToken, User};
@@ -21,10 +21,11 @@ use std::sync::Arc;
 use url::Url;
 use uuid::Uuid;
 
+#[allow(dead_code)]
 const EMPTY_CLIENT_SECRET_HASH: &str =
     "$argon2id$v=19$m=19456,t=2,p=1$cmFuZG9tc2FsdDEyMzQ1Njc4$XuNHV8S+FPZGCjrD8bqRHT5rCREu9xqhvWqmCFKaRRA";
 
-use super::client_credentials::{ErrorResponse, OAuth2State, TokenResponse};
+use super::client_credentials::{ErrorResponse, OAuth2State};
 use super::cleanup::cleanup_refresh_tokens;
 use super::templates;
 use super::utils::apply_client_auth;
@@ -43,6 +44,7 @@ pub struct AuthorizeRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 pub struct AuthorizeResponse {
     pub authorization_url: String,
 }
@@ -61,6 +63,7 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Serialize)]
+#[allow(dead_code)]
 pub struct LoginResponse {
     pub code: String,
     pub state: Option<String>,

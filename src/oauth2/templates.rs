@@ -3,6 +3,7 @@ use axum::response::Html;
 use std::collections::HashMap;
 
 /// Generate login page HTML
+#[allow(dead_code)]
 pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> String {
     let client_id = params.get("client_id").map(|s| s.as_str()).unwrap_or("");
     let redirect_uri = params.get("redirect_uri").map(|s| s.as_str()).unwrap_or("");
@@ -239,6 +240,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
 }
 
 /// Generate error page HTML
+#[allow(dead_code)]
 pub fn error_page(error: &str, error_description: &str) -> String {
     format!(
         r#"<!DOCTYPE html>
@@ -408,6 +410,7 @@ pub fn error_page(error: &str, error_description: &str) -> String {
     )
 }
 
+#[allow(dead_code)]
 pub fn password_reset_page(token: &str, error: Option<&str>) -> String {
     let error_html = if let Some(err) = error {
         format!(
@@ -609,6 +612,7 @@ pub fn password_reset_page(token: &str, error: Option<&str>) -> String {
     )
 }
 
+#[allow(dead_code)]
 pub fn password_reset_success_page() -> String {
     r#"<!DOCTYPE html>
 <html lang="en">
@@ -760,6 +764,7 @@ pub fn password_reset_success_page() -> String {
 }
 
 /// Generate device verification form page HTML
+#[allow(dead_code)]
 pub fn device_verify_page(
     user_code: Option<&str>,
     error: Option<&str>,
@@ -1002,6 +1007,7 @@ pub fn device_verify_page(
 
 /// Generate callback HTML
 /// This page will post a message to the opener window and close itself
+#[allow(dead_code)]
 pub fn callback_page(success: bool, base_header: &str, detail: &str) -> Html<String> {
     let (title, heading, box_classes, icon_svg) = if success {
         (

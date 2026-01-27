@@ -9,6 +9,7 @@ use std::fs;
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum JwtError {
     #[error("Failed to encode JWT: {0}")]
     EncodeError(String),

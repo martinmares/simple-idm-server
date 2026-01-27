@@ -148,6 +148,7 @@ impl FormField {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum FormAction {
     CreateUser,
     UpdateUser(String),
@@ -204,6 +205,7 @@ impl<T> EntityState<T> {
         }
     }
 
+    #[allow(dead_code)]
     fn select_next(&mut self) {
         if self.items.is_empty() {
             self.state.select(None);
@@ -216,6 +218,7 @@ impl<T> EntityState<T> {
         self.state.select(Some(next));
     }
 
+    #[allow(dead_code)]
     fn select_prev(&mut self) {
         if self.items.is_empty() {
             self.state.select(None);
@@ -747,6 +750,7 @@ impl ClaimEditorState {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 enum ClaimEntryMode {
     Add,
     Edit(usize),
@@ -816,6 +820,7 @@ fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
     ]
 }
 #[derive(Clone, Debug, serde::Deserialize)]
+#[allow(dead_code)]
 struct UserGroupPatternRow {
     id: String,
     user_id: String,
@@ -826,6 +831,7 @@ struct UserGroupPatternRow {
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
+#[allow(dead_code)]
 struct ClientGroupPatternRow {
     id: String,
     client_id: String,
@@ -836,6 +842,7 @@ struct ClientGroupPatternRow {
 }
 
 #[derive(Clone, Debug, serde::Deserialize)]
+#[allow(dead_code)]
 struct ClaimMapPatternRow {
     id: String,
     claim_map_id: String,

@@ -20,6 +20,7 @@ use crate::oauth2::templates::callback_page;
 mod templates;
 
 #[derive(Clone)]
+#[allow(dead_code)]
 struct CallbackState {
     tx: Arc<tokio::sync::Mutex<Option<oneshot::Sender<CallbackResult>>>>,
     expected_state: Arc<String>,
