@@ -157,47 +157,51 @@ User Groups → User Patterns (sync job) → User Effective Groups
 
 ## 📋 Implementační plán
 
-### Phase 1: Client-Level Group Filtering (High Priority)
+### Phase 1: Client-Level Group Filtering ✅ DOKONČENO (2026-01-27)
 
 #### 1.1 Database migrace
-- [ ] Vytvořit migraci `023_add_oauth_client_group_patterns.sql`
+- ✅ Vytvořit migraci `023_add_oauth_client_group_patterns.sql`
   - Tabulka `oauth_client_group_patterns` (client_id, pattern, is_include, priority)
   - Foreign key na `oauth_clients(id)` s ON DELETE CASCADE
   - Indexy na `client_id` a `(client_id, priority ASC)`
 
 #### 1.2 Datový model
-- [ ] Přidat `OAuthClientGroupPattern` struct do `db/models.rs`
-- [ ] CRUD operace v databázi (create, list, update, delete)
+- ✅ Přidat `OAuthClientGroupPattern` struct do `db/models.rs`
+- ✅ CRUD operace v databázi (create, list, update, delete)
 
 #### 1.3 Pattern matching pro client filtering
-- [ ] Vytvořit `src/client_group_filters.rs` modul
-- [ ] Funkce `apply_client_group_filters()` - aplikuje client patterns na groups
+- ✅ Vytvořit `src/client_group_filters.rs` modul
+- ✅ Funkce `apply_client_group_filters()` - aplikuje client patterns na groups
   - Input: Vec<String> groups (user's effective groups)
   - Input: Vec<OAuthClientGroupPattern> patterns
   - Output: Vec<String> (filtered groups)
   - Logika: Sequential application podle priority (ASC)
+  - Kompletní unit testy
 
 #### 1.4 Integrace do token generation
-- [ ] Modifikovat `src/oauth2/authorization_code.rs`:
+- ✅ Modifikovat `src/oauth2/authorization_code.rs`:
   - V `handle_authorization_code_token()` (po získání user groups):
     1. Načti client group patterns z DB
     2. Aplikuj filtering přes `apply_client_group_filters()`
     3. Použij filtrované groups pro JWT
   - V `handle_refresh_token()` - stejná logika
 
-- [ ] Modifikovat `src/oauth2/device_flow.rs`:
+- ✅ Modifikovat `src/oauth2/device_flow.rs`:
   - V `handle_device_token_internal()` - stejná logika
 
 #### 1.5 API endpointy
-- [ ] `POST /admin/oauth-clients/{id}/group-patterns` - vytvoření patternu
-- [ ] `GET /admin/oauth-clients/{id}/group-patterns` - seznam patterns
-- [ ] `PUT /admin/oauth-clients/{client_id}/group-patterns/{pattern_id}` - úprava
-- [ ] `DELETE /admin/oauth-clients/{client_id}/group-patterns/{pattern_id}` - smazání
+- ✅ `POST /admin/oauth-clients/{id}/group-patterns` - vytvoření patternu
+- ✅ `GET /admin/oauth-clients/{id}/group-patterns` - seznam patterns
+- ✅ `PUT /admin/oauth-clients/{client_id}/group-patterns/{pattern_id}` - úprava
+- ✅ `DELETE /admin/oauth-clients/{client_id}/group-patterns/{pattern_id}` - smazání
 
 #### 1.6 TUI integrace
-- [ ] Přidat field `client_group_patterns` do Create/Update Client forms (read-only)
-- [ ] Klávesová zkratka (např. Ctrl+G) pro otevření Client Group Patterns Manager
-- [ ] Dialog podobný User Patterns Manager
+- ✅ Přidat field `client_patterns` do FormState pro Create/Update Client forms
+- ✅ Klávesová zkratka Ctrl+P pro otevření Client Group Patterns Manager
+- ✅ Dialog identický s User Patterns Manager (ClientPatternsManager)
+- ✅ Pattern Form pro vytváření/editaci patterns
+- ✅ Zobrazení patterns přímo v Client formuláři (sekce "Group Patterns:")
+- ✅ UX sjednocení: Ctrl+P místo Ctrl+T, konzistentní dialogs
 
 ---
 
