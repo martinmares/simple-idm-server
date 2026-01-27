@@ -139,7 +139,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 tokio::time::interval(Duration::from_secs(group_patterns_sync_interval));
             loop {
                 interval.tick().await;
-                tracing::debug!("Running group patterns sync");
+                tracing::info!("Running group patterns sync");
                 group_patterns::evaluate_and_sync_patterns(&sync_pool).await;
             }
         });

@@ -48,33 +48,29 @@ pub fn evaluate_patterns(
     patterns: &[UserGroupPattern],
     all_groups: &[Group],
 ) -> (HashSet<Uuid>, HashSet<Uuid>) {
-    let mut groups_to_include: HashSet<Uuid> = HashSet::new();
-    let mut groups_to_exclude: HashSet<Uuid> = HashSet::new();
+    let mut result: HashSet<Uuid> = HashSet::new();
 
-    // Sort patterns by priority (lowest number = highest priority)
+    // Sort patterns by priority (lowest number = first to apply)
     let mut sorted_patterns = patterns.to_vec();
-    sorted_patterns.sort_by(|a, b| a.priority.cmp(&b.priority));
+    sorted_patterns.sort_by_key(|p| p.priority);
 
-    // For each group, find the first matching pattern (highest priority)
-    for group in all_groups {
-        for pattern in &sorted_patterns {
+    // Apply patterns in order
+    for pattern in &sorted_patterns {
+        for group in all_groups {
             if pattern_matches(&pattern.pattern, &group.name) {
                 if pattern.is_include {
-                    groups_to_include.insert(group.id);
+                    // Include: add to result
+                    result.insert(group.id);
                 } else {
-                    groups_to_exclude.insert(group.id);
+                    // Exclude: remove from result (if present)
+                    result.remove(&group.id);
                 }
-                break; // First match wins due to priority
             }
         }
     }
 
-    // Remove excluded groups from included set
-    for excluded_id in &groups_to_exclude {
-        groups_to_include.remove(excluded_id);
-    }
-
-    (groups_to_include, groups_to_exclude)
+    // Return groups to include (exclude set is not used anymore)
+    (result, HashSet::new())
 }
 
 /// Background job to evaluate and synchronize user group assignments based on patterns
