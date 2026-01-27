@@ -159,6 +159,8 @@ enum FormAction {
     CreateClient,
     UpdateClient(String),
     DeleteClient(String),
+    CreateClaimMap,
+    UpdateClaimMap(String),
     AddUserGroup,
     RemoveUserGroup,
 }
@@ -172,6 +174,7 @@ struct FormState {
     error: Option<String>,
     patterns: Option<Vec<UserGroupPatternRow>>, // For Create/Update User forms
     client_patterns: Option<Vec<ClientGroupPatternRow>>, // For Create/Update Client forms
+    claim_map_patterns: Option<Vec<ClaimMapPatternRow>>, // For Create/Update Claim Map forms
 }
 
 struct EntityState<T> {
@@ -1472,20 +1475,50 @@ async fn handle_claim_editor_event(
         }
         KeyCode::Char('e') => {
             if let Some(item) = editor.items.get(editor.index).cloned() {
-                let claim_values =
-                    claim_value_to_entry_values_with_kind(&item.claim_value_kind, &item.claim_value);
-                app.claim_entry = Some(ClaimEntryState {
-                    title: "Upravit claim map".to_string(),
-                    mode: ClaimEntryMode::Edit(editor.index),
-                    claim_name: input_with_value(item.claim_name),
-                    claim_value_kind: item.claim_value_kind,
-                    claim_values,
-                    other_id: Some(item.other_id),
-                    other_label: Some(item.other_label),
+                // Fetch patterns for this claim map
+                let claim_map_id = item.id.as_ref().context("Cannot edit unsaved claim map")?;
+                let url = format!("{}/admin/claim-maps/{}/patterns", http.base_url, claim_map_id);
+                let response = http
+                    .client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .send()
+                    .await?;
+
+                let claim_map_patterns: Vec<ClaimMapPatternRow> = if response.status().is_success() {
+                    response.json().await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Create form for editing claim map
+                let claim_value_str = match &item.claim_value {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(arr)) => {
+                        let strings: Vec<String> = arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
+                        strings.join(", ")
+                    }
+                    _ => String::new(),
+                };
+
+                app.form = Some(FormState {
+                    title: format!("Update Claim Map: {}", item.claim_name),
+                    action: FormAction::UpdateClaimMap(claim_map_id.clone()),
+                    fields: vec![
+                        FormField::new("claim_name", item.claim_name).read_only(),
+                        FormField::new("claim_value_kind", item.claim_value_kind).read_only(),
+                        FormField::new("claim_value", claim_value_str).read_only(),
+                        FormField::new("other", format!("{} ({})", item.other_label, item.other_id)).read_only(),
+                    ],
                     index: 0,
                     error: None,
+                    patterns: None,
+                    client_patterns: None,
+                    claim_map_patterns: Some(claim_map_patterns),
                 });
-                app.mode = Mode::ClaimEntry;
+                app.mode = Mode::Form;
             }
             return Ok(ClaimEditorResult::Continue);
         }
@@ -1505,20 +1538,6 @@ async fn handle_claim_editor_event(
             app.pending_select = Some(claim_editor_hint(&editor.mode));
             app.claim_editor = None;
             return Ok(ClaimEditorResult::Applied);
-        }
-        KeyCode::Char('p') => {
-            if key.modifiers.contains(KeyModifiers::CONTROL) {
-                // Open patterns manager for selected claim
-                match open_claim_map_patterns_manager(app, http).await {
-                    Ok(_) => {}
-                    Err(err) => {
-                        if let Some(editor) = app.claim_editor.as_mut() {
-                            editor.error = Some(format!("Failed to open patterns manager: {}", err));
-                        }
-                    }
-                }
-                return Ok(ClaimEditorResult::Continue);
-            }
         }
         _ => {}
     }
@@ -3440,6 +3459,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             error: None,
             patterns: Some(Vec::new()), // New user has no patterns yet
             client_patterns: None,
+            claim_map_patterns: None,
         },
         Tab::Groups => FormState {
             title: "Create group".to_string(),
@@ -3453,6 +3473,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             error: None,
             patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
         },
         Tab::Clients => FormState {
             title: "Create client".to_string(),
@@ -3474,6 +3495,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             error: None,
             patterns: None,
             client_patterns: Some(Vec::new()), // New client has no patterns yet
+            claim_map_patterns: None,
         },
         Tab::ClientClaims | Tab::GroupClaims => {
             open_claim_editor(app)?;
@@ -3490,6 +3512,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
             error: None,
             patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
         },
         Tab::GroupUsers => {
             let fields = vec![
@@ -3504,6 +3527,7 @@ fn open_create_form(app: &mut App) -> Result<()> {
                 error: None,
                 patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
             }
         }
     };
@@ -3527,6 +3551,7 @@ fn open_create_subgroup_form(app: &mut App) -> Result<()> {
         error: None,
         patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
     };
     app.mode = Mode::Form;
     app.form = Some(form);
@@ -3586,6 +3611,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 error: None,
                 patterns,
                 client_patterns: None,
+            claim_map_patterns: None,
             }
         }
         Tab::Groups => {
@@ -3603,6 +3629,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 error: None,
                 patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
             }
         }
         Tab::Clients => {
@@ -3643,6 +3670,7 @@ async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
                 error: None,
                 patterns: None,
                 client_patterns,
+                claim_map_patterns: None,
             }
         }
         Tab::ClientClaims | Tab::GroupClaims => {
@@ -3709,6 +3737,7 @@ fn open_delete_form(app: &mut App) -> Result<()> {
                 error: None,
                 patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
             }
         }
         Tab::Groups => {
@@ -3721,6 +3750,7 @@ fn open_delete_form(app: &mut App) -> Result<()> {
                 error: None,
                 patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
             }
         }
         Tab::Clients => {
@@ -3733,6 +3763,7 @@ fn open_delete_form(app: &mut App) -> Result<()> {
                 error: None,
                 patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
             }
         }
         Tab::ClientClaims | Tab::GroupClaims => {
@@ -3784,6 +3815,7 @@ fn open_add_user_group(app: &mut App) -> Result<()> {
         error: None,
         patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
     };
     app.mode = Mode::Form;
     app.form = Some(form);
@@ -3824,6 +3856,7 @@ fn open_remove_user_group(app: &mut App) -> Result<()> {
         error: None,
         patterns: None,
             client_patterns: None,
+            claim_map_patterns: None,
     };
     app.mode = Mode::Form;
     app.form = Some(form);
@@ -3903,17 +3936,30 @@ async fn open_client_patterns_manager(app: &mut App, _http: &HttpClient) -> Resu
 }
 
 async fn open_claim_map_patterns_manager(app: &mut App, http: &HttpClient) -> Result<()> {
-    // This should be called from ClaimEditor mode
-    let claim_editor = app.claim_editor.as_ref().context("No claim editor active")?;
-
-    // Get selected claim
-    let selected_idx = claim_editor.index;
-    if selected_idx >= claim_editor.items.len() {
-        bail!("No claim selected");
-    }
-
-    let claim = &claim_editor.items[selected_idx];
-    let claim_map_id = claim.id.as_ref().context("Cannot manage patterns for unsaved claim")?;
+    // Can be called from Form mode (UpdateClaimMap) or ClaimEditor mode
+    let (claim_map_id, claim_name) = if let Some(form) = &app.form {
+        // Called from Form mode
+        if let FormAction::UpdateClaimMap(id) = &form.action {
+            let name = form.fields.iter()
+                .find(|f| f.label == "claim_name")
+                .map(|f| f.value())
+                .unwrap_or_default();
+            (id.clone(), name)
+        } else {
+            bail!("Form is not for updating claim map");
+        }
+    } else if let Some(claim_editor) = &app.claim_editor {
+        // Called from ClaimEditor mode (old behavior)
+        let selected_idx = claim_editor.index;
+        if selected_idx >= claim_editor.items.len() {
+            bail!("No claim selected");
+        }
+        let claim = &claim_editor.items[selected_idx];
+        let id = claim.id.as_ref().context("Cannot manage patterns for unsaved claim")?;
+        (id.clone(), claim.claim_name.clone())
+    } else {
+        bail!("No claim editor or form active");
+    };
 
     // Fetch patterns from API
     let url = format!("{}/admin/claim-maps/{}/patterns", http.base_url, claim_map_id);
@@ -3932,7 +3978,7 @@ async fn open_claim_map_patterns_manager(app: &mut App, http: &HttpClient) -> Re
 
     app.claim_map_patterns_manager = Some(ClaimMapPatternsManagerState {
         claim_map_id: claim_map_id.clone(),
-        claim_name: claim.claim_name.clone(),
+        claim_name: claim_name.clone(),
         patterns,
         index: 0,
     });
@@ -4163,6 +4209,13 @@ async fn handle_form_event(
                 // Open client patterns manager from Create/Update Client form
                 if matches!(form.action, FormAction::CreateClient | FormAction::UpdateClient(_)) {
                     if let Err(err) = open_client_patterns_manager(app, http).await {
+                        app.set_status(format!("Failed to open patterns manager: {}", err));
+                    }
+                    return Ok(FormResult::Continue);
+                }
+                // Open claim map patterns manager from Update ClaimMap form
+                if matches!(form.action, FormAction::UpdateClaimMap(_)) {
+                    if let Err(err) = open_claim_map_patterns_manager(app, http).await {
                         app.set_status(format!("Failed to open patterns manager: {}", err));
                     }
                     return Ok(FormResult::Continue);
@@ -4439,6 +4492,10 @@ async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult
                 message: "User removed from group".to_string(),
                 select_id: None,
             })
+        }
+        FormAction::CreateClaimMap | FormAction::UpdateClaimMap(_) => {
+            // These forms are read-only and don't submit
+            bail!("Claim map forms are read-only")
         }
     }
 }
@@ -5645,6 +5702,45 @@ fn draw_form(
         }
     }
 
+    // Show patterns table for Create/Update ClaimMap forms
+    if let Some(claim_map_patterns) = &form.claim_map_patterns {
+        lines.push(Line::from("")); // Empty line
+        lines.push(Line::from(Span::styled(
+            "Group Patterns:",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+
+        if claim_map_patterns.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no patterns defined - use Ctrl+P to add)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  # | Pattern              | Type    | Priority",
+                Style::default().fg(Color::Cyan),
+            )));
+            for (idx, pattern) in claim_map_patterns.iter().enumerate() {
+                let type_str = if pattern.is_include { "include" } else { "exclude" };
+                let line_text = format!(
+                    "  {} | {:<20} | {:<7} | {}",
+                    idx + 1,
+                    pattern.pattern,
+                    type_str,
+                    pattern.priority
+                );
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(Color::White),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "  (Ctrl+P to edit patterns)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
     if let Some(error) = &form.error {
         lines.push(Line::from(Span::styled(
             error.clone(),
@@ -5671,6 +5767,8 @@ fn draw_form(
         "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns | Ctrl+G secret | Ctrl+V reveal"
     } else if matches!(form.action, FormAction::CreateClient | FormAction::UpdateClient(_)) {
         "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns | Ctrl+G secret | Ctrl+V reveal"
+    } else if matches!(form.action, FormAction::UpdateClaimMap(_)) {
+        "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns"
     } else if form
         .fields
         .iter()
