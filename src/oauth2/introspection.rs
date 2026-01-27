@@ -60,7 +60,7 @@ pub async fn handle_introspect(
 ) -> impl IntoResponse {
     let mut req = match parse_introspection_request(&headers, &body) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     apply_client_auth(&mut req.client_id, &mut req.client_secret, &headers);
@@ -143,7 +143,7 @@ pub async fn handle_introspect(
         let response = IntrospectionResponse {
             active: true,
             scope: None,
-            client_id: claims.aud.get(0).cloned(),
+            client_id: claims.aud.first().cloned(),
             username: claims.preferred_username.clone(),
             sub: Some(claims.sub),
             exp: Some(claims.exp),
@@ -242,7 +242,7 @@ async fn introspect_refresh_token(
 fn parse_introspection_request(
     headers: &HeaderMap,
     body: &[u8],
-) -> Result<IntrospectionRequest, axum::response::Response> {
+) -> Result<IntrospectionRequest, Box<axum::response::Response>> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
@@ -258,24 +258,28 @@ fn parse_introspection_request(
             .map_err(|_| ())
             .or_else(|_| serde_urlencoded::from_bytes::<IntrospectionRequest>(body).map_err(|_| ()))
     } else {
-        return Err((
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json(ErrorResponse {
-                error: "unsupported_media_type".to_string(),
-                error_description: "Expected Content-Type application/json or application/x-www-form-urlencoded".to_string(),
-            }),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(ErrorResponse {
+                    error: "unsupported_media_type".to_string(),
+                    error_description: "Expected Content-Type application/json or application/x-www-form-urlencoded".to_string(),
+                }),
+            )
+                .into_response(),
+        ));
     };
 
     parsed.map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "invalid_request".to_string(),
-                error_description: "Failed to parse introspection request".to_string(),
-            }),
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_request".to_string(),
+                    error_description: "Failed to parse introspection request".to_string(),
+                }),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }

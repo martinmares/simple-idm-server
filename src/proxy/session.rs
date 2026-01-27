@@ -166,6 +166,12 @@ impl MemoryStore {
     }
 }
 
+impl Default for MemoryStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // SQLite store implementation (stub - can be implemented later)
 pub struct SqliteStore {
     #[allow(dead_code)]

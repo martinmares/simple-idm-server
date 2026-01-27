@@ -1574,7 +1574,7 @@ fn display_claim_value(value: &Option<serde_json::Value>) -> String {
     }
 }
 
-fn display_vec_limited(value: &Vec<String>) -> String {
+fn display_vec_limited(value: &[String]) -> String {
     let joined = value.join(", ");
     limit_text(&joined, 42)
 }

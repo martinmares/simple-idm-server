@@ -262,9 +262,7 @@ async fn handle_callback(
     );
 
     // Clear state cookie
-    let clear_state_cookie = format!(
-        "__oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
-    );
+    let clear_state_cookie = "__oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string();
 
     let mut response = Redirect::temporary(&flow_state.redirect_url).into_response();
     response.headers_mut().insert(

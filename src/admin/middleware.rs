@@ -135,7 +135,7 @@ pub async fn admin_auth_middleware(
             }
 
             // 3. Check custom claims for admin-related claims (fallback)
-            for (key, _value) in &claims.custom_claims {
+            for key in claims.custom_claims.keys() {
                 if key.starts_with("admin") || key.contains("admin") {
                     return Ok(next.run(request).await);
                 }

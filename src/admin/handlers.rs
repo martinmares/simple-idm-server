@@ -978,7 +978,7 @@ pub async fn create_oauth_client(
     let is_public = req.is_public.unwrap_or(false);
 
     if let Err(resp) = validate_redirect_uris(&req.client_id, &req.redirect_uris) {
-        return resp;
+        return *resp;
     }
 
     // Validate: public clients must NOT have secret, confidential clients MUST have secret
@@ -1287,7 +1287,7 @@ pub async fn update_oauth_client(
         match client {
             Ok(Some(client_id_str)) => {
                 if let Err(resp) = validate_redirect_uris(&client_id_str, uris) {
-                    return resp;
+                    return *resp;
                 }
             }
             Ok(None) => {
@@ -1403,7 +1403,7 @@ pub async fn update_oauth_client(
 fn validate_redirect_uris(
     _client_id: &str,
     redirect_uris: &[String],
-) -> Result<(), axum::response::Response> {
+) -> Result<(), Box<axum::response::Response>> {
     for uri in redirect_uris {
         if uri.contains('*') {
             // Parse URL with wildcard replaced temporarily for validation
@@ -1417,7 +1417,7 @@ fn validate_redirect_uris(
                     }),
                 )
                     .into_response()
-            })?;
+            }).map_err(Box::new)?;
 
             // Check if host is loopback (localhost, 127.0.0.1, ::1)
             let host = url.host_str().unwrap_or("");
@@ -1427,29 +1427,33 @@ fn validate_redirect_uris(
                 || host == "::1";
 
             if !is_loopback {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "bad_request".to_string(),
-                        error_description: format!(
-                            "Wildcard '*' in redirect_uri is only allowed for loopback addresses (localhost, 127.0.0.1, ::1), got: {}",
-                            host
-                        ),
-                    }),
-                )
-                    .into_response());
+                return Err(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "bad_request".to_string(),
+                            error_description: format!(
+                                "Wildcard '*' in redirect_uri is only allowed for loopback addresses (localhost, 127.0.0.1, ::1), got: {}",
+                                host
+                            ),
+                        }),
+                    )
+                        .into_response(),
+                ));
             }
 
             // Ensure wildcard is only in port position
             if !uri.contains(":*/") && !uri.ends_with(":*") {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "bad_request".to_string(),
-                        error_description: "Wildcard '*' must be used for port only (e.g., http://localhost:*/callback)".to_string(),
-                    }),
-                )
-                    .into_response());
+                return Err(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "bad_request".to_string(),
+                            error_description: "Wildcard '*' must be used for port only (e.g., http://localhost:*/callback)".to_string(),
+                        }),
+                    )
+                        .into_response(),
+                ));
             }
 
             continue;
@@ -1464,21 +1468,23 @@ fn validate_redirect_uris(
                 }),
             )
                 .into_response()
-        })?;
+        }).map_err(Box::new)?;
 
         let scheme = url.scheme();
         if scheme != "http" && scheme != "https" {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "bad_request".to_string(),
-                    error_description: format!(
-                        "redirect_uris must be http or https: {}",
-                        uri
-                    ),
-                }),
-            )
-                .into_response());
+            return Err(Box::new(
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: format!(
+                            "redirect_uris must be http or https: {}",
+                            uri
+                        ),
+                    }),
+                )
+                    .into_response(),
+            ));
         }
     }
 
@@ -2708,7 +2714,7 @@ pub async fn get_groups_tree(State(db_pool): State<DbPool>) -> impl IntoResponse
     for rel in relationships {
         children_map
             .entry(rel.parent_group_id)
-            .or_insert_with(Vec::new)
+            .or_default()
             .push(rel.child_group_id);
     }
 

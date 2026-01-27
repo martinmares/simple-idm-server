@@ -471,7 +471,7 @@ pub async fn handle_login(
     let scope = req.scope.unwrap_or_else(|| client.scope.clone());
 
     // Ulož code do DB
-    if let Err(_) = sqlx::query(
+    if sqlx::query(
         r#"
         INSERT INTO authorization_codes
         (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at)
@@ -489,6 +489,7 @@ pub async fn handle_login(
     .bind(expires_at)
     .execute(&state.db_pool)
     .await
+    .is_err()
     {
         let html = templates::error_page(
             "server_error",
@@ -572,7 +573,7 @@ pub async fn handle_token(
 ) -> Response {
     let req = match parse_token_request(&headers, &body) {
         Ok(req) => req,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let mut req = req;
@@ -595,7 +596,7 @@ pub async fn handle_token(
     }
 }
 
-fn parse_token_request(headers: &HeaderMap, body: &[u8]) -> Result<TokenRequest, Response> {
+fn parse_token_request(headers: &HeaderMap, body: &[u8]) -> Result<TokenRequest, Box<Response>> {
     let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|h| h.to_str().ok())
@@ -612,25 +613,29 @@ fn parse_token_request(headers: &HeaderMap, body: &[u8]) -> Result<TokenRequest,
     } else if content_type.is_empty() {
         parse_json().or_else(|_| parse_form())
     } else {
-        return Err((
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            Json(ErrorResponse {
-                error: "unsupported_media_type".to_string(),
-                error_description: "Expected Content-Type application/json or application/x-www-form-urlencoded".to_string(),
-            }),
-        )
-            .into_response());
+        return Err(Box::new(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                Json(ErrorResponse {
+                    error: "unsupported_media_type".to_string(),
+                    error_description: "Expected Content-Type application/json or application/x-www-form-urlencoded".to_string(),
+                }),
+            )
+                .into_response(),
+        ));
     };
 
     parsed.map_err(|_| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: "invalid_request".to_string(),
-                error_description: "Failed to parse token request".to_string(),
-            }),
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_request".to_string(),
+                    error_description: "Failed to parse token request".to_string(),
+                }),
+            )
+                .into_response(),
         )
-            .into_response()
     })
 }
 
@@ -816,7 +821,7 @@ async fn handle_authorization_code_token(
                         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
                         let hash = Sha256::digest(verifier.as_bytes());
                         let encoded = URL_SAFE_NO_PAD.encode(hash);
-                        challenge == &encoded
+                        challenge == encoded
                     }
                     _ => false,
                 };
@@ -995,7 +1000,7 @@ async fn handle_authorization_code_token(
     let refresh_token = generate_refresh_token();
     let refresh_expires_at = Utc::now() + Duration::seconds(state.refresh_token_expiry);
 
-    if let Err(_) = sqlx::query(
+    if sqlx::query(
         r#"
         INSERT INTO refresh_tokens (token, client_id, user_id, scope, expires_at)
         VALUES ($1, $2, $3, $4, $5)
@@ -1008,6 +1013,7 @@ async fn handle_authorization_code_token(
     .bind(refresh_expires_at)
     .execute(&state.db_pool)
     .await
+    .is_err()
     {
         return Json(ErrorResponse {
             error: "server_error".to_string(),

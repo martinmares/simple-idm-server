@@ -156,7 +156,7 @@ pub async fn handle_device_authorization(
     let scope = req.scope.unwrap_or_else(|| client.scope.clone());
 
     // Ulož do databáze
-    if let Err(_) = sqlx::query(
+    if sqlx::query(
         r#"
         INSERT INTO device_codes
         (device_code, user_code, client_id, scope, expires_at, is_authorized)
@@ -170,6 +170,7 @@ pub async fn handle_device_authorization(
     .bind(expires_at)
     .execute(&state.db_pool)
     .await
+    .is_err()
     {
         return Json(ErrorResponse {
             error: "server_error".to_string(),
@@ -332,13 +333,14 @@ pub async fn handle_device_verify(
     }
 
     // Označ device code jako autorizovaný
-    if let Err(_) = sqlx::query(
+    if sqlx::query(
         "UPDATE device_codes SET is_authorized = true, user_id = $1 WHERE user_code = $2",
     )
     .bind(user.id)
     .bind(&req.user_code)
     .execute(&state.db_pool)
     .await
+    .is_err()
     {
         return Html(templates::device_verify_page(
             Some(&req.user_code),

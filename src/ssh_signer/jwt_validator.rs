@@ -116,7 +116,7 @@ impl JwtValidator {
         // Validate token
         let mut validation = Validation::new(
             self.allowed_algs
-                .get(0)
+                .first()
                 .copied()
                 .unwrap_or(Algorithm::RS256),
         );

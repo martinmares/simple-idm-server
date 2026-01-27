@@ -16,9 +16,6 @@ use tokio::sync::oneshot;
 
 use crate::oauth2::templates::callback_page;
 
-#[path = "../oauth2/templates.rs"]
-mod templates;
-
 #[derive(Clone)]
 #[allow(dead_code)]
 struct CallbackState {
