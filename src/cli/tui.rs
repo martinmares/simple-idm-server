@@ -1103,7 +1103,28 @@ async fn event_loop(
             let handled = handle_claim_map_patterns_manager_event(app, event, http).await?;
             if handled == ClaimMapPatternsManagerResult::Closed {
                 app.claim_map_patterns_manager = None;
-                app.mode = Mode::ClaimEditor;  // Return to ClaimEditor
+                // Return to Form if it exists (opened from UpdateClaimMap form), otherwise ClaimEditor
+                if let Some(form) = app.form.as_mut() {
+                    // Refresh patterns in form
+                    if let FormAction::UpdateClaimMap(claim_map_id) = &form.action {
+                        let url = format!("{}/admin/claim-maps/{}/patterns", http.base_url, claim_map_id);
+                        let response = http
+                            .client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {}", http.token))
+                            .send()
+                            .await?;
+                        let patterns: Vec<ClaimMapPatternRow> = if response.status().is_success() {
+                            response.json().await.unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        form.claim_map_patterns = Some(patterns);
+                    }
+                    app.mode = Mode::Form;
+                } else {
+                    app.mode = Mode::ClaimEditor;
+                }
             }
             continue;
         }
@@ -1190,7 +1211,13 @@ async fn event_loop(
                 app.form = None;
                 refresh_active_tab(app, http).await?;
             } else if handled == FormResult::Cancelled {
-                app.mode = Mode::Normal;
+                // If form was opened from ClaimEditor (UpdateClaimMap), return to ClaimEditor mode
+                if app.form.as_ref().map(|f| matches!(f.action, FormAction::UpdateClaimMap(_))).unwrap_or(false)
+                    && app.claim_editor.is_some() {
+                    app.mode = Mode::ClaimEditor;
+                } else {
+                    app.mode = Mode::Normal;
+                }
                 app.form = None;
             }
             continue;
@@ -1474,16 +1501,35 @@ async fn handle_claim_editor_event(
             return Ok(ClaimEditorResult::Continue);
         }
         KeyCode::Char('e') => {
+            if editor.items.is_empty() {
+                editor.error = Some("No claim maps to edit".to_string());
+                return Ok(ClaimEditorResult::Continue);
+            }
+
             if let Some(item) = editor.items.get(editor.index).cloned() {
                 // Fetch patterns for this claim map
-                let claim_map_id = item.id.as_ref().context("Cannot edit unsaved claim map")?;
+                let claim_map_id = match item.id.as_ref() {
+                    Some(id) => id,
+                    None => {
+                        editor.error = Some("Cannot edit unsaved claim map".to_string());
+                        return Ok(ClaimEditorResult::Continue);
+                    }
+                };
+
                 let url = format!("{}/admin/claim-maps/{}/patterns", http.base_url, claim_map_id);
-                let response = http
+                let response = match http
                     .client
                     .get(&url)
                     .header("Authorization", format!("Bearer {}", http.token))
                     .send()
-                    .await?;
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        editor.error = Some(format!("Failed to fetch patterns: {}", err));
+                        return Ok(ClaimEditorResult::Continue);
+                    }
+                };
 
                 let claim_map_patterns: Vec<ClaimMapPatternRow> = if response.status().is_success() {
                     response.json().await.unwrap_or_default()
@@ -4082,9 +4128,16 @@ async fn handle_form_event(
             }
         }
         KeyCode::Enter => {
+            // For read-only forms (UpdateClaimMap), Enter closes the form on last field
+            let is_readonly_form = matches!(form.action, FormAction::UpdateClaimMap(_));
+
             if form.index + 1 < form.fields.len() {
                 form.index += 1;
+            } else if is_readonly_form {
+                // For read-only forms at last field, close the form (return to ClaimEditor)
+                return Ok(FormResult::Cancelled);
             } else {
+                // Submit editable forms
                 match submit_form(http, form).await {
                     Ok(result) => {
                         app.set_status(result.message);
@@ -5071,14 +5124,23 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     draw_body(frame, layout[1], app);
     draw_status(frame, layout[2], layout[3], app);
 
-    if app.form.is_some() {
-        draw_form(frame, size, app, &mut cursor_visible);
+    // Draw forms that are NOT UpdateClaimMap (those are drawn later, after claim_editor)
+    if let Some(form) = &app.form {
+        if !matches!(form.action, FormAction::UpdateClaimMap(_)) {
+            draw_form(frame, size, app, &mut cursor_visible);
+        }
     }
     if let Some(editor) = &app.relation_editor {
         draw_relation_editor(frame, size, editor);
     }
     if let Some(editor) = &app.claim_editor {
         draw_claim_editor(frame, size, editor);
+    }
+    // Draw UpdateClaimMap forms AFTER claim_editor (so they appear on top)
+    if let Some(form) = &app.form {
+        if matches!(form.action, FormAction::UpdateClaimMap(_)) {
+            draw_form(frame, size, app, &mut cursor_visible);
+        }
     }
     if let Some(entry) = &app.claim_entry {
         let allow_cursor = app.claim_value_editor.is_none() && app.picker.is_none();
