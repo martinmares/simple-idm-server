@@ -98,9 +98,10 @@ mod tests {
             "gitlab:role:developer".to_string(),
         ];
 
+        // Only include grafana groups - no exclude pattern needed
+        // (groups not explicitly included are excluded by default)
         let patterns = vec![
             make_pattern("grafana:*", true, 1),
-            make_pattern("*", false, 2),
         ];
 
         let result = apply_client_group_filters(&groups, &patterns);
