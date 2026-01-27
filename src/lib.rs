@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod claim_map_patterns;
 pub mod client_group_filters;
 pub mod config;
 pub mod db;

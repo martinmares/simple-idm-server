@@ -191,7 +191,8 @@ pub struct CreateClaimMapRequest {
 pub struct ClaimMapResponse {
     pub id: Uuid,
     pub client_id: Uuid,
-    pub group_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<Uuid>, // Optional - can use patterns instead
     pub claim_name: String,
     pub claim_value_kind: String, // 'single' or 'array'
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2727,4 +2728,290 @@ pub async fn get_groups_tree(State(db_pool): State<DbPool>) -> impl IntoResponse
         .collect();
 
     (StatusCode::OK, Json(tree)).into_response()
+}
+
+// ============================================================================
+// Claim Map Patterns Endpoints
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct CreateClaimMapPatternRequest {
+    pub pattern: String,
+    pub is_include: bool,
+    pub priority: i32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateClaimMapPatternRequest {
+    pub pattern: Option<String>,
+    pub is_include: Option<bool>,
+    pub priority: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClaimMapPatternResponse {
+    pub id: Uuid,
+    pub claim_map_id: Uuid,
+    pub pattern: String,
+    pub is_include: bool,
+    pub priority: i32,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// POST /admin/claim-maps/{id}/patterns
+pub async fn create_claim_map_pattern(
+    State(db_pool): State<DbPool>,
+    Path(claim_map_id): Path<Uuid>,
+    Json(req): Json<CreateClaimMapPatternRequest>,
+) -> impl IntoResponse {
+    // Validate claim_map exists
+    let claim_map_exists = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM claim_maps WHERE id = $1)"
+    )
+    .bind(claim_map_id)
+    .fetch_one(&db_pool)
+    .await;
+
+    match claim_map_exists {
+        Ok(false) | Err(_) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "not_found".to_string(),
+                    error_description: "Claim map not found".to_string(),
+                }),
+            )
+                .into_response();
+        }
+        _ => {}
+    }
+
+    let result = sqlx::query_as!(
+        crate::db::models::ClaimMapPattern,
+        r#"
+        INSERT INTO claim_map_patterns (claim_map_id, pattern, is_include, priority)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id, claim_map_id, pattern, is_include, priority, created_at
+        "#,
+        claim_map_id,
+        req.pattern,
+        req.is_include,
+        req.priority
+    )
+    .fetch_one(&db_pool)
+    .await;
+
+    match result {
+        Ok(pattern) => (
+            StatusCode::CREATED,
+            Json(ClaimMapPatternResponse {
+                id: pattern.id,
+                claim_map_id: pattern.claim_map_id,
+                pattern: pattern.pattern,
+                is_include: pattern.is_include,
+                priority: pattern.priority,
+                created_at: pattern.created_at,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to create claim map pattern: {:?}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to create pattern: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// GET /admin/claim-maps/{id}/patterns
+pub async fn list_claim_map_patterns(
+    State(db_pool): State<DbPool>,
+    Path(claim_map_id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = sqlx::query_as!(
+        crate::db::models::ClaimMapPattern,
+        r#"
+        SELECT id, claim_map_id, pattern, is_include, priority, created_at
+        FROM claim_map_patterns
+        WHERE claim_map_id = $1
+        ORDER BY priority ASC
+        "#,
+        claim_map_id
+    )
+    .fetch_all(&db_pool)
+    .await;
+
+    match result {
+        Ok(patterns) => {
+            let response: Vec<ClaimMapPatternResponse> = patterns
+                .into_iter()
+                .map(|p| ClaimMapPatternResponse {
+                    id: p.id,
+                    claim_map_id: p.claim_map_id,
+                    pattern: p.pattern,
+                    is_include: p.is_include,
+                    priority: p.priority,
+                    created_at: p.created_at,
+                })
+                .collect();
+
+            (StatusCode::OK, Json(response)).into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to list claim map patterns: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to list patterns".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// PUT /admin/claim-maps/{claim_map_id}/patterns/{pattern_id}
+pub async fn update_claim_map_pattern(
+    State(db_pool): State<DbPool>,
+    Path((claim_map_id, pattern_id)): Path<(Uuid, Uuid)>,
+    Json(req): Json<UpdateClaimMapPatternRequest>,
+) -> impl IntoResponse {
+    // Fetch existing pattern
+    let existing = sqlx::query_as!(
+        crate::db::models::ClaimMapPattern,
+        "SELECT id, claim_map_id, pattern, is_include, priority, created_at FROM claim_map_patterns WHERE id = $1 AND claim_map_id = $2",
+        pattern_id,
+        claim_map_id
+    )
+    .fetch_optional(&db_pool)
+    .await;
+
+    let existing = match existing {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ErrorResponse {
+                    error: "not_found".to_string(),
+                    error_description: "Pattern not found or does not belong to claim map"
+                        .to_string(),
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch pattern: {:?}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to fetch pattern".to_string(),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    // Apply updates
+    let new_pattern = req.pattern.unwrap_or(existing.pattern);
+    let new_is_include = req.is_include.unwrap_or(existing.is_include);
+    let new_priority = req.priority.unwrap_or(existing.priority);
+
+    let result = sqlx::query_as!(
+        crate::db::models::ClaimMapPattern,
+        r#"
+        UPDATE claim_map_patterns
+        SET pattern = $1, is_include = $2, priority = $3
+        WHERE id = $4 AND claim_map_id = $5
+        RETURNING id, claim_map_id, pattern, is_include, priority, created_at
+        "#,
+        new_pattern,
+        new_is_include,
+        new_priority,
+        pattern_id,
+        claim_map_id
+    )
+    .fetch_one(&db_pool)
+    .await;
+
+    match result {
+        Ok(pattern) => (
+            StatusCode::OK,
+            Json(ClaimMapPatternResponse {
+                id: pattern.id,
+                claim_map_id: pattern.claim_map_id,
+                pattern: pattern.pattern,
+                is_include: pattern.is_include,
+                priority: pattern.priority,
+                created_at: pattern.created_at,
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update claim map pattern: {:?}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to update pattern: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// DELETE /admin/claim-maps/{claim_map_id}/patterns/{pattern_id}
+pub async fn delete_claim_map_pattern(
+    State(db_pool): State<DbPool>,
+    Path((claim_map_id, pattern_id)): Path<(Uuid, Uuid)>,
+) -> impl IntoResponse {
+    let result = sqlx::query!(
+        "DELETE FROM claim_map_patterns WHERE id = $1 AND claim_map_id = $2",
+        pattern_id,
+        claim_map_id
+    )
+    .execute(&db_pool)
+    .await;
+
+    match result {
+        Ok(result) => {
+            if result.rows_affected() == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    Json(ErrorResponse {
+                        error: "not_found".to_string(),
+                        error_description: "Pattern not found or does not belong to claim map"
+                            .to_string(),
+                    }),
+                )
+                    .into_response()
+            } else {
+                (
+                    StatusCode::OK,
+                    Json(SuccessResponse {
+                        message: "Pattern deleted successfully".to_string(),
+                    }),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => {
+            tracing::error!("Failed to delete claim map pattern: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to delete pattern".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
 }

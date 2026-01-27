@@ -552,7 +552,7 @@ pub async fn handle_device_token_internal(
         let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
             .await
             .unwrap_or_default();
-        build_custom_claims(&state.db_pool, client.id, &user_group_ids)
+        build_custom_claims(&state.db_pool, client.id, &user_group_ids, &filtered_group_names)
             .await
             .unwrap_or_default()
     } else {

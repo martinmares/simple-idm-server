@@ -1,4 +1,5 @@
-use crate::db::{models::ClaimMap, DbPool};
+use crate::claim_map_patterns::evaluate_claim_map_patterns;
+use crate::db::{models::{ClaimMap, ClaimMapPattern}, DbPool};
 use serde_json::Value;
 use sqlx;
 use std::collections::HashMap;
@@ -13,32 +14,75 @@ pub enum ClaimMapError {
 /// Načte custom claim mapy pro daného klienta a vrátí HashMap s custom claims
 /// Tato funkce implementuje feature podobný Kanidm "group mapping"
 /// Podporuje jak single string values tak array values
+///
+/// Hybridní model:
+/// - Claim map může mít group_id (přímý match)
+/// - Claim map může mít patterns (dynamický match na group_names)
+/// - Může mít obojí současně (union)
 pub async fn build_custom_claims(
     pool: &DbPool,
     client_id: Uuid,
     user_groups: &[Uuid],
+    user_group_names: &[String],
 ) -> Result<HashMap<String, Value>, ClaimMapError> {
-    if user_groups.is_empty() {
-        return Ok(HashMap::new());
-    }
-
-    // Načti claim mapy pro tohoto klienta a skupiny uživatele
-    let claim_maps = sqlx::query_as::<_, ClaimMap>(
+    // Načti všechny claim mapy pro tohoto klienta
+    let all_claim_maps = sqlx::query_as::<_, ClaimMap>(
         r#"
-        SELECT id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json
+        SELECT id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json, updated_at
         FROM claim_maps
-        WHERE client_id = $1 AND group_id = ANY($2)
-        ORDER BY claim_name, group_id
+        WHERE client_id = $1
+        ORDER BY claim_name
         "#,
     )
     .bind(client_id)
-    .bind(user_groups)
     .fetch_all(pool)
     .await?;
 
-    // Group by claim_name
+    if all_claim_maps.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    // Pro každý claim map: evaluuj jestli se aplikuje
+    let mut applicable_claim_maps = Vec::new();
+
+    for claim_map in all_claim_maps {
+        let mut applies = false;
+
+        // Check 1: Direct group_id match
+        if let Some(group_id) = claim_map.group_id {
+            if user_groups.contains(&group_id) {
+                applies = true;
+            }
+        }
+
+        // Check 2: Pattern-based match
+        if !applies {
+            // Načti patterns pro tento claim map
+            let patterns = sqlx::query_as::<_, ClaimMapPattern>(
+                r#"
+                SELECT id, claim_map_id, pattern, is_include, priority, created_at
+                FROM claim_map_patterns
+                WHERE claim_map_id = $1
+                ORDER BY priority ASC
+                "#,
+            )
+            .bind(claim_map.id)
+            .fetch_all(pool)
+            .await?;
+
+            if !patterns.is_empty() && evaluate_claim_map_patterns(user_group_names, &patterns) {
+                applies = true;
+            }
+        }
+
+        if applies {
+            applicable_claim_maps.push(claim_map);
+        }
+    }
+
+    // Group applicable claim maps by claim_name
     let mut claims_by_name: std::collections::HashMap<String, Vec<ClaimMap>> = std::collections::HashMap::new();
-    for map in claim_maps {
+    for map in applicable_claim_maps {
         claims_by_name.entry(map.claim_name.clone()).or_default().push(map);
     }
 

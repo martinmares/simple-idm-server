@@ -1,5 +1,6 @@
 mod admin;
 mod auth;
+mod claim_map_patterns;
 mod client_group_filters;
 mod config;
 mod db;
@@ -246,6 +247,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route(
             "/admin/claim-maps/{id}",
             delete(admin::handlers::delete_claim_map),
+        )
+        // Claim Map Patterns management
+        .route(
+            "/admin/claim-maps/{id}/patterns",
+            post(admin::handlers::create_claim_map_pattern),
+        )
+        .route(
+            "/admin/claim-maps/{id}/patterns",
+            get(admin::handlers::list_claim_map_patterns),
+        )
+        .route(
+            "/admin/claim-maps/{claim_map_id}/patterns/{pattern_id}",
+            put(admin::handlers::update_claim_map_pattern),
+        )
+        .route(
+            "/admin/claim-maps/{claim_map_id}/patterns/{pattern_id}",
+            delete(admin::handlers::delete_claim_map_pattern),
         )
         .layer(middleware::from_fn_with_state(
             admin_auth.clone(),
