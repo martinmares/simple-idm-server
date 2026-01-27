@@ -129,3 +129,13 @@ pub struct UserGroupPattern {
     pub priority: i32,
     pub created_at: DateTime<Utc>,
 }
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct OAuthClientGroupPattern {
+    pub id: Uuid,
+    pub client_id: Uuid,
+    pub pattern: String,
+    pub is_include: bool,
+    pub priority: i32,
+    pub created_at: DateTime<Utc>,
+}

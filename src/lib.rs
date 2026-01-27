@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod client_group_filters;
 pub mod config;
 pub mod db;
 pub mod group_patterns;
