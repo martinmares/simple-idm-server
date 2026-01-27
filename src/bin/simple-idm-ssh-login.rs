@@ -24,6 +24,10 @@ struct Cli {
     /// Certificate TTL in seconds
     #[arg(long, global = true)]
     ttl_seconds: Option<u64>,
+
+    /// OIDC scopes (comma-separated)
+    #[arg(long, global = true, value_delimiter = ',')]
+    scopes: Option<Vec<String>>,
 }
 
 #[derive(Subcommand)]
@@ -92,6 +96,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(ttl) = cli.ttl_seconds {
         config.ttl_seconds = ttl;
+    }
+    if let Some(scopes) = cli.scopes {
+        let scopes: Vec<String> = scopes
+            .into_iter()
+            .map(|scope| scope.trim().to_string())
+            .filter(|scope| !scope.is_empty())
+            .collect();
+        if !scopes.is_empty() {
+            config.scopes = scopes;
+        }
     }
 
     match cli.command {
