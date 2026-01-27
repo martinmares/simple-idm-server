@@ -205,40 +205,49 @@ User Groups → User Patterns (sync job) → User Effective Groups
 
 ---
 
-### Phase 2: Pattern-Based Claim Maps (High Priority)
+### Phase 2: Pattern-Based Claim Maps ✅ DOKONČENO (2026-01-27)
 
 #### 2.1 Database migrace
-- [ ] Vytvořit migraci `024_add_claim_map_patterns.sql`
+- ✅ Vytvořit migraci `024_add_claim_map_patterns.sql`
   - Tabulka `claim_map_patterns` (claim_map_id, pattern, is_include, priority)
   - Foreign key na `claim_maps(id)` s ON DELETE CASCADE
   - Indexy na `claim_map_id` a `(claim_map_id, priority ASC)`
+  - Make `claim_maps.group_id` optional (nullable)
 
 #### 2.2 Datový model
-- [ ] Přidat `ClaimMapPattern` struct do `db/models.rs`
-- [ ] CRUD operace v databázi
+- ✅ Přidat `ClaimMapPattern` struct do `db/models.rs`
+- ✅ Updated `ClaimMap.group_id` to Option<Uuid>
+- ✅ CRUD operace v databázi
 
 #### 2.3 Claim map evaluation s patterns
-- [ ] Rozšířit `src/auth/claims.rs`:
+- ✅ Nový modul `src/claim_map_patterns.rs`:
   - Funkce `evaluate_claim_map_patterns()` - aplikuje patterns na user groups
+  - Podpora wildcards: *, prefix*, *suffix, *contains*
+  - Sequential pattern application (priority ASC)
+  - Include/exclude logika
+  - 14 unit testů (all passing)
+- ✅ Rozšířit `src/auth/claims.rs`:
   - Modifikovat `build_custom_claims()`:
     1. Pro každý claim map: načti jeho patterns (pokud existují)
     2. Pokud má patterns: evaluuj je proti user groups
     3. Pokud má `group_id`: check direct match
-    4. Kombinuj výsledky (union)
+    4. Kombinuj výsledky (union - hybridní model)
 
 #### 2.4 API endpointy
-- [ ] `POST /admin/claim-maps/{id}/patterns` - vytvoření patternu
-- [ ] `GET /admin/claim-maps/{id}/patterns` - seznam patterns
-- [ ] `PUT /admin/claim-maps/{claim_map_id}/patterns/{pattern_id}` - úprava
-- [ ] `DELETE /admin/claim-maps/{claim_map_id}/patterns/{pattern_id}` - smazání
+- ✅ `POST /admin/claim-maps/{id}/patterns` - vytvoření patternu
+- ✅ `GET /admin/claim-maps/{id}/patterns` - seznam patterns
+- ✅ `PUT /admin/claim-maps/{claim_map_id}/patterns/{pattern_id}` - úprava
+- ✅ `DELETE /admin/claim-maps/{claim_map_id}/patterns/{pattern_id}` - smazání
+- ✅ Routes registrovány v main.rs
 
 #### 2.5 TUI integrace
-- [ ] Přidat možnost vytvořit claim map bez `group_id` (pattern-based only)
-- [ ] Upravit Create/Update Claim Map forms:
-  - `group_id` je optional
-  - Přidat field `patterns` (read-only)
-  - Ctrl+P pro otevření Claim Map Patterns Manager
-- [ ] Dialog pro editaci patterns
+- ✅ ClaimMapPatternsManager dialog (Ctrl+P v ClaimEditor)
+- ✅ Pattern CRUD: n (new), e (edit), d (delete)
+- ✅ Navigation: ↑↓/k/j, Enter/Esc close
+- ✅ Pattern Form: 3 fields (pattern, is_include, priority)
+- ✅ Draw funkce identické s User/Client patterns
+- ✅ Event handlers s kompletní error handling
+- ✅ Integrated into main event/draw loops
 
 ---
 
