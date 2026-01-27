@@ -1908,7 +1908,7 @@ async fn handle_user_patterns_manager_event(
     };
 
     match key.code {
-        KeyCode::Esc => Ok(UserPatternsManagerResult::Closed),
+        KeyCode::Esc | KeyCode::Enter => Ok(UserPatternsManagerResult::Closed),
         KeyCode::Up | KeyCode::Char('k') => {
             if !manager.patterns.is_empty() {
                 manager.index = manager.index.saturating_sub(1);
@@ -4234,6 +4234,7 @@ fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
     }
     if let Some(manager) = &app.user_patterns_manager {
         draw_user_patterns_manager(frame, size, manager);
+        cursor_visible = false; // Hide cursor from underlying form
     }
     if let Some(pattern_form) = &app.pattern_form {
         draw_pattern_form(frame, size, pattern_form, &mut cursor_visible);
@@ -6149,7 +6150,7 @@ fn draw_user_patterns_manager(
         frame.render_stateful_widget(table, inner[0], &mut state);
     }
 
-    let footer = Paragraph::new("n new | e edit | d delete | ↑↓ navigate | Esc close")
+    let footer = Paragraph::new("n new | e edit | d delete | ↑↓ navigate | Enter/Esc close")
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 }
