@@ -16,6 +16,7 @@ keys/*.pem
 *~
 images/
 README.local.md
+logs/
 
 # OS
 .DS_Store
