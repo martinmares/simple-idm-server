@@ -1,0 +1,28 @@
+# Simple IDM SSH Signer - Example Configuration
+
+# HTTP server listen address
+listen_addr = "127.0.0.1:9222"
+
+# OIDC Provider settings
+oidc_issuer = "http://localhost:8080"
+expected_audience = "simple-idm-ssh-login"
+allowed_algs = ["RS256"]
+
+# SSH CA keys (OpenSSH format)
+ca_private_key_path = "/etc/simple-idm-ssh-signer/ca_key"
+# ca_public_key_path is optional - will be derived from private key
+
+# Certificate validity settings
+default_ttl_seconds = 3600      # 1 hour
+max_ttl_seconds = 28800          # 8 hours
+clock_skew_seconds = 30          # Clock skew tolerance
+
+# Principal limits
+max_principals = 32              # Maximum principals per certificate
+principal_max_len = 64           # Maximum principal name length
+
+# SSH certificate extensions (permissions)
+permit_port_forwarding = true
+permit_agent_forwarding = true
+permit_x11_forwarding = false
+permit_user_rc = false

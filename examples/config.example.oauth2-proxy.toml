@@ -1,0 +1,84 @@
+# OAuth2 Proxy Configuration Example
+# Copy this file to config.oauth2-proxy.toml and adjust values
+# You can also override any setting with environment variables:
+# OAUTH2_PROXY_LISTEN_ADDR=0.0.0.0:4180 cargo run --bin simple-idm-oauth2-proxy
+
+# HTTP server configuration
+listen_addr = "127.0.0.1:4180"
+public_base_url = "https://auth.example.com"
+
+# Cookie settings
+cookie_name = "_oauth2_proxy"
+cookie_secret = "CHANGE-ME-TO-RANDOM-32-CHAR-STRING"  # Generate with: openssl rand -base64 32
+cookie_secure = true
+cookie_httponly = true
+cookie_samesite = "lax"
+
+# Session configuration
+session_max_age = 3600  # 1 hour in seconds
+session_backend = "memory"  # "memory" or "sqlite"
+# session_sqlite_path = "/var/lib/simple-idm-oauth2-proxy/sessions.db"  # Required if backend is "sqlite"
+
+# OIDC Provider configuration
+oidc_issuer = "http://localhost:8080"
+client_id = "example-app"
+client_secret = "your-client-secret-here"
+redirect_path = "/callback"
+
+# Scopes to request
+scopes = ["openid", "profile", "email"]
+
+# Claims configuration
+groups_claim = "groups"  # JWT claim name containing user groups
+username_claims = ["preferred_username", "email", "sub"]  # Try in order
+
+# Header configuration
+groups_header_name = "X-Auth-Groups"
+groups_header_format = "csv"  # "csv" or "jsonb64"
+
+# Example Nginx configuration:
+#
+# server {
+#     listen 80;
+#     server_name app.example.com;
+#
+#     location / {
+#         # Auth request
+#         auth_request /auth;
+#         auth_request_set $auth_user $upstream_http_x_auth_user;
+#         auth_request_set $auth_email $upstream_http_x_auth_email;
+#         auth_request_set $auth_groups $upstream_http_x_auth_groups;
+#
+#         # Pass auth headers to backend
+#         proxy_set_header X-Auth-User $auth_user;
+#         proxy_set_header X-Auth-Email $auth_email;
+#         proxy_set_header X-Auth-Groups $auth_groups;
+#
+#         proxy_pass http://localhost:3000;
+#     }
+#
+#     location /auth {
+#         internal;
+#         proxy_pass http://localhost:4180/auth;
+#         proxy_pass_request_body off;
+#         proxy_set_header Content-Length "";
+#         proxy_set_header X-Original-URI $request_uri;
+#     }
+#
+#     location /oauth2 {
+#         proxy_pass http://localhost:4180;
+#     }
+# }
+#
+# Login flow:
+# 1. User accesses https://app.example.com/
+# 2. Nginx makes subrequest to /auth (proxy at localhost:4180/auth)
+# 3. Proxy returns 401 (no session)
+# 4. User is redirected to https://app.example.com/oauth2/start?rd=/
+# 5. Proxy redirects to OIDC provider (localhost:8080/oauth2/authorize)
+# 6. User logs in at OIDC provider
+# 7. Provider redirects back to https://app.example.com/oauth2/callback
+# 8. Proxy exchanges code for tokens, creates session
+# 9. User is redirected to original URL (/)
+# 10. Nginx makes subrequest to /auth - now returns 200 with headers
+# 11. User accesses the application with identity headers

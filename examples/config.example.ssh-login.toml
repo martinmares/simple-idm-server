@@ -1,0 +1,17 @@
+# Simple IDM SSH Login Configuration
+# Copy to ~/.config/simple-idm-ssh-login/config.toml
+
+# OIDC Provider (Simple IDM Server)
+oidc_issuer = "https://sso.cloud-app.cz"
+client_id = "simple-idm-ssh-login"
+scopes = ["openid", "profile", "email", "groups"]
+
+# SSH Certificate Signer
+signer_url = "https://ssh-signer.cloud-app.cz"
+
+# Certificate TTL (in seconds)
+ttl_seconds = 3600  # 1 hour
+
+# SSH keys are stored in the app data directory:
+#   macOS: ~/Library/Application Support/simple-idm-ssh-login/keys/id_simpleidm
+#   Linux: ~/.local/share/simple-idm-ssh-login/keys/id_simpleidm

@@ -2882,7 +2882,7 @@ async fn handle_client_pattern_form_event(
 }
 
 fn handle_password_gen_event(app: &mut App, event: Event) -> Result<PasswordGenResult> {
-    let Some(gen) = app.password_gen.as_mut() else {
+    let Some(password_gen) = app.password_gen.as_mut() else {
         return Ok(PasswordGenResult::Cancelled);
     };
 
@@ -2895,51 +2895,51 @@ fn handle_password_gen_event(app: &mut App, event: Event) -> Result<PasswordGenR
             app.password_gen = None;
             return Ok(PasswordGenResult::Cancelled);
         }
-        KeyCode::Tab => gen.index = (gen.index + 1) % 7,
+        KeyCode::Tab => password_gen.index = (password_gen.index + 1) % 7,
         KeyCode::BackTab => {
-            if gen.index == 0 {
-                gen.index = 6;
+            if password_gen.index == 0 {
+                password_gen.index = 6;
             } else {
-                gen.index -= 1;
+                password_gen.index -= 1;
             }
         }
         KeyCode::Char(' ') => {
-            match gen.index {
-                1 => gen.include_upper = !gen.include_upper,
-                2 => gen.include_lower = !gen.include_lower,
-                3 => gen.include_digits = !gen.include_digits,
-                4 => gen.include_special_safe = !gen.include_special_safe,
-                5 => gen.include_special_full = !gen.include_special_full,
+            match password_gen.index {
+                1 => password_gen.include_upper = !password_gen.include_upper,
+                2 => password_gen.include_lower = !password_gen.include_lower,
+                3 => password_gen.include_digits = !password_gen.include_digits,
+                4 => password_gen.include_special_safe = !password_gen.include_special_safe,
+                5 => password_gen.include_special_full = !password_gen.include_special_full,
                 _ => {}
             }
         }
         KeyCode::Enter => {
-            if gen.index == 6 {
-                match generate_password(gen) {
+            if password_gen.index == 6 {
+                match generate_password(password_gen) {
                     Ok(value) => {
                         if let Some(form) = app.form.as_mut() {
-                            set_field_value(form, gen.target_field, value);
+                            set_field_value(form, password_gen.target_field, value);
                         }
                         app.password_gen = None;
                         return Ok(PasswordGenResult::Applied);
                     }
-                    Err(err) => gen.error = Some(err.to_string()),
+                    Err(err) => password_gen.error = Some(err.to_string()),
                 }
-            } else if gen.index == 0 {
-                let mut length = gen.length.value().to_string();
+            } else if password_gen.index == 0 {
+                let mut length = password_gen.length.value().to_string();
                 if length.is_empty() {
                     length = "16".to_string();
                 }
-                gen.length = input_with_value(length);
+                password_gen.length = input_with_value(length);
             } else {
-                gen.index = 6;
+                password_gen.index = 6;
             }
         }
         _ => {}
     }
 
-    if gen.index == 0 {
-        gen.length.handle_event(&event);
+    if password_gen.index == 0 {
+        password_gen.length.handle_event(&event);
     }
 
     Ok(PasswordGenResult::Continue)
@@ -4874,8 +4874,8 @@ fn aggregate_group_claims(
     values
 }
 
-fn generate_password(gen: &PasswordGenState) -> Result<String> {
-    let length: usize = gen
+fn generate_password(password_gen: &PasswordGenState) -> Result<String> {
+    let length: usize = password_gen
         .length
         .value()
         .parse()
@@ -4883,19 +4883,19 @@ fn generate_password(gen: &PasswordGenState) -> Result<String> {
         .clamp(8, 128);
 
     let mut charset = String::new();
-    if gen.include_upper {
+    if password_gen.include_upper {
         charset.push_str("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
     }
-    if gen.include_lower {
+    if password_gen.include_lower {
         charset.push_str("abcdefghijklmnopqrstuvwxyz");
     }
-    if gen.include_digits {
+    if password_gen.include_digits {
         charset.push_str("0123456789");
     }
-    if gen.include_special_safe {
+    if password_gen.include_special_safe {
         charset.push_str("-_.:;@+");
     }
-    if gen.include_special_full {
+    if password_gen.include_special_full {
         charset.push_str("!@#$%^&*()[]{}<>?/\\\\|`~'\"");
     }
 
@@ -5832,8 +5832,8 @@ fn draw_form(
     if let Some(selector) = &app.selector {
         draw_selector(frame, area, selector, cursor_visible);
     }
-    if let Some(gen) = &app.password_gen {
-        draw_password_gen(frame, area, gen, cursor_visible);
+    if let Some(password_gen) = &app.password_gen {
+        draw_password_gen(frame, area, password_gen, cursor_visible);
     }
 }
 
@@ -6503,14 +6503,14 @@ fn draw_selector(
 fn draw_password_gen(
     frame: &mut ratatui::Frame,
     area: Rect,
-    gen: &PasswordGenState,
+    password_gen: &PasswordGenState,
     cursor_visible: &mut bool,
 ) {
     let popup = centered_rect(60, 60, area);
     frame.render_widget(Clear, popup);
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(gen.title.clone());
+        .title(password_gen.title.clone());
     frame.render_widget(block, popup);
 
     let inner = Layout::default()
@@ -6520,15 +6520,18 @@ fn draw_password_gen(
         .split(popup);
 
     let rows = vec![
-        format!("Length: {}", gen.length.value()),
-        format!("[{}] Uppercase (A-Z)", mark(gen.include_upper)),
-        format!("[{}] Lowercase (a-z)", mark(gen.include_lower)),
-        format!("[{}] Digits (0-9)", mark(gen.include_digits)),
+        format!("Length: {}", password_gen.length.value()),
+        format!("[{}] Uppercase (A-Z)", mark(password_gen.include_upper)),
+        format!("[{}] Lowercase (a-z)", mark(password_gen.include_lower)),
+        format!("[{}] Digits (0-9)", mark(password_gen.include_digits)),
         format!(
             "[{}] Special safe (- _ . , : ; @ +)",
-            mark(gen.include_special_safe)
+            mark(password_gen.include_special_safe)
         ),
-        format!("[{}] Special full (! @ # $ % ...)", mark(gen.include_special_full)),
+        format!(
+            "[{}] Special full (! @ # $ % ...)",
+            mark(password_gen.include_special_full)
+        ),
         "Generate".to_string(),
     ];
 
@@ -6536,7 +6539,7 @@ fn draw_password_gen(
         .into_iter()
         .enumerate()
         .map(|(idx, text)| {
-            let prefix = if idx == gen.index { "> " } else { "  " };
+            let prefix = if idx == password_gen.index { "> " } else { "  " };
             Line::from(vec![
                 Span::styled(prefix, Style::default().fg(Color::Yellow)),
                 Span::raw(text),
@@ -6545,7 +6548,7 @@ fn draw_password_gen(
         .collect();
 
     let mut lines = lines;
-    if let Some(error) = &gen.error {
+    if let Some(error) = &password_gen.error {
         lines.push(Line::from(Span::styled(
             error.clone(),
             Style::default().fg(Color::Red),
@@ -6559,9 +6562,12 @@ fn draw_password_gen(
         .alignment(Alignment::Center);
     frame.render_widget(footer, inner[1]);
 
-    if gen.index == 0 {
+    if password_gen.index == 0 {
         let prefix = "Length: ";
-        let cursor_x = inner[0].x + 2 + prefix.len() as u16 + gen.length.cursor() as u16;
+        let cursor_x = inner[0].x
+            + 2
+            + prefix.len() as u16
+            + password_gen.length.cursor() as u16;
         let cursor_y = inner[0].y;
         frame.set_cursor(cursor_x, cursor_y);
         *cursor_visible = true;

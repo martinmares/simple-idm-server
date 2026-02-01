@@ -1,8 +1,8 @@
 [package]
 name = "simple-idm-server"
-version = "0.1.0"
-edition = "2021"
-authors = ["Your Name <your.email@example.com>"]
+version = "0.2.0"
+edition = "2024"
+authors = ["Martin Mareš <martin.mares@seznam.cz>"]
 
 [dependencies]
 # Web framework
@@ -21,9 +21,9 @@ serde_json = "1.0"
 serde_urlencoded = "0.7"
 
 # JWT & Crypto
-jsonwebtoken = { version = "10.2", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 argon2 = "0.5"
-uuid = { version = "1.19", features = ["v4", "serde"] }
+uuid = { version = "1.20", features = ["v4", "serde"] }
 rand = "0.9"
 sha2 = "0.10"
 base64 = "0.22"
@@ -49,8 +49,8 @@ anyhow = "1.0"
 
 # Validation
 validator = { version = "0.20", features = ["derive"] }
-regex = "1.11"
-tempfile = "3.15"
+regex = "1.12"
+tempfile = "3.24"
 
 # HTTP client (for OIDC discovery)
 reqwest = { version = "0.13", features = ["json", "form"] }
@@ -67,7 +67,7 @@ url = "2.5"
 dirs = "5.0"
 urlencoding = "2.1"
 qrcode = "0.14"
-open = "5.0"
+open = "5.3"
 
 [[bin]]
 name = "simple-idm-ctl"
