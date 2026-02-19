@@ -4215,6 +4215,7 @@ async fn handle_form_event(
                     "openid".to_string(),
                     "profile".to_string(),
                     "email".to_string(),
+                    "groups".to_string(),
                     "offline_access".to_string(),
                 ];
 
