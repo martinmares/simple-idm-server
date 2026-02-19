@@ -41,6 +41,7 @@ COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-ser
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-ctl /app/bin/simple-idm-ctl
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-oauth2-proxy /app/bin/simple-idm-oauth2-proxy
 COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-ssh-login /app/bin/simple-idm-ssh-login
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-ssh-signer /app/bin/simple-idm-ssh-signer
 
 # Runtime files needed by server
 COPY migrations /app/migrations
