@@ -51,6 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     tracing::info!("Starting simple-idm-ssh-signer");
 
+    // Load .env file (same behavior as simple-idm-server).
+    dotenvy::dotenv().ok();
+
     // Načti konfiguraci
     let mut config = SshSignerConfig::load(cli.config.as_deref())?;
 
