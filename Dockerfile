@@ -1,53 +1,63 @@
-# Build stage
-FROM rust:1.75-slim as builder
+# ------------------------------------------------------------------------------
+# Build stage: static Linux binaries (musl)
+# ------------------------------------------------------------------------------
+FROM rust:1.93-alpine3.22 AS builder
 
-# Install dependencies
-RUN apt-get update && \
-    apt-get install -y pkg-config libssl-dev && \
-    rm -rf /var/lib/apt/lists/*
+RUN apk add --no-cache musl-dev pkgconfig build-base cmake perl make
 
 WORKDIR /app
 
-# Copy manifests
 COPY Cargo.toml Cargo.lock ./
-
-# Copy source code and sqlx metadata
 COPY src ./src
-COPY .sqlx ./.sqlx
 COPY migrations ./migrations
+COPY .sqlx ./.sqlx
 
-# Build with sqlx offline mode (NO DATABASE REQUIRED!)
 ENV SQLX_OFFLINE=true
-RUN cargo build --release
+ENV CARGO_NET_GIT_FETCH_WITH_CLI=true
 
-# Runtime stage
-FROM debian:bookworm-slim
+RUN rustup target add x86_64-unknown-linux-musl
+RUN cargo build --release --bins --target x86_64-unknown-linux-musl
 
-# Install runtime dependencies
-RUN apt-get update && \
-    apt-get install -y ca-certificates libssl3 && \
-    rm -rf /var/lib/apt/lists/*
+# ------------------------------------------------------------------------------
+# Runtime stage: openSUSE Tumbleweed
+# ------------------------------------------------------------------------------
+FROM opensuse/tumbleweed:latest
+
+RUN zypper -n ref && \
+    zypper -n in --no-recommends ca-certificates curl shadow && \
+    zypper -n clean -a
+
+# app:app (uid/gid 1001), home=/app
+RUN groupadd -g 1001 app && \
+    useradd -u 1001 -g 1001 -d /app -m -s /sbin/nologin app
 
 WORKDIR /app
 
-# Copy binary from builder
-COPY --from=builder /app/target/release/simple-idm-server /usr/local/bin/simple-idm-server
+# Layout requested
+RUN mkdir -p /app/bin /app/conf /app/migrations
 
-# Copy migrations (needed for runtime)
-COPY migrations ./migrations
+# Copy all static binaries
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-server /app/bin/simple-idm-server
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-ctl /app/bin/simple-idm-ctl
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-oauth2-proxy /app/bin/simple-idm-oauth2-proxy
+COPY --from=builder /app/target/x86_64-unknown-linux-musl/release/simple-idm-ssh-login /app/bin/simple-idm-ssh-login
 
-# Create directory for keys
-RUN mkdir -p /app/keys
+# Runtime files needed by server
+COPY migrations /app/migrations
 
-# Expose port
+# Ownership + OpenShift-friendly write permissions.
+# OpenShift may run with random UID; granting group 0 parity keeps /app writable.
+RUN chown -R 1001:1001 /app && \
+    chgrp -R 0 /app && \
+    chmod -R g=u /app
+
+ENV PATH="/app/bin:${PATH}"
+
 EXPOSE 8080
 
-# Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD curl -f http://localhost:8080/health || exit 1
+  CMD curl -fsS http://localhost:8080/health || exit 1
 
-# Run as non-root user
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+USER 1001
 
 CMD ["simple-idm-server"]
