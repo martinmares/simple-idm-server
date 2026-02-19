@@ -1953,12 +1953,19 @@ fn handle_array_editor_event(app: &mut App, event: Event) -> Result<ArrayEditorR
             Ok(ArrayEditorResult::Continue)
         }
         KeyCode::Char('a') => {
-            let insert_at = editor.index + 1;
+            let insert_at = if editor.values.is_empty() {
+                0
+            } else {
+                editor.index.saturating_add(1).min(editor.values.len())
+            };
             editor.values.insert(insert_at, Input::default());
             editor.index = insert_at;
             Ok(ArrayEditorResult::Continue)
         }
         KeyCode::Char('d') => {
+            if editor.values.is_empty() {
+                return Ok(ArrayEditorResult::Continue);
+            }
             if editor.values.len() > 1 {
                 editor.values.remove(editor.index);
                 if editor.index >= editor.values.len() {
