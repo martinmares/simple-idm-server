@@ -163,6 +163,64 @@ impl SshSignerConfig {
         if let Ok(key_path) = std::env::var("CA_PRIVATE_KEY_PATH") {
             config.ca_private_key_path = PathBuf::from(key_path);
         }
+        if let Ok(ca_public_key_path) = std::env::var("CA_PUBLIC_KEY_PATH") {
+            config.ca_public_key_path = Some(PathBuf::from(ca_public_key_path));
+        }
+        if let Ok(algs) = std::env::var("ALLOWED_ALGS") {
+            let parsed: Vec<String> = algs
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !parsed.is_empty() {
+                config.allowed_algs = parsed;
+            }
+        }
+        if let Ok(default_ttl_seconds) = std::env::var("DEFAULT_TTL_SECONDS") {
+            if let Ok(v) = default_ttl_seconds.parse::<u64>() {
+                config.default_ttl_seconds = v;
+            }
+        }
+        if let Ok(max_ttl_seconds) = std::env::var("MAX_TTL_SECONDS") {
+            if let Ok(v) = max_ttl_seconds.parse::<u64>() {
+                config.max_ttl_seconds = v;
+            }
+        }
+        if let Ok(clock_skew_seconds) = std::env::var("CLOCK_SKEW_SECONDS") {
+            if let Ok(v) = clock_skew_seconds.parse::<u64>() {
+                config.clock_skew_seconds = v;
+            }
+        }
+        if let Ok(max_principals) = std::env::var("MAX_PRINCIPALS") {
+            if let Ok(v) = max_principals.parse::<usize>() {
+                config.max_principals = v;
+            }
+        }
+        if let Ok(principal_max_len) = std::env::var("PRINCIPAL_MAX_LEN") {
+            if let Ok(v) = principal_max_len.parse::<usize>() {
+                config.principal_max_len = v;
+            }
+        }
+        if let Ok(permit_port_forwarding) = std::env::var("PERMIT_PORT_FORWARDING") {
+            if let Ok(v) = permit_port_forwarding.parse::<bool>() {
+                config.permit_port_forwarding = v;
+            }
+        }
+        if let Ok(permit_agent_forwarding) = std::env::var("PERMIT_AGENT_FORWARDING") {
+            if let Ok(v) = permit_agent_forwarding.parse::<bool>() {
+                config.permit_agent_forwarding = v;
+            }
+        }
+        if let Ok(permit_x11_forwarding) = std::env::var("PERMIT_X11_FORWARDING") {
+            if let Ok(v) = permit_x11_forwarding.parse::<bool>() {
+                config.permit_x11_forwarding = v;
+            }
+        }
+        if let Ok(permit_user_rc) = std::env::var("PERMIT_USER_RC") {
+            if let Ok(v) = permit_user_rc.parse::<bool>() {
+                config.permit_user_rc = v;
+            }
+        }
 
         // Validate required fields
         if config.oidc_issuer.is_empty() {
