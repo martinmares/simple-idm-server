@@ -5,6 +5,7 @@ use tempfile::TempDir;
 
 pub struct CertSigner {
     ca_private_key_path: PathBuf,
+    cert_key_id: String,
     default_ttl_seconds: u64,
     max_ttl_seconds: u64,
     clock_skew_seconds: u64,
@@ -26,6 +27,7 @@ pub struct SignedCert {
 impl CertSigner {
     pub fn new(
         ca_private_key_path: PathBuf,
+        cert_key_id: String,
         default_ttl_seconds: u64,
         max_ttl_seconds: u64,
         clock_skew_seconds: u64,
@@ -39,6 +41,7 @@ impl CertSigner {
 
         Ok(Self {
             ca_private_key_path,
+            cert_key_id,
             default_ttl_seconds,
             max_ttl_seconds,
             clock_skew_seconds,
@@ -85,17 +88,23 @@ impl CertSigner {
             ttl
         );
 
+        let serial = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros()
+            .to_string();
+
         let output = Command::new("ssh-keygen")
             .arg("-s")
             .arg(&self.ca_private_key_path)
             .arg("-I")
-            .arg("simple-idm-cert") // Key ID
+            .arg(&self.cert_key_id)
             .arg("-n")
             .arg(&principals_csv)
             .arg("-V")
             .arg(&validity)
             .arg("-z")
-            .arg("1") // Serial number (TODO: increment)
+            .arg(&serial)
             .arg(&pubkey_path)
             .output()
             .map_err(|e| format!("Failed to execute ssh-keygen: {}", e))?;
@@ -160,6 +169,7 @@ mod tests {
         let ca_key = NamedTempFile::new().expect("create temp ca key");
         let signer = CertSigner::new(
             ca_key.path().to_path_buf(),
+            "simple-idm-cert".to_string(),
             3600,
             28800,
             30,
@@ -178,7 +188,14 @@ mod tests {
     #[test]
     fn test_validate_public_key_invalid() {
         let ca_key = NamedTempFile::new().expect("create temp ca key");
-        let signer = CertSigner::new(ca_key.path().to_path_buf(), 3600, 28800, 30).ok();
+        let signer = CertSigner::new(
+            ca_key.path().to_path_buf(),
+            "simple-idm-cert".to_string(),
+            3600,
+            28800,
+            30,
+        )
+        .ok();
 
         // Missing key data
         assert!(signer.as_ref().unwrap().validate_public_key("ssh-ed25519").is_err());

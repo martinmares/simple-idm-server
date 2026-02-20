@@ -20,6 +20,11 @@ clock_skew_seconds = 30          # Clock skew tolerance
 # Principal limits
 max_principals = 32              # Maximum principals per certificate
 principal_max_len = 64           # Maximum principal name length
+require_explicit_ssh_principal = false   # true => no username/email fallback
+allow_ssh_role_principals = true         # true => allow ssh:role:<role> -> role:<role>
+
+# Certificate metadata
+cert_key_id = "simple-idm-cert"          # appears as "Key ID" in ssh-keygen -L
 
 # SSH certificate extensions (permissions)
 permit_port_forwarding = true

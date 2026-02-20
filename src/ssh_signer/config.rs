@@ -46,6 +46,18 @@ pub struct SshSignerConfig {
     #[serde(default = "default_principal_max_len")]
     pub principal_max_len: usize,
 
+    /// Require explicit SSH principal/role in groups (disable username/email fallback)
+    #[serde(default)]
+    pub require_explicit_ssh_principal: bool,
+
+    /// Allow mapping ssh:role:<role> -> role:<role> principal
+    #[serde(default = "default_allow_ssh_role_principals")]
+    pub allow_ssh_role_principals: bool,
+
+    /// SSH certificate key ID (`ssh-keygen -I`)
+    #[serde(default = "default_cert_key_id")]
+    pub cert_key_id: String,
+
     /// SSH certificate extensions
     #[serde(default)]
     pub permit_port_forwarding: bool,
@@ -88,6 +100,14 @@ fn default_principal_max_len() -> usize {
     64
 }
 
+fn default_allow_ssh_role_principals() -> bool {
+    true
+}
+
+fn default_cert_key_id() -> String {
+    "simple-idm-cert".to_string()
+}
+
 impl Default for SshSignerConfig {
     fn default() -> Self {
         Self {
@@ -102,6 +122,9 @@ impl Default for SshSignerConfig {
             clock_skew_seconds: default_clock_skew(),
             max_principals: default_max_principals(),
             principal_max_len: default_principal_max_len(),
+            require_explicit_ssh_principal: false,
+            allow_ssh_role_principals: default_allow_ssh_role_principals(),
+            cert_key_id: default_cert_key_id(),
             permit_port_forwarding: false,
             permit_agent_forwarding: false,
             permit_x11_forwarding: false,
@@ -201,6 +224,19 @@ impl SshSignerConfig {
                 config.principal_max_len = v;
             }
         }
+        if let Ok(require_explicit) = std::env::var("REQUIRE_EXPLICIT_SSH_PRINCIPAL") {
+            if let Ok(v) = require_explicit.parse::<bool>() {
+                config.require_explicit_ssh_principal = v;
+            }
+        }
+        if let Ok(allow_roles) = std::env::var("ALLOW_SSH_ROLE_PRINCIPALS") {
+            if let Ok(v) = allow_roles.parse::<bool>() {
+                config.allow_ssh_role_principals = v;
+            }
+        }
+        if let Ok(cert_key_id) = std::env::var("CERT_KEY_ID") {
+            config.cert_key_id = cert_key_id;
+        }
         if let Ok(permit_port_forwarding) = std::env::var("PERMIT_PORT_FORWARDING") {
             if let Ok(v) = permit_port_forwarding.parse::<bool>() {
                 config.permit_port_forwarding = v;
@@ -231,6 +267,9 @@ impl SshSignerConfig {
         }
         if config.ca_private_key_path.as_os_str().is_empty() {
             return Err("CA private key path is required (set via config file, env CA_PRIVATE_KEY_PATH, or --ca-private-key-path)".into());
+        }
+        if config.cert_key_id.trim().is_empty() {
+            return Err("Certificate key ID is required (set via config file cert_key_id or env CERT_KEY_ID)".into());
         }
 
         Ok(config)

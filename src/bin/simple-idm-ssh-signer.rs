@@ -102,12 +102,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let principal_mapper = Arc::new(PrincipalMapper::new(
         config.max_principals,
         config.principal_max_len,
+        config.require_explicit_ssh_principal,
+        config.allow_ssh_role_principals,
     ));
 
     // Initialize certificate signer
     let cert_signer = Arc::new(
         CertSigner::new(
             config.ca_private_key_path.clone(),
+            config.cert_key_id.clone(),
             config.default_ttl_seconds,
             config.max_ttl_seconds,
             config.clock_skew_seconds,

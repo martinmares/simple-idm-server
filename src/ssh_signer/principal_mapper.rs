@@ -4,17 +4,26 @@ use regex::Regex;
 pub struct PrincipalMapper {
     max_principals: usize,
     principal_max_len: usize,
+    require_explicit_ssh_principal: bool,
+    allow_ssh_role_principals: bool,
     principal_regex: Regex,
 }
 
 impl PrincipalMapper {
-    pub fn new(max_principals: usize, principal_max_len: usize) -> Self {
+    pub fn new(
+        max_principals: usize,
+        principal_max_len: usize,
+        require_explicit_ssh_principal: bool,
+        allow_ssh_role_principals: bool,
+    ) -> Self {
         // Allow only safe characters: alphanumeric, dot, underscore, colon, hyphen
         let principal_regex = Regex::new(r"^[A-Za-z0-9._:-]+$").unwrap();
 
         Self {
             max_principals,
             principal_max_len,
+            require_explicit_ssh_principal,
+            allow_ssh_role_principals,
             principal_regex,
         }
     }
@@ -29,8 +38,16 @@ impl PrincipalMapper {
             }
         }
 
-        // Fallback if no explicit ssh:principal:* found
+        // Fallback if no explicit ssh:* found
         if principals.is_empty() {
+            if self.require_explicit_ssh_principal {
+                let hint = if self.allow_ssh_role_principals {
+                    "No explicit SSH principals found. Add group(s) ssh:principal:<name> or ssh:role:<role>."
+                } else {
+                    "No explicit SSH principals found. Add group(s) ssh:principal:<name>."
+                };
+                return Err(hint.to_string());
+            }
             let fallback = self.get_fallback_principal(claims)?;
             principals.push(fallback);
         }
@@ -69,8 +86,10 @@ impl PrincipalMapper {
         }
 
         // ssh:role:<role> → role:<role>
-        if let Some(stripped) = group.strip_prefix("ssh:role:") {
-            return Some(format!("role:{}", stripped));
+        if self.allow_ssh_role_principals {
+            if let Some(stripped) = group.strip_prefix("ssh:role:") {
+                return Some(format!("role:{}", stripped));
+            }
         }
 
         None
@@ -126,7 +145,7 @@ mod tests {
 
     #[test]
     fn test_map_principals_explicit() {
-        let mapper = PrincipalMapper::new(32, 64);
+        let mapper = PrincipalMapper::new(32, 64, false, true);
         let claims = TokenClaims {
             sub: "user-123".to_string(),
             iss: "https://sso.example.com".to_string(),
@@ -147,7 +166,7 @@ mod tests {
 
     #[test]
     fn test_map_principals_fallback_preferred_username() {
-        let mapper = PrincipalMapper::new(32, 64);
+        let mapper = PrincipalMapper::new(32, 64, false, true);
         let claims = TokenClaims {
             sub: "uuid-123-456".to_string(),
             iss: "https://sso.example.com".to_string(),
@@ -164,7 +183,7 @@ mod tests {
 
     #[test]
     fn test_map_principals_fallback_email() {
-        let mapper = PrincipalMapper::new(32, 64);
+        let mapper = PrincipalMapper::new(32, 64, false, true);
         let claims = TokenClaims {
             sub: "uuid-789".to_string(),
             iss: "https://sso.example.com".to_string(),
@@ -181,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_validate_principal_invalid_chars() {
-        let mapper = PrincipalMapper::new(32, 64);
+        let mapper = PrincipalMapper::new(32, 64, false, true);
         assert!(mapper.validate_principal("user@host").is_err());
         assert!(mapper.validate_principal("user;rm -rf").is_err());
         assert!(mapper.validate_principal("user`whoami`").is_err());
@@ -189,7 +208,38 @@ mod tests {
 
     #[test]
     fn test_validate_principal_too_long() {
-        let mapper = PrincipalMapper::new(32, 10);
+        let mapper = PrincipalMapper::new(32, 10, false, true);
         assert!(mapper.validate_principal("verylongusername").is_err());
+    }
+
+    #[test]
+    fn test_require_explicit_principal_rejects_fallback() {
+        let mapper = PrincipalMapper::new(32, 64, true, true);
+        let claims = TokenClaims {
+            sub: "uuid-789".to_string(),
+            iss: "https://sso.example.com".to_string(),
+            aud: vec!["ssh-login".to_string()],
+            exp: 9999999999,
+            preferred_username: Some("bob".to_string()),
+            email: Some("bob@corp.com".to_string()),
+            groups: vec![],
+        };
+        assert!(mapper.map_principals(&claims).is_err());
+    }
+
+    #[test]
+    fn test_disable_role_principals() {
+        let mapper = PrincipalMapper::new(32, 64, false, false);
+        let claims = TokenClaims {
+            sub: "uuid-789".to_string(),
+            iss: "https://sso.example.com".to_string(),
+            aud: vec!["ssh-login".to_string()],
+            exp: 9999999999,
+            preferred_username: Some("bob".to_string()),
+            email: Some("bob@corp.com".to_string()),
+            groups: vec!["ssh:role:devops".to_string()],
+        };
+        let principals = mapper.map_principals(&claims).unwrap();
+        assert_eq!(principals, vec!["bob"]);
     }
 }
