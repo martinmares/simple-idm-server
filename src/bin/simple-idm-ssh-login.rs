@@ -28,6 +28,10 @@ struct Cli {
     /// OIDC scopes (comma-separated)
     #[arg(long, global = true, value_delimiter = ',')]
     scopes: Option<Vec<String>>,
+
+    /// Config profile name (for multi-profile config.toml)
+    #[arg(long, global = true)]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -82,7 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     // Load config
-    let mut config = SshLoginConfig::load()?;
+    let mut config = SshLoginConfig::load(cli.profile.as_deref())?;
 
     // Apply CLI overrides
     if let Some(issuer) = cli.issuer {

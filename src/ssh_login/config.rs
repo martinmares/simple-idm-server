@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10,23 +11,47 @@ pub struct SshLoginConfig {
     pub ttl_seconds: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SshLoginProfilesFile {
+    #[serde(default = "default_profile_name")]
+    active: String,
+    profiles: HashMap<String, SshLoginConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ConfigFileFormat {
+    Legacy(SshLoginConfig),
+    Profiles(SshLoginProfilesFile),
+}
+
+fn default_profile_name() -> String {
+    "default".to_string()
+}
+
 impl SshLoginConfig {
-    pub fn load() -> Result<Self, String> {
-        // Try loading from config file first
-        if let Ok(config) = Self::load_from_file() {
-            return Ok(config);
+    pub fn load(selected_profile: Option<&str>) -> Result<Self, String> {
+        // Try loading from config file first.
+        // Important: if config file exists but is invalid, return an explicit error
+        // instead of silently falling back to localhost defaults.
+        let config_path = Self::config_path()?;
+        if config_path.exists() {
+            return Self::load_from_file(selected_profile);
         }
 
         // Fallback to defaults with env overrides
         Ok(Self::default_with_env())
     }
 
-    fn load_from_file() -> Result<Self, String> {
-        let config_path = dirs::config_dir()
+    fn config_path() -> Result<PathBuf, String> {
+        Ok(dirs::config_dir()
             .ok_or("Cannot determine config directory")?
             .join("simple-idm-ssh-login")
-            .join("config.toml");
+            .join("config.toml"))
+    }
 
+    fn load_from_file(selected_profile: Option<&str>) -> Result<Self, String> {
+        let config_path = Self::config_path()?;
         if !config_path.exists() {
             return Err("Config file not found".to_string());
         }
@@ -34,8 +59,34 @@ impl SshLoginConfig {
         let content = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config: {}", e))?;
 
-        let config: Self = toml::from_str(&content)
+        let parsed: ConfigFileFormat = toml::from_str(&content)
             .map_err(|e| format!("Failed to parse config: {}", e))?;
+
+        let config = match parsed {
+            ConfigFileFormat::Legacy(config) => {
+                if let Some(profile) = selected_profile {
+                    if profile != "default" {
+                        return Err(format!(
+                            "Profile '{}' not found: config.toml is in legacy single-profile format",
+                            profile
+                        ));
+                    }
+                }
+                config
+            }
+            ConfigFileFormat::Profiles(file) => {
+                let profile_name = selected_profile.unwrap_or(file.active.as_str());
+                file.profiles.get(profile_name).cloned().ok_or_else(|| {
+                    let mut names: Vec<String> = file.profiles.keys().cloned().collect();
+                    names.sort();
+                    format!(
+                        "Profile '{}' not found. Available profiles: {}",
+                        profile_name,
+                        names.join(", ")
+                    )
+                })?
+            }
+        };
 
         Ok(Self::apply_env_overrides(config))
     }

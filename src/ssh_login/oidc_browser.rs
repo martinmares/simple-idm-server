@@ -6,7 +6,7 @@ use axum::{
 };
 use openidconnect::{
     core::{CoreClient, CoreProviderMetadata, CoreResponseType},
-    reqwest::async_http_client,
+    reqwest,
     AuthenticationFlow, AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce,
     PkceCodeChallenge, RedirectUrl, Scope,
 };
@@ -47,7 +47,12 @@ pub async fn browser_flow(
     let issuer_url =
         IssuerUrl::new(issuer.to_string()).map_err(|e| format!("Invalid issuer URL: {}", e))?;
 
-    let metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client)
+    let http_client = reqwest::ClientBuilder::new()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Failed to build HTTP client: {}", e))?;
+
+    let metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
         .await
         .map_err(|e| format!("OIDC discovery failed: {}", e))?;
 
@@ -152,9 +157,10 @@ pub async fn browser_flow(
     tracing::debug!("Exchanging authorization code for tokens");
     let token_response = client
         .exchange_code(AuthorizationCode::new(callback_result.code))
+        .map_err(|e| format!("Failed to build token request: {}", e))?
         .set_pkce_verifier(pkce_verifier)
         .set_redirect_uri(std::borrow::Cow::Borrowed(&redirect_url_parsed))
-        .request_async(async_http_client)
+        .request_async(&http_client)
         .await
         .map_err(|e| {
             tracing::error!("Token exchange error: {:?}", e);
