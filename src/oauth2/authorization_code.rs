@@ -13,7 +13,7 @@ use axum::{
 };
 use axum::http::header::SET_COOKIE;
 use chrono::{Duration, Utc};
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sqlx;
 use std::collections::HashMap;

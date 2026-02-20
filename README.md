@@ -144,6 +144,17 @@ The `/oauth2/token` endpoint has stricter rate limiting by default to prevent br
 - `SERVER_PORT` - Server port (default: `8080`)
 - `DATABASE_URL` - PostgreSQL connection string
 - `ADMIN_ROOT_TOKEN` - Admin API token (optional, for development only)
+- `UI_BRAND_NAME` - Company/product name shown on login/reset/error pages (default: `Cloud App`)
+- `UI_BRAND_DOMAIN` - Optional domain/tenant hint for login page subtitle (default: empty)
+- `UI_THEME` - UI theme preset for auth pages (`blue`, `red`, `white`, `green`, `gold`; default: `blue`)
+- `UI_CUSTOM_CSS_PATH` - Optional path to CSS file injected into auth pages at runtime (default: empty)
+
+CLI overrides for branding are also available:
+
+- `--ui-brand-name`
+- `--ui-brand-domain`
+- `--ui-theme`
+- `--ui-custom-css-path`
 
 ---
 
@@ -720,4 +731,3 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 ## Author
 
 Martin Mareš
-

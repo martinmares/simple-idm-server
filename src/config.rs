@@ -10,6 +10,7 @@ pub struct Config {
     pub admin: AdminConfig,
     pub device_flow: DeviceFlowConfig,
     pub group_patterns: GroupPatternsConfig,
+    pub ui: UiConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +62,14 @@ pub struct DeviceFlowConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GroupPatternsConfig {
     pub sync_interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UiConfig {
+    pub brand_name: String,
+    pub brand_domain: Option<String>,
+    pub theme: String,
+    pub custom_css_path: Option<String>,
 }
 
 impl Config {
@@ -145,6 +154,20 @@ impl Config {
             .parse()
             .unwrap_or(300); // Default 5 minutes
 
+        let ui_brand_name =
+            env::var("UI_BRAND_NAME").unwrap_or_else(|_| "Cloud App".to_string());
+        let ui_brand_domain = env::var("UI_BRAND_DOMAIN")
+            .ok()
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty());
+        let ui_theme = env::var("UI_THEME")
+            .unwrap_or_else(|_| "blue".to_string())
+            .to_lowercase();
+        let ui_custom_css_path = env::var("UI_CUSTOM_CSS_PATH")
+            .ok()
+            .map(|p| p.trim().to_string())
+            .filter(|p| !p.is_empty());
+
         Ok(Config {
             server: ServerConfig {
                 host: server_host,
@@ -180,6 +203,12 @@ impl Config {
             },
             group_patterns: GroupPatternsConfig {
                 sync_interval_seconds: group_patterns_sync_interval,
+            },
+            ui: UiConfig {
+                brand_name: ui_brand_name,
+                brand_domain: ui_brand_domain,
+                theme: ui_theme,
+                custom_css_path: ui_custom_css_path,
             },
         })
     }

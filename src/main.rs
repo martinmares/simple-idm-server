@@ -15,6 +15,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use clap::Parser;
 use tower_governor::{
     governor::GovernorConfigBuilder,
     key_extractor::SmartIpKeyExtractor,
@@ -25,6 +26,23 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[derive(Parser, Debug)]
+#[command(name = "simple-idm-server")]
+struct CliArgs {
+    /// UI brand/company name shown on auth pages
+    #[arg(long)]
+    ui_brand_name: Option<String>,
+    /// Optional domain/tenant hint shown on auth pages
+    #[arg(long)]
+    ui_brand_domain: Option<String>,
+    /// UI theme preset: blue, red, white, green, gold
+    #[arg(long)]
+    ui_theme: Option<String>,
+    /// Optional path to custom CSS file injected into auth pages
+    #[arg(long)]
+    ui_custom_css_path: Option<String>,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -37,12 +55,59 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Načti konfiguraci
-    dotenvy::dotenv().ok();
-    let config = config::Config::from_env()?;
+    // Načti konfiguraci z .env (lokálně i v kontejneru/K8s mountu).
+    load_env_file();
+    let mut config = config::Config::from_env()?;
+    let cli = CliArgs::parse();
+    if let Some(brand_name) = cli.ui_brand_name {
+        config.ui.brand_name = brand_name;
+    }
+    if let Some(brand_domain) = cli.ui_brand_domain {
+        let domain = brand_domain.trim().to_string();
+        config.ui.brand_domain = if domain.is_empty() { None } else { Some(domain) };
+    }
+    if let Some(theme) = cli.ui_theme {
+        config.ui.theme = theme.to_lowercase();
+    }
+    if let Some(path) = cli.ui_custom_css_path {
+        let p = path.trim().to_string();
+        config.ui.custom_css_path = if p.is_empty() { None } else { Some(p) };
+    }
+
+    let custom_css = if let Some(path) = &config.ui.custom_css_path {
+        match std::fs::read_to_string(path) {
+            Ok(css) => Some(css),
+            Err(err) => {
+                tracing::warn!("Failed to load custom UI CSS from '{}': {}", path, err);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    oauth2::templates::set_branding_from_config(
+        config.ui.brand_name.clone(),
+        config.ui.brand_domain.clone(),
+        config.ui.theme.clone(),
+        custom_css,
+    );
 
     tracing::info!("Starting simple-idm-server");
     tracing::info!("Server: {}:{}", config.server.host, config.server.port);
+    tracing::info!(
+        "UI branding: name='{}' domain='{}' theme='{}'",
+        config.ui.brand_name,
+        config
+            .ui
+            .brand_domain
+            .clone()
+            .unwrap_or_else(|| "-".to_string()),
+        config.ui.theme
+    );
+    if let Some(path) = &config.ui.custom_css_path {
+        tracing::info!("UI custom CSS: {}", path);
+    }
     tracing::info!(
         "Database: {}",
         redact_database_url(&config.database.url)
@@ -372,6 +437,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     Ok(())
+}
+
+fn load_env_file() {
+    // 1) Standard path from current working directory
+    if let Ok(path) = dotenvy::dotenv() {
+        tracing::info!("Loaded env file: {}", path.display());
+        return;
+    }
+
+    // 2) Explicit container path used in Kubernetes manifests
+    if dotenvy::from_filename("/app/.env").is_ok() {
+        tracing::info!("Loaded env file: /app/.env");
+        return;
+    }
+
+    tracing::warn!("No .env file loaded from CWD or /app/.env; using process environment only");
 }
 
 async fn health_check() -> &'static str {
