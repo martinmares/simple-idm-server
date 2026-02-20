@@ -24,7 +24,7 @@ RUN cargo build --release --bins --target x86_64-unknown-linux-musl
 FROM opensuse/tumbleweed:latest
 
 RUN zypper -n ref && \
-    zypper -n in --no-recommends ca-certificates curl shadow && \
+    zypper -n in --no-recommends ca-certificates curl shadow openssh && \
     zypper -n clean -a
 
 # app:app (uid/gid 1001), home=/app

@@ -1,3 +1,7 @@
 [env]
 SQLX_OFFLINE = "true"
 
+[target.x86_64-unknown-linux-musl]
+# On macOS host, default `cc` resolves to Apple ld which cannot link GNU-style
+# static musl targets. Use Rust's bundled lld for musl cross-linking.
+linker = "rust-lld"
