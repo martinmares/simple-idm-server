@@ -4,13 +4,12 @@ use clap::{Parser, Subcommand, ValueEnum};
 use dirs::config_dir;
 use openidconnect::{
     core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreProviderMetadata},
-    reqwest::async_http_client,
     AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
     RedirectUrl, Scope,
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponseTrait};
 use qrcode::QrCode;
-use rand::Rng;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 // use simple_idm_server::oauth2::templates::callback_page;
@@ -442,7 +441,7 @@ pub(crate) struct UserRow {
 pub(crate) struct GroupRow {
     id: String,
     name: String,
-    #[tabled(display_with = "display_opt")]
+    #[tabled(display = "display_opt")]
     description: Option<String>,
     is_virtual: bool,
 }
@@ -452,9 +451,9 @@ pub(crate) struct ClientRow {
     id: String,
     client_id: String,
     name: String,
-    #[tabled(display_with = "display_vec_limited")]
+    #[tabled(display = "display_vec_limited")]
     redirect_uris: Vec<String>,
-    #[tabled(display_with = "display_vec_limited")]
+    #[tabled(display = "display_vec_limited")]
     grant_types: Vec<String>,
     scope: String,
     is_active: bool,
@@ -471,7 +470,7 @@ pub(crate) struct ClaimMapRow {
     group_id: String,
     claim_name: String,
     claim_value_kind: String,
-    #[tabled(display_with = "display_claim_value")]
+    #[tabled(display = "display_claim_value")]
     claim_value: Option<serde_json::Value>,
 }
 
@@ -521,11 +520,20 @@ fn generate_pkce_pair() -> (String, String) {
 
 async fn discover_provider(base_url: &str, insecure: bool) -> Result<CoreProviderMetadata> {
     let issuer_url = IssuerUrl::new(base_url.to_string()).context("Invalid issuer URL")?;
-    if insecure {
-        eprintln!("Warning: --insecure is not supported for OIDC discovery; proceeding with default TLS validation.");
-    }
-    let metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client).await?;
+    let http_client = build_oidc_http_client(insecure)?;
+    let metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client).await?;
     Ok(metadata)
+}
+
+fn build_oidc_http_client(insecure: bool) -> Result<openidconnect::reqwest::Client> {
+    let mut builder = openidconnect::reqwest::ClientBuilder::new()
+        .redirect(openidconnect::reqwest::redirect::Policy::none());
+    if insecure {
+        builder = builder.danger_accept_invalid_certs(true);
+    }
+    builder
+        .build()
+        .context("Failed to build OIDC HTTP client")
 }
 
 fn parse_raw_claims(id_token: &CoreIdToken) -> Result<HashMap<String, Value>> {
@@ -630,6 +638,7 @@ async fn handle_login(
     server_name: &str,
     insecure: bool,
 ) -> Result<()> {
+    let oidc_http_client = build_oidc_http_client(insecure)?;
     let provider_metadata = discover_provider(base_url, insecure)
         .await
         .context("Failed to discover OIDC provider metadata")?;
@@ -638,7 +647,7 @@ async fn handle_login(
     let redirect_url = RedirectUrl::new(redirect_uri.clone()).context("Invalid redirect URL")?;
 
     let client = CoreClient::from_provider_metadata(
-        provider_metadata,
+        provider_metadata.clone(),
         ClientId::new(client_id.to_string()),
         None,
     )
@@ -717,13 +726,16 @@ async fn handle_login(
     }
 
     exchange_code_for_tokens(
-        &client,
+        provider_metadata,
+        client_id,
+        &redirect_uri,
         base_url,
         &code,
         &code_verifier,
         insecure,
         server_name,
         nonce,
+        &oidc_http_client,
     )
     .await
 }
@@ -742,13 +754,13 @@ async fn handle_device_login(
 ) -> Result<()> {
     use openidconnect::core::{
         CoreAuthDisplay, CoreClaimName, CoreClaimType, CoreClient, CoreClientAuthMethod,
-        CoreDeviceAuthorizationResponse, CoreGrantType, CoreJsonWebKey, CoreJsonWebKeyType,
-        CoreJsonWebKeyUse, CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm,
-        CoreJwsSigningAlgorithm, CoreResponseMode, CoreResponseType, CoreSubjectIdentifierType,
+        CoreDeviceAuthorizationResponse, CoreGrantType, CoreJsonWebKey,
+        CoreJweContentEncryptionAlgorithm, CoreJweKeyManagementAlgorithm, CoreResponseMode,
+        CoreResponseType, CoreSubjectIdentifierType,
     };
     use openidconnect::{
-        reqwest::async_http_client, AdditionalProviderMetadata, ClientId, DeviceAuthorizationUrl,
-        IssuerUrl, ProviderMetadata, Scope,
+        AdditionalProviderMetadata, ClientId, DeviceAuthorizationUrl, IssuerUrl, ProviderMetadata,
+        Scope,
     };
     use serde::{Deserialize, Serialize};
 
@@ -768,19 +780,18 @@ async fn handle_device_login(
         CoreGrantType,
         CoreJweContentEncryptionAlgorithm,
         CoreJweKeyManagementAlgorithm,
-        CoreJwsSigningAlgorithm,
-        CoreJsonWebKeyType,
-        CoreJsonWebKeyUse,
         CoreJsonWebKey,
         CoreResponseMode,
         CoreResponseType,
         CoreSubjectIdentifierType,
     >;
 
+    let oidc_http_client = build_oidc_http_client(insecure)?;
+
     // Discover OIDC metadata
     let issuer_url = IssuerUrl::new(base_url.to_string()).context("Invalid issuer URL")?;
 
-    let metadata = DeviceProviderMetadata::discover_async(issuer_url, async_http_client)
+    let metadata = DeviceProviderMetadata::discover_async(issuer_url, &oidc_http_client)
         .await
         .context("Failed to discover OIDC metadata")?;
 
@@ -795,17 +806,16 @@ async fn handle_device_login(
         ClientId::new(client_id.to_string()),
         None, // Public client
     )
-    .set_device_authorization_uri(device_endpoint);
+    .set_device_authorization_url(device_endpoint);
 
     // Request device code
     let details: CoreDeviceAuthorizationResponse = oidc_client
         .exchange_device_code()
-        .context("Failed to create device authorization request")?
         .add_scope(Scope::new("openid".to_string()))
         .add_scope(Scope::new("profile".to_string()))
         .add_scope(Scope::new("email".to_string()))
         .add_scope(Scope::new("groups".to_string()))
-        .request_async(async_http_client)
+        .request_async(&oidc_http_client)
         .await
         .context("Failed to request device code")?;
 
@@ -820,7 +830,8 @@ async fn handle_device_login(
     // Poll for token
     let token_response = oidc_client
         .exchange_device_access_token(&details)
-        .request_async(async_http_client, tokio::time::sleep, None)
+        .context("Failed to create device token polling request")?
+        .request_async(&oidc_http_client, tokio::time::sleep, None)
         .await
         .context("Failed to exchange device code for token")?;
 
@@ -897,22 +908,31 @@ fn print_qr_code(url: &str) {
 }
 
 async fn exchange_code_for_tokens(
-    client: &CoreClient,
+    provider_metadata: CoreProviderMetadata,
+    client_id: &str,
+    redirect_uri: &str,
     base_url: &str,
     code: &str,
     code_verifier: &str,
-    insecure: bool,
+    _insecure: bool,
     server_name: &str,
     nonce: Nonce,
+    oidc_http_client: &openidconnect::reqwest::Client,
 ) -> Result<()> {
-    if insecure {
-        eprintln!("Warning: --insecure is not supported for OIDC token exchange; proceeding with default TLS validation.");
-    }
+    let client = CoreClient::from_provider_metadata(
+        provider_metadata,
+        ClientId::new(client_id.to_string()),
+        None,
+    )
+    .set_redirect_uri(
+        RedirectUrl::new(redirect_uri.to_string()).context("Invalid redirect URL")?,
+    );
 
     let token_response = client
         .exchange_code(AuthorizationCode::new(code.to_string()))
+        .context("Failed to build token exchange request")?
         .set_pkce_verifier(PkceCodeVerifier::new(code_verifier.to_string()))
-        .request_async(async_http_client)
+        .request_async(oidc_http_client)
         .await
         .context("Failed to exchange authorization code for tokens")?;
 
@@ -921,14 +941,7 @@ async fn exchange_code_for_tokens(
         .context("No ID token in response")?;
 
     let claims = id_token
-        .claims(
-            &client.id_token_verifier(),
-            move |nonce_opt: Option<&Nonce>| match nonce_opt {
-                Some(value) if value.secret() == nonce.secret() => Ok(()),
-                Some(_) => Err("Nonce mismatch".to_string()),
-                None => Err("No nonce in token".to_string()),
-            },
-        )
+        .claims(&client.id_token_verifier(), &nonce)
         .context("Failed to verify ID token")?;
 
     let email = claims
@@ -1466,7 +1479,7 @@ fn handle_status() -> Result<()> {
 
 async fn refresh_session_async(session: Session) -> Result<Session> {
     use openidconnect::core::{CoreClient, CoreProviderMetadata};
-    use openidconnect::{reqwest::async_http_client, ClientId, IssuerUrl, RefreshToken};
+    use openidconnect::{ClientId, IssuerUrl, RefreshToken};
 
     if session.refresh_token.trim().is_empty() {
         bail!("No refresh token available. Please login again with 'simple-idm-ctl login'");
@@ -1475,7 +1488,9 @@ async fn refresh_session_async(session: Session) -> Result<Session> {
     // Discover OIDC metadata
     let issuer_url = IssuerUrl::new(session.base_url.clone()).context("Invalid issuer URL")?;
 
-    let metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client)
+    let oidc_http_client = build_oidc_http_client(false)?;
+
+    let metadata = CoreProviderMetadata::discover_async(issuer_url, &oidc_http_client)
         .await
         .context("Failed to discover OIDC metadata for token refresh")?;
 
@@ -1489,7 +1504,8 @@ async fn refresh_session_async(session: Session) -> Result<Session> {
     // Exchange refresh token for new access token
     let token_response = oidc_client
         .exchange_refresh_token(&RefreshToken::new(session.refresh_token.clone()))
-        .request_async(async_http_client)
+        .context("Token refresh failed: invalid_client: Missing client_secret. Please login again with 'simple-idm-ctl login'")?
+        .request_async(&oidc_http_client)
         .await
         .context("Token refresh failed. Please login again with 'simple-idm-ctl login'")?;
 

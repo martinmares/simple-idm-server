@@ -15,7 +15,7 @@ use ratatui::{
     Terminal,
 };
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
-use rand::RngCore;
+use rand::Rng;
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, HashSet},
@@ -5464,7 +5464,7 @@ fn draw_help(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .alignment(Alignment::Left)
         .block(Block::default())
         .wrap(Wrap { trim: true });
-    let inner = popup.inner(&Margin::new(1, 1));
+    let inner = popup.inner(Margin::new(1, 1));
     frame.render_widget(paragraph, inner);
 }
 

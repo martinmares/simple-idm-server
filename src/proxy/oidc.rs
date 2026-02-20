@@ -1,10 +1,8 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use openidconnect::{
-    core::{
-        CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreIdTokenClaims, CoreProviderMetadata,
-    },
-    reqwest::async_http_client,
+    core::{CoreAuthenticationFlow, CoreIdToken, CoreIdTokenClaims, CoreProviderMetadata},
+    reqwest,
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, RefreshToken, Scope, TokenResponse as OidcTokenResponse,
 };
@@ -17,7 +15,8 @@ use super::config::Config;
 use super::session::FlowState;
 
 pub struct OidcClient {
-    client: CoreClient,
+    provider_metadata: CoreProviderMetadata,
+    http_client: reqwest::Client,
     config: Config,
 }
 
@@ -38,36 +37,39 @@ pub struct RefreshResult {
 
 impl OidcClient {
     pub async fn new(config: &Config) -> Result<Self> {
+        let http_client = reqwest::ClientBuilder::new()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .context("Failed to build OIDC HTTP client")?;
+
         // Discover OIDC provider metadata
         let issuer_url = IssuerUrl::new(config.oidc_issuer.clone())
             .context("Invalid issuer URL")?;
 
-        let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, async_http_client)
+        let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
             .await
             .context("Failed to discover OIDC provider metadata")?;
-
-        // Build redirect URL
-        let redirect_url = format!("{}{}", config.public_base_url, config.redirect_path);
-        let redirect_url = RedirectUrl::new(redirect_url)
-            .context("Invalid redirect URL")?;
-
-        // Create OIDC client
-        let client = CoreClient::from_provider_metadata(
-            provider_metadata,
-            ClientId::new(config.client_id.clone()),
-            Some(ClientSecret::new(config.client_secret.clone())),
-        )
-        .set_redirect_uri(redirect_url);
 
         tracing::debug!("OIDC client created for issuer: {}", config.oidc_issuer);
 
         Ok(Self {
-            client,
+            provider_metadata,
+            http_client,
             config: config.clone(),
         })
     }
 
     pub async fn start_flow(&self, redirect_url: &str) -> Result<(String, FlowState)> {
+        let callback_redirect_url = format!("{}{}", self.config.public_base_url, self.config.redirect_path);
+        let callback_redirect_url = RedirectUrl::new(callback_redirect_url)
+            .context("Invalid redirect URL")?;
+        let client = openidconnect::core::CoreClient::from_provider_metadata(
+            self.provider_metadata.clone(),
+            ClientId::new(self.config.client_id.clone()),
+            Some(ClientSecret::new(self.config.client_secret.clone())),
+        )
+        .set_redirect_uri(callback_redirect_url);
+
         // Generate PKCE challenge
         let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
@@ -82,8 +84,7 @@ impl OidcClient {
         let nonce_clone = nonce.clone();
 
         // Build authorization URL
-        let mut auth_request = self
-            .client
+        let mut auth_request = client
             .authorize_url(
                 CoreAuthenticationFlow::AuthorizationCode,
                 move || state_clone.clone(),
@@ -114,12 +115,22 @@ impl OidcClient {
         code: &str,
         flow_state: &FlowState,
     ) -> Result<TokenResponse> {
+        let redirect_url = format!("{}{}", self.config.public_base_url, self.config.redirect_path);
+        let redirect_url = RedirectUrl::new(redirect_url)
+            .context("Invalid redirect URL")?;
+        let client = openidconnect::core::CoreClient::from_provider_metadata(
+            self.provider_metadata.clone(),
+            ClientId::new(self.config.client_id.clone()),
+            Some(ClientSecret::new(self.config.client_secret.clone())),
+        )
+        .set_redirect_uri(redirect_url);
+
         // Exchange code for tokens
-        let token_response = self
-            .client
+        let token_response = client
             .exchange_code(AuthorizationCode::new(code.to_string()))
+            .context("Failed to build token exchange request")?
             .set_pkce_verifier(PkceCodeVerifier::new(flow_state.pkce_verifier.clone()))
-            .request_async(async_http_client)
+            .request_async(&self.http_client)
             .await
             .context("Failed to exchange authorization code for tokens")?;
 
@@ -129,7 +140,11 @@ impl OidcClient {
             .context("No ID token in response")?;
 
         // Verify ID token
-        let (standard_claims, raw_claims) = self.verify_id_token(id_token, &flow_state.nonce)?;
+        let (standard_claims, raw_claims) = self.verify_id_token(
+            id_token,
+            &client.id_token_verifier(),
+            &flow_state.nonce,
+        )?;
 
         // Extract claims
         let subject = standard_claims.subject().to_string();
@@ -165,10 +180,20 @@ impl OidcClient {
     }
 
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<RefreshResult> {
-        let token_response = self
-            .client
+        let redirect_url = format!("{}{}", self.config.public_base_url, self.config.redirect_path);
+        let redirect_url = RedirectUrl::new(redirect_url)
+            .context("Invalid redirect URL")?;
+        let client = openidconnect::core::CoreClient::from_provider_metadata(
+            self.provider_metadata.clone(),
+            ClientId::new(self.config.client_id.clone()),
+            Some(ClientSecret::new(self.config.client_secret.clone())),
+        )
+        .set_redirect_uri(redirect_url);
+
+        let token_response = client
             .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
-            .request_async(async_http_client)
+            .context("Failed to build refresh token request")?
+            .request_async(&self.http_client)
             .await
             .context("Failed to refresh token")?;
 
@@ -182,17 +207,11 @@ impl OidcClient {
     fn verify_id_token(
         &self,
         id_token: &CoreIdToken,
+        id_token_verifier: &openidconnect::core::CoreIdTokenVerifier,
         expected_nonce: &str,
     ) -> Result<(CoreIdTokenClaims, HashMap<String, Value>)> {
-        let expected_nonce = expected_nonce.to_string();
         let claims = id_token
-            .claims(&self.client.id_token_verifier(), move |nonce: Option<&Nonce>| {
-                match nonce {
-                    Some(n) if n.secret() == &expected_nonce => Ok(()),
-                    Some(_) => Err("Nonce mismatch".to_string()),
-                    None => Err("No nonce in token".to_string()),
-                }
-            })
+            .claims(id_token_verifier, &Nonce::new(expected_nonce.to_string()))
             .context("Failed to verify ID token")?;
 
         // Parse raw claims to get additional fields

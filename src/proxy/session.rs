@@ -383,7 +383,7 @@ impl SqliteStore {
 }
 
 fn generate_session_id() -> String {
-    use rand::Rng;
+    use rand::RngExt;
     let random_bytes: Vec<u8> = (0..32).map(|_| rand::rng().random()).collect();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&random_bytes)
 }
