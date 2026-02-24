@@ -1,0 +1,19 @@
+[package]
+name = "simple-idm-oauth2-proxy-app"
+version = "0.3.5"
+edition = "2024"
+
+[[bin]]
+name = "simple-idm-oauth2-proxy"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+base64 = "0.22"
+serde_json = "1.0"
+simple-idm-server = { path = "../.." }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

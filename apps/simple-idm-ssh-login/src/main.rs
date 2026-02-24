@@ -1,0 +1,138 @@
+use clap::{Parser, Subcommand};
+use simple_idm_server::ssh_login::{commands, SshLoginConfig};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[derive(Parser)]
+#[command(name = "simple-idm-ssh-login")]
+#[command(about = "SSH certificate login via Simple IDM", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+
+    /// OIDC issuer URL
+    #[arg(long, global = true)]
+    issuer: Option<String>,
+
+    /// OAuth2 client ID
+    #[arg(long, global = true)]
+    client_id: Option<String>,
+
+    /// SSH signer URL
+    #[arg(long, global = true)]
+    signer_url: Option<String>,
+
+    /// Certificate TTL in seconds
+    #[arg(long, global = true)]
+    ttl_seconds: Option<u64>,
+
+    /// OIDC scopes (comma-separated)
+    #[arg(long, global = true, value_delimiter = ',')]
+    scopes: Option<Vec<String>>,
+
+    /// Config profile name (for multi-profile config.toml)
+    #[arg(long, global = true)]
+    profile: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Login and obtain SSH certificate
+    Login {
+        /// Force browser flow
+        #[arg(long)]
+        browser: bool,
+
+        /// Force device flow
+        #[arg(long)]
+        device: bool,
+    },
+
+    /// SSH with automatic certificate renewal
+    Ssh {
+        /// Force browser flow for renewal
+        #[arg(long)]
+        browser: bool,
+
+        /// Force device flow for renewal
+        #[arg(long)]
+        device: bool,
+
+        /// SSH arguments (e.g., user@host, -p 2222, etc.)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        ssh_args: Vec<String>,
+    },
+
+    /// Show current certificate status
+    Status,
+
+    /// Logout and remove certificate
+    Logout,
+
+    /// Print recommended SSH config
+    PrintSshConfig,
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "simple_idm_ssh_login=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    let cli = Cli::parse();
+
+    // Load config
+    let mut config = SshLoginConfig::load(cli.profile.as_deref())?;
+
+    // Apply CLI overrides
+    if let Some(issuer) = cli.issuer {
+        config.oidc_issuer = issuer;
+    }
+    if let Some(client_id) = cli.client_id {
+        config.client_id = client_id;
+    }
+    if let Some(signer_url) = cli.signer_url {
+        config.signer_url = signer_url;
+    }
+    if let Some(ttl) = cli.ttl_seconds {
+        config.ttl_seconds = ttl;
+    }
+    if let Some(scopes) = cli.scopes {
+        let scopes: Vec<String> = scopes
+            .into_iter()
+            .map(|scope| scope.trim().to_string())
+            .filter(|scope| !scope.is_empty())
+            .collect();
+        if !scopes.is_empty() {
+            config.scopes = scopes;
+        }
+    }
+
+    match cli.command {
+        Commands::Login { browser, device } => {
+            commands::login(&config, browser, device).await?;
+        }
+        Commands::Ssh {
+            browser,
+            device,
+            ssh_args,
+        } => {
+            commands::ssh(&config, ssh_args, browser, device).await?;
+        }
+        Commands::Status => {
+            commands::status(&config)?;
+        }
+        Commands::Logout => {
+            commands::logout(&config)?;
+        }
+        Commands::PrintSshConfig => {
+            commands::print_ssh_config(&config);
+        }
+    }
+
+    Ok(())
+}
