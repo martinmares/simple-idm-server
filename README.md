@@ -144,6 +144,8 @@ The `/oauth2/token` endpoint has stricter rate limiting by default to prevent br
 - `SERVER_PORT` - Server port (default: `8080`)
 - `DATABASE_URL` - PostgreSQL connection string
 - `ADMIN_ROOT_TOKEN` - Admin API token (optional, for development only)
+- `AUTH_ALLOW_USERNAME_LOGIN` - If `false`, interactive login accepts email only (default: `true`)
+- `ALLOWED_EMAIL_DOMAINS` - Optional comma-separated whitelist of login email domains (default: empty = allow all)
 - `UI_BRAND_NAME` - Company/product name shown on login/reset/error pages (default: `Cloud App`)
 - `UI_BRAND_DOMAIN` - Optional domain/tenant hint for login page subtitle (default: empty)
 - `UI_THEME` - UI theme preset for auth pages (`blue`, `red`, `white`, `green`, `gold`; default: `blue`)
@@ -235,6 +237,16 @@ cargo build --bin simple-idm-ctl
 First, login using OAuth2 (opens browser):
 ```bash
 ./target/debug/simple-idm-ctl login --url http://localhost:8080
+```
+
+If the same `client_id` exists in multiple tenants, provide tenant hint:
+```bash
+./target/debug/simple-idm-ctl login --url https://sso.example.com --tenant acme
+```
+
+For headless servers, use device flow:
+```bash
+./target/debug/simple-idm-ctl login --url https://sso.example.com --device --tenant acme
 ```
 
 The CLI will:

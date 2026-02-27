@@ -4,6 +4,8 @@
 # OIDC Provider (Simple IDM Server)
 oidc_issuer = "https://sso.cloud-app.cz"
 client_id = "simple-idm-ssh-login"
+# Optional tenant hint (slug). Keep commented for backward-compatible/default behavior.
+# tenant = "default"
 scopes = ["openid", "profile", "email", "groups"]
 
 # SSH Certificate Signer

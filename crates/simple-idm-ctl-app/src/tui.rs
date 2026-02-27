@@ -1,0 +1,8152 @@
+use anyhow::{anyhow, bail, Context, Result};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use ratatui::{
+    backend::CrosstermBackend,
+    layout::{Alignment, Constraint, Direction, Layout, Margin, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{
+        Block, Borders, Cell, Clear, Padding, Paragraph, Row, Table, TableState, Tabs, Wrap,
+    },
+    Terminal,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use rand::Rng;
+use serde_json::{json, Value};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    time::Duration,
+};
+use tui_input::{backend::crossterm::EventHandler, Input};
+use url::Url;
+
+use crate::{
+    ClaimMapRow, ClientRow, GroupRow, HttpClient, TenantDomainRow, TenantRow, UserGroupRow,
+    UserRow,
+};
+
+const PAGE_SIZE: usize = 25;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tab {
+    Tenants,
+    Users,
+    Groups,
+    Clients,
+    ClientClaims,
+    GroupClaims,
+    UserGroups,
+    GroupUsers,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Normal,
+    Form,
+    TenantDomainsManager,
+    Picker,
+    Selector,
+    PasswordGen,
+    RelationEditor,
+    ClaimEditor,
+    ClaimEntry,
+    ClaimValueEditor,
+    ArrayEditor,
+    ScopeSelector,
+    UserPatternsManager,
+    PatternForm,
+    ClientPatternsManager,
+    ClientPatternForm,
+    ClaimMapPatternsManager,
+    ClaimMapPatternForm,
+}
+
+#[derive(Clone, Debug)]
+enum FieldKind {
+    Text,
+    Secret,
+    Bool,
+}
+
+#[derive(Clone, Debug)]
+struct FormField {
+    label: &'static str,
+    kind: FieldKind,
+    optional: bool,
+    read_only: bool,
+    input: Input,
+    reveal: bool,
+}
+
+impl FormField {
+    fn new(label: &'static str, value: String) -> Self {
+        Self {
+            label,
+            kind: FieldKind::Text,
+            optional: false,
+            read_only: false,
+            input: input_with_value(value),
+            reveal: false,
+        }
+    }
+
+    fn secret(label: &'static str, value: String) -> Self {
+        Self {
+            label,
+            kind: FieldKind::Secret,
+            optional: false,
+            read_only: false,
+            input: input_with_value(value),
+            reveal: false,
+        }
+    }
+
+    fn boolean(label: &'static str, value: bool) -> Self {
+        Self {
+            label,
+            kind: FieldKind::Bool,
+            optional: false,
+            read_only: false,
+            input: input_with_value(value.to_string()),
+            reveal: false,
+        }
+    }
+
+    fn optional(mut self) -> Self {
+        self.optional = true;
+        self
+    }
+
+    fn read_only(mut self) -> Self {
+        self.read_only = true;
+        self
+    }
+
+    fn display(&self) -> String {
+        match self.kind {
+            FieldKind::Secret => {
+                if self.reveal {
+                    self.input.value().to_string()
+                } else {
+                    "*".repeat(self.input.value().len())
+                }
+            }
+            _ => self.input.value().to_string(),
+        }
+    }
+
+    fn toggle_bool(&mut self) {
+        let val = self.input.value().eq_ignore_ascii_case("true");
+        let next = (!val).to_string();
+        self.input = input_with_value(next);
+    }
+
+    fn value(&self) -> String {
+        self.input.value().to_string()
+    }
+
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+enum FormAction {
+    CreateTenant,
+    UpdateTenant(String),
+    DeleteTenant(String),
+    CreateTenantDomain(String),
+    UpdateTenantDomain { tenant_id: String, domain_id: String },
+    DeleteTenantDomain { tenant_id: String, domain_id: String },
+    CreateUser,
+    UpdateUser(String),
+    DeleteUser(String),
+    CreateGroup,
+    CreateChildGroup(String),
+    UpdateGroup(String),
+    DeleteGroup(String),
+    CreateClient,
+    UpdateClient(String),
+    DeleteClient(String),
+    CreateClaimMap,
+    UpdateClaimMap(String),
+    AddUserGroup,
+    RemoveUserGroup,
+}
+
+#[derive(Clone, Debug)]
+struct FormState {
+    title: String,
+    action: FormAction,
+    fields: Vec<FormField>,
+    index: usize,
+    error: Option<String>,
+    patterns: Option<Vec<UserGroupPatternRow>>, // For Create/Update User forms
+    client_patterns: Option<Vec<ClientGroupPatternRow>>, // For Create/Update Client forms
+    claim_map_patterns: Option<Vec<ClaimMapPatternRow>>, // For Create/Update Claim Map forms
+}
+
+struct EntityState<T> {
+    items: Vec<T>,
+    state: TableState,
+    page: usize,
+}
+
+impl<T> EntityState<T> {
+    fn new() -> Self {
+        Self {
+            items: Vec::new(),
+            state: TableState::default(),
+            page: 1,
+        }
+    }
+
+    fn selected(&self) -> Option<usize> {
+        self.state.selected()
+    }
+
+    fn select_first(&mut self) {
+        if self.items.is_empty() {
+            self.state.select(None);
+        } else {
+            self.state.select(Some(0));
+        }
+    }
+
+    
+}
+
+struct App {
+    tab: Tab,
+    tenants: EntityState<TenantRow>,
+    tenant_domains: HashMap<String, Vec<TenantDomainRow>>,
+    users: EntityState<UserRow>,
+    groups: EntityState<GroupRow>,
+    group_depths: HashMap<String, usize>,
+    clients: EntityState<ClientRow>,
+    client_claims: EntityState<ClientClaimsRow>,
+    group_claims: EntityState<GroupClaimsRow>,
+    user_groups: EntityState<UserGroupsRow>,
+    group_users: EntityState<GroupUsersRow>,
+    mode: Mode,
+    form: Option<FormState>,
+    tenant_domains_manager: Option<TenantDomainsManagerState>,
+    status: String,
+    pending_select: Option<SelectHint>,
+    picker: Option<PickerState>,
+    selector: Option<SelectorState>,
+    password_gen: Option<PasswordGenState>,
+    relation_editor: Option<RelationEditorState>,
+    claim_editor: Option<ClaimEditorState>,
+    claim_entry: Option<ClaimEntryState>,
+    claim_value_editor: Option<ClaimValueEditorState>,
+    array_editor: Option<ArrayEditorState>,
+    scope_selector: Option<ScopeSelectorState>,
+    user_patterns_manager: Option<UserPatternsManagerState>,
+    pattern_form: Option<PatternFormState>,
+    client_patterns_manager: Option<ClientPatternsManagerState>,
+    client_pattern_form: Option<ClientPatternFormState>,
+    claim_map_patterns_manager: Option<ClaimMapPatternsManagerState>,
+    claim_map_pattern_form: Option<ClaimMapPatternFormState>,
+    pending_group_move: Option<GroupMoveRequest>,
+    filter: Option<String>,
+    filter_active: bool,
+    filter_input: Input,
+    help_active: bool,
+    cursor_visible: bool,
+    auth_tenant: Option<String>,
+    auth_client_id: String,
+}
+
+impl App {
+    fn new(auth_tenant: Option<String>, auth_client_id: String) -> Self {
+        Self {
+            tab: Tab::Tenants,
+            tenants: EntityState::new(),
+            tenant_domains: HashMap::new(),
+            users: EntityState::new(),
+            groups: EntityState::new(),
+            group_depths: HashMap::new(),
+            clients: EntityState::new(),
+            client_claims: EntityState::new(),
+            group_claims: EntityState::new(),
+            user_groups: EntityState::new(),
+            group_users: EntityState::new(),
+            mode: Mode::Normal,
+            form: None,
+            tenant_domains_manager: None,
+            status: String::new(),
+            pending_select: None,
+            picker: None,
+            selector: None,
+            password_gen: None,
+            relation_editor: None,
+            claim_editor: None,
+            claim_entry: None,
+            claim_value_editor: None,
+            array_editor: None,
+            scope_selector: None,
+            user_patterns_manager: None,
+            pattern_form: None,
+            client_patterns_manager: None,
+            client_pattern_form: None,
+            claim_map_patterns_manager: None,
+            claim_map_pattern_form: None,
+            pending_group_move: None,
+            filter: None,
+            filter_active: false,
+            filter_input: Input::default(),
+            help_active: false,
+            cursor_visible: false,
+            auth_tenant,
+            auth_client_id,
+        }
+    }
+
+    fn tabs() -> Vec<(Tab, &'static str)> {
+        vec![
+            (Tab::Tenants, "Tenants"),
+            (Tab::Users, "Users"),
+            (Tab::Groups, "Groups"),
+            (Tab::UserGroups, "User groups"),
+            (Tab::GroupUsers, "Group users"),
+            (Tab::Clients, "Clients"),
+            (Tab::ClientClaims, "Client claims"),
+            (Tab::GroupClaims, "Group claims"),
+        ]
+    }
+
+    fn set_status(&mut self, msg: impl Into<String>) {
+        self.status = msg.into();
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PickerOption {
+    label: &'static str,
+    value: &'static str,
+    selected: bool,
+}
+
+#[derive(Clone, Debug)]
+struct PickerState {
+    title: String,
+    options: Vec<PickerOption>,
+    index: usize,
+    target_field: &'static str,
+    single_select: bool,
+}
+
+impl PickerState {
+    fn new_grant_types(selected: &[String]) -> Self {
+        let options = supported_grant_types()
+            .iter()
+            .map(|(label, value)| PickerOption {
+                label,
+                value,
+                selected: selected.iter().any(|item| item == value),
+            })
+            .collect();
+
+        Self {
+            title: "Select grant types".to_string(),
+            options,
+            index: 0,
+            target_field: "grant_types",
+            single_select: false,
+        }
+    }
+
+    fn new_groups_claim_mode(selected: &str) -> Self {
+        let options = ["effective", "direct", "none"]
+            .iter()
+            .map(|value| PickerOption {
+                label: value,
+                value,
+                selected: *value == selected,
+            })
+            .collect();
+
+        let index = ["effective", "direct", "none"]
+            .iter()
+            .position(|value| *value == selected)
+            .unwrap_or(0);
+
+        Self {
+            title: "Select groups_claim_mode".to_string(),
+            options,
+            index,
+            target_field: "groups_claim_mode",
+            single_select: true,
+        }
+    }
+
+    fn new_claim_value_kind(selected: &str) -> Self {
+        let options = ["single", "array"]
+            .iter()
+            .map(|value| PickerOption {
+                label: value,
+                value,
+                selected: *value == selected,
+            })
+            .collect();
+
+        let index = ["single", "array"]
+            .iter()
+            .position(|value| *value == selected)
+            .unwrap_or(0);
+
+        Self {
+            title: "Select claim_value_kind".to_string(),
+            options,
+            index,
+            target_field: "claim_value_kind",
+            single_select: true,
+        }
+    }
+
+    fn selected_values(&self) -> Vec<String> {
+        if self.single_select {
+            let selected = self
+                .options
+                .iter()
+                .find(|opt| opt.selected)
+                .or_else(|| self.options.get(self.index));
+            return selected
+                .map(|opt| vec![opt.value.to_string()])
+                .unwrap_or_default();
+        }
+
+        self.options
+            .iter()
+            .filter(|opt| opt.selected)
+            .map(|opt| opt.value.to_string())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PasswordGenState {
+    title: String,
+    length: Input,
+    include_upper: bool,
+    include_lower: bool,
+    include_digits: bool,
+    include_special_safe: bool,
+    include_special_full: bool,
+    index: usize,
+    error: Option<String>,
+    target_field: &'static str,
+}
+
+impl PasswordGenState {
+    fn new(target_field: &'static str) -> Self {
+        Self {
+            title: "Generator hesla".to_string(),
+            length: input_with_value("16".to_string()),
+            include_upper: true,
+            include_lower: true,
+            include_digits: true,
+            include_special_safe: false,
+            include_special_full: false,
+            index: 0,
+            error: None,
+            target_field,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct GroupSummary {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Debug)]
+struct UserSummary {
+    id: String,
+    username: String,
+    email: String,
+}
+
+#[derive(Clone, Debug)]
+struct UserGroupsRow {
+    user_id: String,
+    username: String,
+    email: String,
+    groups: Vec<GroupSummary>,
+}
+
+#[derive(Clone, Debug)]
+struct GroupUsersRow {
+    group_id: String,
+    name: String,
+    description: Option<String>,
+    users: Vec<UserSummary>,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimSummary {
+    id: String,
+    claim_name: String,
+    claim_value_kind: String,
+    claim_value: Option<Value>,
+    other_id: String,
+    other_label: String,
+}
+
+#[derive(Clone, Debug)]
+struct ClientClaimsRow {
+    client_id: String,
+    client_name: String,
+    claims: Vec<ClaimSummary>,
+}
+
+#[derive(Clone, Debug)]
+struct GroupClaimsRow {
+    group_id: String,
+    group_name: String,
+    description: Option<String>,
+    claims: Vec<ClaimSummary>,
+}
+
+#[derive(Debug)]
+enum SelectorItems {
+    Users(Vec<UserRow>),
+    Groups(Vec<GroupRow>),
+    Clients(Vec<ClientRow>),
+}
+
+#[derive(Debug)]
+enum SelectorKind {
+    Users,
+    Groups,
+    Clients,
+}
+
+#[derive(Debug)]
+enum SelectorTarget {
+    FormField(&'static str),
+    ClaimEntryOther,
+    GroupParent { child_id: String },
+}
+
+#[derive(Debug)]
+struct SelectorState {
+    title: String,
+    items: SelectorItems,
+    filter: Input,
+    filter_active: bool,
+    index: usize,
+    filtered: Vec<usize>,
+    target: SelectorTarget,
+}
+
+impl SelectorState {
+    fn new_users(items: Vec<UserRow>, target: SelectorTarget) -> Self {
+        let mut state = Self {
+            title: "Vyber uživatele".to_string(),
+            items: SelectorItems::Users(items),
+            filter: Input::default(),
+            filter_active: false,
+            index: 0,
+            filtered: Vec::new(),
+            target,
+        };
+        state.apply_filter();
+        state
+    }
+
+    fn new_groups(items: Vec<GroupRow>, target: SelectorTarget) -> Self {
+        let mut state = Self {
+            title: "Vyber skupinu".to_string(),
+            items: SelectorItems::Groups(items),
+            filter: Input::default(),
+            filter_active: false,
+            index: 0,
+            filtered: Vec::new(),
+            target,
+        };
+        state.apply_filter();
+        state
+    }
+
+    fn new_clients(items: Vec<ClientRow>, target: SelectorTarget) -> Self {
+        let mut state = Self {
+            title: "Vyber klienta".to_string(),
+            items: SelectorItems::Clients(items),
+            filter: Input::default(),
+            filter_active: false,
+            index: 0,
+            filtered: Vec::new(),
+            target,
+        };
+        state.apply_filter();
+        state
+    }
+
+    fn apply_filter(&mut self) {
+        let needle = self.filter.value().to_lowercase();
+        self.filtered.clear();
+        match &self.items {
+            SelectorItems::Users(items) => {
+                for (idx, user) in items.iter().enumerate() {
+                    if needle.is_empty()
+                        || user.username.to_lowercase().contains(&needle)
+                        || user.email.to_lowercase().contains(&needle)
+                    {
+                        self.filtered.push(idx);
+                    }
+                }
+            }
+            SelectorItems::Groups(items) => {
+                for (idx, group) in items.iter().enumerate() {
+                    let desc = group.description.clone().unwrap_or_default();
+                    if needle.is_empty()
+                        || group.name.to_lowercase().contains(&needle)
+                        || desc.to_lowercase().contains(&needle)
+                    {
+                        self.filtered.push(idx);
+                    }
+                }
+            }
+            SelectorItems::Clients(items) => {
+                for (idx, client) in items.iter().enumerate() {
+                    if needle.is_empty()
+                        || client.client_id.to_lowercase().contains(&needle)
+                        || client.name.to_lowercase().contains(&needle)
+                    {
+                        self.filtered.push(idx);
+                    }
+                }
+            }
+        }
+
+        if self.filtered.is_empty() {
+            self.index = 0;
+        } else {
+            self.index = self.index.min(self.filtered.len() - 1);
+        }
+    }
+
+    fn selected_index(&self) -> Option<usize> {
+        self.filtered.get(self.index).copied()
+    }
+}
+
+#[derive(Clone, Debug)]
+struct RelationOption {
+    id: String,
+    label: String,
+    selected: bool,
+}
+
+#[derive(Clone, Debug)]
+enum RelationMode {
+    UserGroups { user_id: String, username: String },
+    GroupUsers { group_id: String, group_name: String },
+}
+
+#[derive(Clone, Debug)]
+struct RelationEditorState {
+    title: String,
+    mode: RelationMode,
+    options: Vec<RelationOption>,
+    index: usize,
+    error: Option<String>,
+    original_selected: HashSet<String>,
+}
+
+impl RelationEditorState {
+    fn new(mode: RelationMode, options: Vec<RelationOption>) -> Self {
+        let original_selected = options
+            .iter()
+            .filter(|opt| opt.selected)
+            .map(|opt| opt.id.clone())
+            .collect();
+        let title = match &mode {
+            RelationMode::UserGroups { username, .. } => {
+                format!("Skupiny pro uživatele {username}")
+            }
+            RelationMode::GroupUsers { group_name, .. } => {
+                format!("Uživatelé ve skupině {group_name}")
+            }
+        };
+        Self {
+            title,
+            mode,
+            options,
+            index: 0,
+            error: None,
+            original_selected,
+        }
+    }
+
+    fn selected_ids(&self) -> HashSet<String> {
+        self.options
+            .iter()
+            .filter(|opt| opt.selected)
+            .map(|opt| opt.id.clone())
+            .collect()
+    }
+}
+
+#[derive(Clone, Debug)]
+enum ClaimEditorMode {
+    ClientClaims {
+        client_id: String,
+        client_label: String,
+    },
+    GroupClaims {
+        group_id: String,
+        group_label: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+struct ClaimEditorItem {
+    id: Option<String>,
+    claim_name: String,
+    claim_value_kind: String,
+    claim_value: Option<Value>,
+    other_id: String,
+    other_label: String,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimEditorState {
+    title: String,
+    mode: ClaimEditorMode,
+    items: Vec<ClaimEditorItem>,
+    original: Vec<ClaimEditorItem>,
+    index: usize,
+    error: Option<String>,
+}
+
+impl ClaimEditorState {
+    fn new(mode: ClaimEditorMode, items: Vec<ClaimEditorItem>) -> Self {
+        let title = match &mode {
+            ClaimEditorMode::ClientClaims { client_label, .. } => {
+                format!("Claim maps pro klienta {client_label}")
+            }
+            ClaimEditorMode::GroupClaims { group_label, .. } => {
+                format!("Claim maps pro skupinu {group_label}")
+            }
+        };
+        Self {
+            title,
+            mode,
+            original: items.clone(),
+            items,
+            index: 0,
+            error: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+enum ClaimEntryMode {
+    Add,
+    Edit(usize),
+}
+
+#[derive(Clone, Debug)]
+struct ClaimEntryState {
+    title: String,
+    mode: ClaimEntryMode,
+    claim_name: Input,
+    claim_value_kind: String,
+    claim_values: Vec<Input>,
+    other_id: Option<String>,
+    other_label: Option<String>,
+    index: usize,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimValueEditorState {
+    title: String,
+    values: Vec<Input>,
+    index: usize,
+    editing: bool,
+    error: Option<String>,
+    allow_multiple: bool,
+}
+
+#[derive(Clone, Debug)]
+struct ArrayEditorState {
+    title: String,
+    field_name: String,
+    values: Vec<Input>,
+    index: usize,
+    editing: bool,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ScopeSelectorState {
+    standard_scopes: Vec<(String, bool)>, // (scope name, selected)
+    custom_scopes: Vec<String>,
+    custom_input: Input,
+    index: usize,
+    mode: ScopeSelectorMode,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScopeSelectorMode {
+    SelectStandard,
+    AddCustom,
+}
+
+#[derive(Clone, Debug)]
+struct GroupMoveRequest {
+    child_id: String,
+    new_parent_id: Option<String>,
+}
+
+const ROOT_GROUP_ID: &str = "__root__";
+fn supported_grant_types() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("authorization_code", "authorization_code"),
+        ("refresh_token", "refresh_token"),
+        ("client_credentials", "client_credentials"),
+        ("device_code", "urn:ietf:params:oauth:grant-type:device_code"),
+    ]
+}
+#[derive(Clone, Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct UserGroupPatternRow {
+    id: String,
+    user_id: String,
+    pattern: String,
+    is_include: bool,
+    priority: i32,
+    created_at: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct ClientGroupPatternRow {
+    id: String,
+    client_id: String,
+    pattern: String,
+    is_include: bool,
+    priority: i32,
+    created_at: String,
+}
+
+#[derive(Clone, Debug, serde::Deserialize)]
+#[allow(dead_code)]
+struct ClaimMapPatternRow {
+    id: String,
+    claim_map_id: String,
+    pattern: String,
+    is_include: bool,
+    priority: i32,
+    created_at: String,
+}
+
+#[derive(Clone, Debug)]
+struct UserPatternsManagerState {
+    user_id: String,
+    username: String,
+    patterns: Vec<UserGroupPatternRow>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct TenantDomainsManagerState {
+    tenant_id: String,
+    tenant_slug: String,
+    domains: Vec<TenantDomainRow>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct PatternFormState {
+    user_id: String,
+    pattern_id: Option<String>, // None for create, Some for edit
+    fields: Vec<FormField>,
+    index: usize,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ClientPatternsManagerState {
+    client_id: String,
+    client_name: String,
+    patterns: Vec<ClientGroupPatternRow>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimMapPatternsManagerState {
+    claim_map_id: String,
+    claim_name: String,
+    patterns: Vec<ClaimMapPatternRow>,
+    index: usize,
+}
+
+#[derive(Clone, Debug)]
+struct ClaimMapPatternFormState {
+    claim_map_id: String,
+    pattern_id: Option<String>, // None for create, Some for edit
+    fields: Vec<FormField>,
+    index: usize,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ClientPatternFormState {
+    client_id: String,
+    pattern_id: Option<String>, // None for create, Some for edit
+    fields: Vec<FormField>,
+    index: usize,
+    error: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct SelectHint {
+    tab: Tab,
+    id: String,
+    label: Option<String>,
+}
+
+pub async fn run_tui(http: &HttpClient) -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let mut app = App::new(http.tenant.clone(), http.client_id.clone());
+    refresh_active_tab(&mut app, http).await?;
+
+    let res = event_loop(&mut terminal, http, &mut app).await;
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    terminal.show_cursor()?;
+
+    res
+}
+
+async fn event_loop(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    http: &HttpClient,
+    app: &mut App,
+) -> Result<()> {
+    loop {
+        terminal.draw(|frame| draw_ui(frame, app))?;
+        if app.cursor_visible {
+            terminal.show_cursor()?;
+        } else {
+            terminal.hide_cursor()?;
+        }
+
+        if !event::poll(Duration::from_millis(200))? {
+            continue;
+        }
+
+        let event = event::read()?;
+        if app.filter_active {
+            if let Event::Key(key) = event {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.filter_active = false;
+                    }
+                    KeyCode::Enter => {
+                        let value = app.filter_input.value().trim().to_string();
+                        if value.is_empty() {
+                            app.filter = None;
+                        } else {
+                            app.filter = Some(value);
+                        }
+                        app.filter_active = false;
+                    }
+                    _ => {
+                        app.filter_input.handle_event(&event);
+                    }
+                }
+            }
+            continue;
+        }
+
+        if app.help_active {
+            if let Event::Key(key) = event {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('h') => {
+                        app.help_active = false;
+                    }
+                    _ => {}
+                }
+            }
+            continue;
+        }
+
+        if app.mode == Mode::RelationEditor {
+            let handled = handle_relation_event(app, event, http).await?;
+            if handled == RelationResult::Applied {
+                app.mode = Mode::Normal;
+                refresh_active_tab(app, http).await?;
+            } else if handled == RelationResult::Cancelled {
+                app.mode = Mode::Normal;
+            }
+            continue;
+        }
+        if app.mode == Mode::ClaimEditor {
+            let handled = handle_claim_editor_event(app, event, http).await?;
+            if handled == ClaimEditorResult::Applied {
+                app.mode = Mode::Normal;
+                app.claim_editor = None;
+                refresh_active_tab(app, http).await?;
+            } else if handled == ClaimEditorResult::Cancelled {
+                app.mode = Mode::Normal;
+                app.claim_editor = None;
+            }
+            continue;
+        }
+        if app.mode == Mode::ClaimEntry {
+            let handled = handle_claim_entry_event(app, event, http).await?;
+            if handled == ClaimEntryResult::Applied || handled == ClaimEntryResult::Cancelled {
+                app.mode = Mode::ClaimEditor;
+            }
+            continue;
+        }
+        if app.mode == Mode::ArrayEditor {
+            let handled = handle_array_editor_event(app, event)?;
+            if handled == ArrayEditorResult::Applied {
+                if let (Some(form), Some(editor)) = (app.form.as_mut(), app.array_editor.as_ref()) {
+                    if let Some(field) = form.fields.iter_mut().find(|f| f.label == editor.field_name) {
+                        let values: Vec<String> = editor.values.iter().map(|i| i.value().to_string()).collect();
+                        field.input = input_with_value(values.join(", "));
+                    }
+                }
+                app.array_editor = None;
+                app.mode = Mode::Form;
+            } else if handled == ArrayEditorResult::Cancelled {
+                app.array_editor = None;
+                app.mode = Mode::Form;
+            }
+            continue;
+        }
+        if app.mode == Mode::ScopeSelector {
+            let handled = handle_scope_selector_event(app, event)?;
+            if handled == ScopeSelectorResult::Applied {
+                if let (Some(form), Some(selector)) = (app.form.as_mut(), app.scope_selector.as_ref()) {
+                    let mut scopes: Vec<String> = selector
+                        .standard_scopes
+                        .iter()
+                        .filter(|(_, selected)| *selected)
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    scopes.extend(selector.custom_scopes.iter().cloned());
+
+                    if let Some(field) = form.fields.iter_mut().find(|f| f.label == "scope") {
+                        field.input = input_with_value(scopes.join(" "));
+                    }
+                }
+                app.scope_selector = None;
+                app.mode = Mode::Form;
+            } else if handled == ScopeSelectorResult::Cancelled {
+                app.scope_selector = None;
+                app.mode = Mode::Form;
+            }
+            continue;
+        }
+        if app.mode == Mode::UserPatternsManager {
+            let handled = handle_user_patterns_manager_event(app, event, http).await?;
+            if handled == UserPatternsManagerResult::Closed {
+                // Copy patterns back to form before closing
+                if let (Some(manager), Some(form)) = (&app.user_patterns_manager, &mut app.form) {
+                    form.patterns = Some(manager.patterns.clone());
+                }
+                app.user_patterns_manager = None;
+                app.mode = Mode::Form;  // Return to Form mode, not Normal
+            }
+            continue;
+        }
+        if app.mode == Mode::PatternForm {
+            let handled = handle_pattern_form_event(app, event, http).await?;
+            match handled {
+                PatternFormResult::Saved => {
+                    app.pattern_form = None;
+                    app.mode = Mode::UserPatternsManager;
+                }
+                PatternFormResult::Cancelled => {
+                    app.pattern_form = None;
+                    app.mode = Mode::UserPatternsManager;
+                }
+                PatternFormResult::Continue => {}
+            }
+            continue;
+        }
+        if app.mode == Mode::ClientPatternsManager {
+            let handled = handle_client_patterns_manager_event(app, event, http).await?;
+            if handled == ClientPatternsManagerResult::Closed {
+                // Copy patterns back to form before closing
+                if let (Some(manager), Some(form)) = (&app.client_patterns_manager, &mut app.form) {
+                    form.client_patterns = Some(manager.patterns.clone());
+                }
+                app.client_patterns_manager = None;
+                app.mode = Mode::Form;  // Return to Form mode
+            }
+            continue;
+        }
+        if app.mode == Mode::ClientPatternForm {
+            let handled = handle_client_pattern_form_event(app, event, http).await?;
+            match handled {
+                ClientPatternFormResult::Saved => {
+                    app.client_pattern_form = None;
+                    app.mode = Mode::ClientPatternsManager;
+                }
+                ClientPatternFormResult::Cancelled => {
+                    app.client_pattern_form = None;
+                    app.mode = Mode::ClientPatternsManager;
+                }
+                ClientPatternFormResult::Continue => {}
+            }
+            continue;
+        }
+        if app.mode == Mode::ClaimMapPatternsManager {
+            let handled = handle_claim_map_patterns_manager_event(app, event, http).await?;
+            if handled == ClaimMapPatternsManagerResult::Closed {
+                app.claim_map_patterns_manager = None;
+                // Return to Form if it exists (opened from UpdateClaimMap form), otherwise ClaimEditor
+                if let Some(form) = app.form.as_mut() {
+                    // Refresh patterns in form
+                    if let FormAction::UpdateClaimMap(claim_map_id) = &form.action {
+                        let url = format!("{}/admin/claim-maps/{}/patterns", http.base_url, claim_map_id);
+                        let response = http
+                            .client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {}", http.token))
+                            .send()
+                            .await?;
+                        let patterns: Vec<ClaimMapPatternRow> = if response.status().is_success() {
+                            response.json().await.unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        form.claim_map_patterns = Some(patterns);
+                    }
+                    app.mode = Mode::Form;
+                } else {
+                    app.mode = Mode::ClaimEditor;
+                }
+            }
+            continue;
+        }
+        if app.mode == Mode::ClaimMapPatternForm {
+            let handled = handle_claim_map_pattern_form_event(app, event, http).await?;
+            match handled {
+                ClaimMapPatternFormResult::Saved => {
+                    app.claim_map_pattern_form = None;
+                    app.mode = Mode::ClaimMapPatternsManager;
+                }
+                ClaimMapPatternFormResult::Cancelled => {
+                    app.claim_map_pattern_form = None;
+                    app.mode = Mode::ClaimMapPatternsManager;
+                }
+                ClaimMapPatternFormResult::Continue => {}
+            }
+            continue;
+        }
+        if app.mode == Mode::ClaimValueEditor {
+            let handled = handle_claim_value_editor_event(app, event)?;
+            if handled == ClaimValueEditorResult::Applied {
+                if let (Some(entry), Some(editor)) =
+                    (app.claim_entry.as_mut(), app.claim_value_editor.as_ref())
+                {
+                    if entry.claim_value_kind == "array" {
+                        entry.claim_values = editor.values.clone();
+                    } else if let Some(first) = editor.values.first().cloned() {
+                        entry.claim_values = vec![first];
+                    } else {
+                        entry.claim_values = vec![Input::default()];
+                    }
+                }
+                app.claim_value_editor = None;
+                app.mode = Mode::ClaimEntry;
+            } else if handled == ClaimValueEditorResult::Cancelled {
+                app.claim_value_editor = None;
+                app.mode = Mode::ClaimEntry;
+            }
+            continue;
+        }
+        if app.mode == Mode::PasswordGen {
+            let handled = handle_password_gen_event(app, event)?;
+            if handled == PasswordGenResult::Applied || handled == PasswordGenResult::Cancelled {
+                app.mode = Mode::Form;
+            }
+            continue;
+        }
+        if app.mode == Mode::Selector {
+            let handled = handle_selector_event(app, event)?;
+            if handled == SelectorResult::Applied || handled == SelectorResult::Cancelled {
+                if app.claim_entry.is_some() {
+                    app.mode = Mode::ClaimEntry;
+                } else if app.form.is_some() {
+                    app.mode = Mode::Form;
+                } else {
+                    app.mode = Mode::Normal;
+                }
+                if let Some(request) = app.pending_group_move.take() {
+                    if let Err(err) = apply_group_parent_move(http, &request).await {
+                        app.set_status(err.to_string());
+                    } else {
+                        refresh_active_tab(app, http).await?;
+                    }
+                }
+            }
+            continue;
+        }
+        if app.mode == Mode::Picker {
+            let handled = handle_picker_event(app, event)?;
+            if handled == PickerResult::Applied || handled == PickerResult::Cancelled {
+                if app.claim_entry.is_some() {
+                    app.mode = Mode::ClaimEntry;
+                } else {
+                    app.mode = Mode::Form;
+                }
+            }
+            continue;
+        }
+
+        if app.mode == Mode::Form {
+            let form_action = app.form.as_ref().map(|f| f.action.clone());
+            let handled = handle_form_event(app, event, http).await?;
+            if handled == FormResult::Submitted {
+                let tenant_domain_form = matches!(
+                    form_action,
+                    Some(
+                        FormAction::CreateTenantDomain(_)
+                            | FormAction::UpdateTenantDomain { .. }
+                            | FormAction::DeleteTenantDomain { .. }
+                    )
+                );
+                app.form = None;
+                if tenant_domain_form {
+                    refresh_tenant_domains_manager(app, http).await?;
+                    app.mode = Mode::TenantDomainsManager;
+                } else {
+                    app.mode = Mode::Normal;
+                    refresh_active_tab(app, http).await?;
+                }
+            } else if handled == FormResult::Cancelled {
+                // If form was opened from ClaimEditor (UpdateClaimMap), return to ClaimEditor mode
+                if app.form.as_ref().map(|f| matches!(f.action, FormAction::UpdateClaimMap(_))).unwrap_or(false)
+                    && app.claim_editor.is_some() {
+                    app.mode = Mode::ClaimEditor;
+                } else if matches!(
+                    form_action,
+                    Some(
+                        FormAction::CreateTenantDomain(_)
+                            | FormAction::UpdateTenantDomain { .. }
+                            | FormAction::DeleteTenantDomain { .. }
+                    )
+                ) {
+                    app.mode = Mode::TenantDomainsManager;
+                } else {
+                    app.mode = Mode::Normal;
+                }
+                app.form = None;
+            }
+            continue;
+        }
+        if app.mode == Mode::TenantDomainsManager {
+            let handled = handle_tenant_domains_manager_event(app, event).await?;
+            if handled == TenantDomainsManagerResult::Closed {
+                app.tenant_domains_manager = None;
+                app.mode = Mode::Normal;
+            }
+            continue;
+        }
+
+        if let Event::Key(key) = event {
+            if handle_normal_key(app, key, http).await? {
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn handle_normal_key(app: &mut App, key: KeyEvent, http: &HttpClient) -> Result<bool> {
+    match key.code {
+        KeyCode::Char('q') => return Ok(true),
+        KeyCode::Tab => next_tab(app, http).await?,
+        KeyCode::BackTab => prev_tab(app, http).await?,
+        KeyCode::Down => select_next(app),
+        KeyCode::Up => select_prev(app),
+        KeyCode::Char('r') => refresh_active_tab(app, http).await?,
+        KeyCode::Char('[') => page_prev(app, http).await?,
+        KeyCode::Char(']') => page_next(app, http).await?,
+        KeyCode::Char('h') => {
+            app.help_active = true;
+        }
+        KeyCode::Char('/') => {
+            app.filter_active = true;
+            let mut input = Input::default();
+            if let Some(current) = app.filter.clone() {
+                input = input.with_value(current);
+            }
+            app.filter_input = input;
+        }
+        KeyCode::Char('n') => {
+            if app.tab != Tab::ClientClaims && app.tab != Tab::GroupClaims {
+                if let Err(err) = open_create_form(app) {
+                    app.set_status(err.to_string());
+                }
+            }
+        }
+        KeyCode::Char('e') => {
+            if let Err(err) = open_edit_form(app, http).await {
+                app.set_status(err.to_string());
+            }
+        }
+        KeyCode::Char('d') => {
+            if let Err(err) = open_delete_form(app) {
+                app.set_status(err.to_string());
+            }
+        }
+        KeyCode::Char('a') => {
+            if let Err(err) = open_add_user_group(app) {
+                app.set_status(err.to_string());
+            }
+        }
+        KeyCode::Char('m') => {
+            if app.tab == Tab::Groups {
+                if let Err(err) = open_move_group_parent_selector(app, http).await {
+                    app.set_status(err.to_string());
+                }
+            }
+        }
+        KeyCode::Char('c') => {
+            if app.tab == Tab::Groups {
+                if let Err(err) = open_create_subgroup_form(app) {
+                    app.set_status(err.to_string());
+                }
+            } else if app.tab == Tab::Tenants {
+                if let Err(err) = open_tenant_domains_manager(app, http).await {
+                    app.set_status(err.to_string());
+                }
+            }
+        }
+        KeyCode::Char('x') => {
+            if let Err(err) = open_remove_user_group(app) {
+                app.set_status(err.to_string());
+            }
+        }
+        _ => {}
+    }
+    Ok(false)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PickerResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SelectorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PasswordGenResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RelationResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimEditorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimEntryResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TenantDomainsManagerResult {
+    Continue,
+    Closed,
+}
+
+fn handle_picker_event(app: &mut App, event: Event) -> Result<PickerResult> {
+    let Some(picker) = app.picker.as_mut() else {
+        return Ok(PickerResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(PickerResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.picker = None;
+            return Ok(PickerResult::Cancelled);
+        }
+        KeyCode::Up => {
+            picker.index = picker.index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            picker.index = (picker.index + 1).min(picker.options.len().saturating_sub(1));
+        }
+        KeyCode::Char(' ') => {
+            if picker.single_select {
+                return Ok(PickerResult::Continue);
+            }
+            if let Some(option) = picker.options.get_mut(picker.index) {
+                option.selected = !option.selected;
+            }
+        }
+        KeyCode::Enter => {
+            if picker.single_select {
+                for (idx, opt) in picker.options.iter_mut().enumerate() {
+                    opt.selected = idx == picker.index;
+                }
+            } else if !picker.options.iter().any(|opt| opt.selected) {
+                if let Some(option) = picker.options.get_mut(picker.index) {
+                    option.selected = true;
+                }
+            }
+            let values = picker.selected_values();
+            if picker.target_field == "claim_value_kind" {
+                if let Some(entry) = app.claim_entry.as_mut() {
+                    let selected = values.first().cloned().unwrap_or_else(|| "single".to_string());
+                    entry.claim_value_kind = selected.clone();
+                    if selected == "single" {
+                        if let Some(first) = entry.claim_values.first().cloned() {
+                            entry.claim_values = vec![first];
+                        } else {
+                            entry.claim_values = vec![Input::default()];
+                        }
+                    } else if entry.claim_values.is_empty() {
+                        entry.claim_values = vec![Input::default()];
+                    }
+                }
+            } else if let Some(form) = app.form.as_mut() {
+                set_field_value(form, picker.target_field, values.join(", "));
+            }
+            app.picker = None;
+            return Ok(PickerResult::Applied);
+        }
+        _ => {}
+    }
+
+    Ok(PickerResult::Continue)
+}
+
+async fn handle_relation_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<RelationResult> {
+    let Some(editor) = app.relation_editor.as_mut() else {
+        return Ok(RelationResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(RelationResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.pending_select = Some(relation_hint(&editor.mode));
+            app.relation_editor = None;
+            return Ok(RelationResult::Cancelled);
+        }
+        KeyCode::Up => {
+            editor.index = editor.index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            editor.index = (editor.index + 1).min(editor.options.len().saturating_sub(1));
+        }
+        KeyCode::Char(' ') => {
+            if let Some(option) = editor.options.get_mut(editor.index) {
+                option.selected = !option.selected;
+            }
+        }
+        KeyCode::Enter => {
+            if let Err(err) = apply_relation_changes(editor, http).await {
+                editor.error = Some(err.to_string());
+                return Ok(RelationResult::Continue);
+            }
+            let (tab, id, label) = match &editor.mode {
+                RelationMode::UserGroups { user_id, username } => {
+                    (Tab::UserGroups, user_id.clone(), Some(username.clone()))
+                }
+                RelationMode::GroupUsers { group_id, group_name } => {
+                    (Tab::GroupUsers, group_id.clone(), Some(group_name.clone()))
+                }
+            };
+            app.pending_select = Some(SelectHint { tab, id, label });
+            app.relation_editor = None;
+            return Ok(RelationResult::Applied);
+        }
+        _ => {}
+    }
+
+    Ok(RelationResult::Continue)
+}
+
+async fn handle_claim_editor_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClaimEditorResult> {
+    let Some(editor) = app.claim_editor.as_mut() else {
+        return Ok(ClaimEditorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimEditorResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.pending_select = Some(claim_editor_hint(&editor.mode));
+            return Ok(ClaimEditorResult::Cancelled);
+        }
+        KeyCode::Up => {
+            editor.index = editor.index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            editor.index = (editor.index + 1).min(editor.items.len().saturating_sub(1));
+        }
+        KeyCode::Char('a') => {
+            let claim_values = claim_value_to_entry_values_with_kind("single", &None);
+            app.claim_entry = Some(ClaimEntryState {
+                title: "Přidat claim map".to_string(),
+                mode: ClaimEntryMode::Add,
+                claim_name: Input::default(),
+                claim_value_kind: "single".to_string(),
+                claim_values,
+                other_id: None,
+                other_label: None,
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::ClaimEntry;
+            return Ok(ClaimEditorResult::Continue);
+        }
+        KeyCode::Char('e') => {
+            if editor.items.is_empty() {
+                editor.error = Some("No claim maps to edit".to_string());
+                return Ok(ClaimEditorResult::Continue);
+            }
+
+            if let Some(item) = editor.items.get(editor.index).cloned() {
+                // Fetch patterns for this claim map
+                let claim_map_id = match item.id.as_ref() {
+                    Some(id) => id,
+                    None => {
+                        editor.error = Some("Cannot edit unsaved claim map".to_string());
+                        return Ok(ClaimEditorResult::Continue);
+                    }
+                };
+
+                let url = format!("{}/admin/claim-maps/{}/patterns", http.base_url, claim_map_id);
+                let response = match http
+                    .client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .send()
+                    .await
+                {
+                    Ok(resp) => resp,
+                    Err(err) => {
+                        editor.error = Some(format!("Failed to fetch patterns: {}", err));
+                        return Ok(ClaimEditorResult::Continue);
+                    }
+                };
+
+                let claim_map_patterns: Vec<ClaimMapPatternRow> = if response.status().is_success() {
+                    response.json().await.unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                // Create form for editing claim map
+                let claim_value_str = match &item.claim_value {
+                    Some(Value::String(s)) => s.clone(),
+                    Some(Value::Array(arr)) => {
+                        let strings: Vec<String> = arr.iter()
+                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                            .collect();
+                        strings.join(", ")
+                    }
+                    _ => String::new(),
+                };
+
+                app.form = Some(FormState {
+                    title: format!("Update Claim Map: {}", item.claim_name),
+                    action: FormAction::UpdateClaimMap(claim_map_id.clone()),
+                    fields: vec![
+                        FormField::new("claim_name", item.claim_name).read_only(),
+                        FormField::new("claim_value_kind", item.claim_value_kind).read_only(),
+                        FormField::new("claim_value", claim_value_str).read_only(),
+                        FormField::new("other", format!("{} ({})", item.other_label, item.other_id)).read_only(),
+                    ],
+                    index: 0,
+                    error: None,
+                    patterns: None,
+                    client_patterns: None,
+                    claim_map_patterns: Some(claim_map_patterns),
+                });
+                app.mode = Mode::Form;
+            }
+            return Ok(ClaimEditorResult::Continue);
+        }
+        KeyCode::Char('d') => {
+            if !editor.items.is_empty() {
+                editor.items.remove(editor.index);
+                if editor.index >= editor.items.len() && !editor.items.is_empty() {
+                    editor.index = editor.items.len() - 1;
+                }
+            }
+        }
+        KeyCode::Enter => {
+            if let Err(err) = apply_claim_changes(editor, http).await {
+                editor.error = Some(err.to_string());
+                return Ok(ClaimEditorResult::Continue);
+            }
+            app.pending_select = Some(claim_editor_hint(&editor.mode));
+            app.claim_editor = None;
+            return Ok(ClaimEditorResult::Applied);
+        }
+        _ => {}
+    }
+
+    Ok(ClaimEditorResult::Continue)
+}
+
+async fn handle_claim_entry_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClaimEntryResult> {
+    let Some(entry) = app.claim_entry.as_mut() else {
+        return Ok(ClaimEntryResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimEntryResult::Continue);
+    };
+
+    let mode = app
+        .claim_editor
+        .as_ref()
+        .map(|editor| editor.mode.clone());
+
+    match key.code {
+        KeyCode::Esc => {
+            app.claim_entry = None;
+            return Ok(ClaimEntryResult::Cancelled);
+        }
+        KeyCode::Tab => {
+            entry.index = (entry.index + 1) % 4;
+            return Ok(ClaimEntryResult::Continue);
+        }
+        KeyCode::BackTab => {
+            if entry.index == 0 {
+                entry.index = 3;
+            } else {
+                entry.index -= 1;
+            }
+            return Ok(ClaimEntryResult::Continue);
+        }
+        KeyCode::Enter => {
+            if entry.index < 3 {
+                entry.index += 1;
+                return Ok(ClaimEntryResult::Continue);
+            }
+            let claim_name = entry.claim_name.value().trim().to_string();
+            if claim_name.is_empty() {
+                entry.error = Some("claim_name je povinný".to_string());
+                return Ok(ClaimEntryResult::Continue);
+            }
+            let Some(other_id) = entry.other_id.clone() else {
+                entry.error = Some("Vyber klienta nebo skupinu".to_string());
+                return Ok(ClaimEntryResult::Continue);
+            };
+            let claim_value = match build_claim_value(entry) {
+                Ok(value) => value,
+                Err(err) => {
+                    entry.error = Some(err.to_string());
+                    return Ok(ClaimEntryResult::Continue);
+                }
+            };
+            let other_label = entry
+                .other_label
+                .clone()
+                .unwrap_or_else(|| other_id.clone());
+
+            if let Some(editor) = app.claim_editor.as_mut() {
+                match entry.mode {
+                    ClaimEntryMode::Add => {
+                        editor.items.push(ClaimEditorItem {
+                            id: None,
+                            claim_name,
+                            claim_value_kind: entry.claim_value_kind.clone(),
+                            claim_value,
+                            other_id,
+                            other_label,
+                        });
+                        editor.index = editor.items.len().saturating_sub(1);
+                    }
+                    ClaimEntryMode::Edit(idx) => {
+                        if let Some(item) = editor.items.get_mut(idx) {
+                            item.claim_name = claim_name;
+                            item.claim_value_kind = entry.claim_value_kind.clone();
+                            item.claim_value = claim_value;
+                            item.other_id = other_id;
+                            item.other_label = other_label;
+                        }
+                        editor.index = idx;
+                    }
+                }
+            }
+            app.claim_entry = None;
+            return Ok(ClaimEntryResult::Applied);
+        }
+        KeyCode::Char('t') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && entry.index == 2 {
+                app.claim_value_editor = Some(ClaimValueEditorState {
+                    title: "Upravit claim_value".to_string(),
+                    values: if entry.claim_value_kind == "array" {
+                        if entry.claim_values.is_empty() {
+                            vec![Input::default()]
+                        } else {
+                            entry.claim_values.clone()
+                        }
+                    } else if let Some(first) = entry.claim_values.first().cloned() {
+                        vec![first]
+                    } else {
+                        vec![Input::default()]
+                    },
+                    index: 0,
+                    editing: false,
+                    error: None,
+                    allow_multiple: entry.claim_value_kind == "array",
+                });
+                app.mode = Mode::ClaimValueEditor;
+                return Ok(ClaimEntryResult::Continue);
+            }
+            if entry.index == 0 {
+                entry.claim_name.handle_event(&event);
+            } else if entry.index == 2 {
+                handle_claim_value_input(entry, &event);
+            }
+        }
+        KeyCode::Char('k') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && entry.index == 1 {
+                app.picker = Some(PickerState::new_claim_value_kind(
+                    &entry.claim_value_kind,
+                ));
+                app.mode = Mode::Picker;
+                return Ok(ClaimEntryResult::Continue);
+            }
+        }
+        KeyCode::Char('g') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(mode, Some(ClaimEditorMode::ClientClaims { .. }))
+            {
+                entry.index = 3;
+                open_selector(app, http, SelectorKind::Groups, SelectorTarget::ClaimEntryOther)
+                    .await?;
+                return Ok(ClaimEntryResult::Continue);
+            }
+            if entry.index == 0 {
+                entry.claim_name.handle_event(&event);
+            } else if entry.index == 2 {
+                handle_claim_value_input(entry, &event);
+            }
+        }
+        KeyCode::Char('c') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(mode, Some(ClaimEditorMode::GroupClaims { .. }))
+            {
+                entry.index = 3;
+                open_selector(app, http, SelectorKind::Clients, SelectorTarget::ClaimEntryOther)
+                    .await?;
+                return Ok(ClaimEntryResult::Continue);
+            }
+            if entry.index == 0 {
+                entry.claim_name.handle_event(&event);
+            } else if entry.index == 2 {
+                handle_claim_value_input(entry, &event);
+            }
+        }
+        _ => {
+            if entry.index == 0 {
+                entry.claim_name.handle_event(&event);
+            } else if entry.index == 2 {
+                handle_claim_value_input(entry, &event);
+            }
+        }
+    }
+
+    Ok(ClaimEntryResult::Continue)
+}
+
+fn handle_selector_event(app: &mut App, event: Event) -> Result<SelectorResult> {
+    let Some(selector) = app.selector.as_mut() else {
+        return Ok(SelectorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(SelectorResult::Continue);
+    };
+
+    if selector.filter_active {
+        match key.code {
+            KeyCode::Esc => {
+                selector.filter_active = false;
+                return Ok(SelectorResult::Continue);
+            }
+            KeyCode::Enter => {
+                selector.filter_active = false;
+                return Ok(SelectorResult::Continue);
+            }
+            _ => {
+                selector.filter.handle_event(&event);
+                selector.apply_filter();
+                return Ok(SelectorResult::Continue);
+            }
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.selector = None;
+            return Ok(SelectorResult::Cancelled);
+        }
+        KeyCode::Up => {
+            selector.index = selector.index.saturating_sub(1);
+        }
+        KeyCode::Down => {
+            selector.index = (selector.index + 1).min(selector.filtered.len().saturating_sub(1));
+        }
+        KeyCode::Char('/') => {
+            selector.filter_active = true;
+            selector.filter = Input::default();
+        }
+        KeyCode::Enter => {
+            let Some(selected_idx) = selector.selected_index() else {
+                return Ok(SelectorResult::Continue);
+            };
+            let (value, label) = match &selector.items {
+                SelectorItems::Users(items) => (
+                    items[selected_idx].id.clone(),
+                    items[selected_idx].username.clone(),
+                ),
+                SelectorItems::Groups(items) => (
+                    items[selected_idx].id.clone(),
+                    items[selected_idx].name.clone(),
+                ),
+                SelectorItems::Clients(items) => (
+                    items[selected_idx].id.clone(),
+                    items[selected_idx].client_id.clone(),
+                ),
+            };
+            match &selector.target {
+                SelectorTarget::FormField(field) => {
+                    if let Some(form) = app.form.as_mut() {
+                        set_field_value(form, field, value);
+                    }
+                }
+                SelectorTarget::ClaimEntryOther => {
+                    if let Some(entry) = app.claim_entry.as_mut() {
+                        entry.other_id = Some(value);
+                        entry.other_label = Some(label);
+                    }
+                }
+                SelectorTarget::GroupParent { child_id } => {
+                    let new_parent_id =
+                        if value == ROOT_GROUP_ID { None } else { Some(value) };
+                    app.pending_group_move = Some(GroupMoveRequest {
+                        child_id: child_id.clone(),
+                        new_parent_id,
+                    });
+                }
+            }
+            app.selector = None;
+            return Ok(SelectorResult::Applied);
+        }
+        _ => {}
+    }
+
+    Ok(SelectorResult::Continue)
+}
+
+async fn handle_tenant_domains_manager_event(
+    app: &mut App,
+    event: Event,
+) -> Result<TenantDomainsManagerResult> {
+    let Some(manager) = app.tenant_domains_manager.as_mut() else {
+        return Ok(TenantDomainsManagerResult::Closed);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(TenantDomainsManagerResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => Ok(TenantDomainsManagerResult::Closed),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !manager.domains.is_empty() {
+                manager.index = manager.index.saturating_sub(1);
+            }
+            Ok(TenantDomainsManagerResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !manager.domains.is_empty() {
+                manager.index = (manager.index + 1).min(manager.domains.len() - 1);
+            }
+            Ok(TenantDomainsManagerResult::Continue)
+        }
+        KeyCode::Char('n') => {
+            open_create_tenant_domain_form(app)?;
+            Ok(TenantDomainsManagerResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            open_edit_tenant_domain_form(app)?;
+            Ok(TenantDomainsManagerResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            open_delete_tenant_domain_form(app)?;
+            Ok(TenantDomainsManagerResult::Continue)
+        }
+        _ => Ok(TenantDomainsManagerResult::Continue),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimValueEditorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+fn handle_claim_value_editor_event(
+    app: &mut App,
+    event: Event,
+) -> Result<ClaimValueEditorResult> {
+    let Some(editor) = app.claim_value_editor.as_mut() else {
+        return Ok(ClaimValueEditorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimValueEditorResult::Continue);
+    };
+
+    if editor.editing {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                editor.editing = false;
+                return Ok(ClaimValueEditorResult::Continue);
+            }
+            _ => {
+                if let Some(input) = editor.values.get_mut(editor.index) {
+                    input.handle_event(&event);
+                }
+                return Ok(ClaimValueEditorResult::Continue);
+            }
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => Ok(ClaimValueEditorResult::Cancelled),
+        KeyCode::Up => {
+            editor.index = editor.index.saturating_sub(1);
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Down => {
+            if !editor.values.is_empty() {
+                editor.index = (editor.index + 1).min(editor.values.len() - 1);
+            }
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Char('a') => {
+            if editor.allow_multiple {
+                let insert_at = editor.index + 1;
+                editor.values.insert(insert_at, Input::default());
+                editor.index = insert_at;
+            }
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            if editor.allow_multiple {
+                if editor.values.len() > 1 {
+                    editor.values.remove(editor.index);
+                    if editor.index >= editor.values.len() {
+                        editor.index = editor.values.len() - 1;
+                    }
+                } else if let Some(input) = editor.values.first_mut() {
+                    *input = Input::default();
+                }
+            }
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            editor.editing = true;
+            Ok(ClaimValueEditorResult::Continue)
+        }
+        KeyCode::Enter => Ok(ClaimValueEditorResult::Applied),
+        _ => Ok(ClaimValueEditorResult::Continue),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ArrayEditorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+fn handle_array_editor_event(app: &mut App, event: Event) -> Result<ArrayEditorResult> {
+    let Some(editor) = app.array_editor.as_mut() else {
+        return Ok(ArrayEditorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ArrayEditorResult::Continue);
+    };
+
+    if editor.editing {
+        match key.code {
+            KeyCode::Esc | KeyCode::Enter => {
+                editor.editing = false;
+                return Ok(ArrayEditorResult::Continue);
+            }
+            _ => {
+                if let Some(input) = editor.values.get_mut(editor.index) {
+                    input.handle_event(&event);
+                }
+                return Ok(ArrayEditorResult::Continue);
+            }
+        }
+    }
+
+    match key.code {
+        KeyCode::Esc => Ok(ArrayEditorResult::Cancelled),
+        KeyCode::Up => {
+            editor.index = editor.index.saturating_sub(1);
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Down => {
+            if !editor.values.is_empty() {
+                editor.index = (editor.index + 1).min(editor.values.len() - 1);
+            }
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Char('a') => {
+            let insert_at = if editor.values.is_empty() {
+                0
+            } else {
+                editor.index.saturating_add(1).min(editor.values.len())
+            };
+            editor.values.insert(insert_at, Input::default());
+            editor.index = insert_at;
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            if editor.values.is_empty() {
+                return Ok(ArrayEditorResult::Continue);
+            }
+            if editor.values.len() > 1 {
+                editor.values.remove(editor.index);
+                if editor.index >= editor.values.len() {
+                    editor.index = editor.values.len() - 1;
+                }
+            } else if let Some(input) = editor.values.first_mut() {
+                *input = Input::default();
+            }
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            if editor.values.is_empty() {
+                editor.values.push(Input::default());
+            }
+            editor.editing = true;
+            Ok(ArrayEditorResult::Continue)
+        }
+        KeyCode::Enter => Ok(ArrayEditorResult::Applied),
+        _ => Ok(ArrayEditorResult::Continue),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScopeSelectorResult {
+    Continue,
+    Applied,
+    Cancelled,
+}
+
+fn handle_scope_selector_event(app: &mut App, event: Event) -> Result<ScopeSelectorResult> {
+    let Some(selector) = app.scope_selector.as_mut() else {
+        return Ok(ScopeSelectorResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ScopeSelectorResult::Continue);
+    };
+
+    match selector.mode {
+        ScopeSelectorMode::SelectStandard => match key.code {
+            KeyCode::Esc => Ok(ScopeSelectorResult::Cancelled),
+            KeyCode::Up => {
+                selector.index = selector.index.saturating_sub(1);
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Down => {
+                let max_index = selector.standard_scopes.len() + selector.custom_scopes.len();
+                if selector.index + 1 < max_index {
+                    selector.index += 1;
+                }
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Char(' ') => {
+                if selector.index < selector.standard_scopes.len() {
+                    selector.standard_scopes[selector.index].1 =
+                        !selector.standard_scopes[selector.index].1;
+                }
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Char('a') => {
+                selector.mode = ScopeSelectorMode::AddCustom;
+                selector.custom_input = Input::default();
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Char('d') => {
+                let standard_count = selector.standard_scopes.len();
+                if selector.index >= standard_count {
+                    let custom_index = selector.index - standard_count;
+                    if custom_index < selector.custom_scopes.len() {
+                        selector.custom_scopes.remove(custom_index);
+                        if selector.index > 0 {
+                            selector.index -= 1;
+                        }
+                    }
+                }
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Enter => Ok(ScopeSelectorResult::Applied),
+            _ => Ok(ScopeSelectorResult::Continue),
+        },
+        ScopeSelectorMode::AddCustom => match key.code {
+            KeyCode::Esc => {
+                selector.mode = ScopeSelectorMode::SelectStandard;
+                Ok(ScopeSelectorResult::Continue)
+            }
+            KeyCode::Enter => {
+                let value = selector.custom_input.value().trim().to_string();
+                if !value.is_empty() && !selector.custom_scopes.contains(&value) {
+                    selector.custom_scopes.push(value);
+                }
+                selector.mode = ScopeSelectorMode::SelectStandard;
+                Ok(ScopeSelectorResult::Continue)
+            }
+            _ => {
+                selector.custom_input.handle_event(&event);
+                Ok(ScopeSelectorResult::Continue)
+            }
+        },
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum UserPatternsManagerResult {
+    Continue,
+    Closed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PatternFormResult {
+    Continue,
+    Saved,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClientPatternsManagerResult {
+    Continue,
+    Closed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClientPatternFormResult {
+    Continue,
+    Saved,
+    Cancelled,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimMapPatternsManagerResult {
+    Continue,
+    Closed,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ClaimMapPatternFormResult {
+    Continue,
+    Saved,
+    Cancelled,
+}
+
+async fn handle_claim_map_patterns_manager_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClaimMapPatternsManagerResult> {
+    let Some(manager) = app.claim_map_patterns_manager.as_mut() else {
+        return Ok(ClaimMapPatternsManagerResult::Closed);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimMapPatternsManagerResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => Ok(ClaimMapPatternsManagerResult::Closed),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !manager.patterns.is_empty() {
+                manager.index = manager.index.saturating_sub(1);
+            }
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !manager.patterns.is_empty() {
+                manager.index = (manager.index + 1).min(manager.patterns.len() - 1);
+            }
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('n') => {
+            // Open create pattern form
+            app.claim_map_pattern_form = Some(ClaimMapPatternFormState {
+                claim_map_id: manager.claim_map_id.clone(),
+                pattern_id: None,
+                fields: vec![
+                    FormField::new("pattern", String::new()),
+                    FormField::boolean("is_include", true),
+                    FormField::new("priority", "0".to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::ClaimMapPatternForm;
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            // Open edit pattern form
+            if manager.patterns.is_empty() {
+                return Ok(ClaimMapPatternsManagerResult::Continue);
+            }
+            let pattern = &manager.patterns[manager.index];
+            app.claim_map_pattern_form = Some(ClaimMapPatternFormState {
+                claim_map_id: manager.claim_map_id.clone(),
+                pattern_id: Some(pattern.id.clone()),
+                fields: vec![
+                    FormField::new("pattern", pattern.pattern.clone()),
+                    FormField::boolean("is_include", pattern.is_include),
+                    FormField::new("priority", pattern.priority.to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::ClaimMapPatternForm;
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            // Delete pattern
+            if manager.patterns.is_empty() {
+                return Ok(ClaimMapPatternsManagerResult::Continue);
+            }
+
+            let pattern = &manager.patterns[manager.index];
+            let url = format!(
+                "{}/admin/claim-maps/{}/patterns/{}",
+                http.base_url, manager.claim_map_id, pattern.id
+            );
+
+            let response = http
+                .client
+                .delete(&url)
+                .header("Authorization", format!("Bearer {}", http.token))
+                .send()
+                .await
+                .context("Failed to delete pattern")?;
+
+            if response.status().is_success() {
+                // Refresh patterns list
+                let url = format!(
+                    "{}/admin/claim-maps/{}/patterns",
+                    http.base_url, manager.claim_map_id
+                );
+                let response = http
+                    .client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .send()
+                    .await?;
+
+                if response.status().is_success() {
+                    let patterns: Vec<ClaimMapPatternRow> = response.json().await?;
+                    manager.patterns = patterns;
+                    if manager.index >= manager.patterns.len() && manager.index > 0 {
+                        manager.index -= 1;
+                    }
+                    app.set_status("Pattern deleted successfully".to_string());
+                }
+            } else {
+                app.set_status(format!("Failed to delete pattern: HTTP {}", response.status()));
+            }
+            Ok(ClaimMapPatternsManagerResult::Continue)
+        }
+        _ => Ok(ClaimMapPatternsManagerResult::Continue),
+    }
+}
+
+async fn handle_claim_map_pattern_form_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClaimMapPatternFormResult> {
+    let Some(pattern_form) = app.claim_map_pattern_form.as_mut() else {
+        return Ok(ClaimMapPatternFormResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClaimMapPatternFormResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => Ok(ClaimMapPatternFormResult::Cancelled),
+        KeyCode::Up => {
+            pattern_form.index = pattern_form.index.saturating_sub(1);
+            Ok(ClaimMapPatternFormResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            pattern_form.index = (pattern_form.index + 1).min(pattern_form.fields.len() - 1);
+            Ok(ClaimMapPatternFormResult::Continue)
+        }
+        KeyCode::Char(c) => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                return Ok(ClaimMapPatternFormResult::Continue);
+            }
+
+            let field = &mut pattern_form.fields[pattern_form.index];
+            match field.kind {
+                FieldKind::Text => {
+                    field.input.handle(tui_input::InputRequest::InsertChar(c));
+                }
+                FieldKind::Bool => {
+                    if c == ' ' {
+                        field.toggle_bool();
+                    }
+                }
+                _ => {}
+            }
+            Ok(ClaimMapPatternFormResult::Continue)
+        }
+        KeyCode::Backspace => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if matches!(field.kind, FieldKind::Text) {
+                field
+                    .input
+                    .handle(tui_input::InputRequest::DeletePrevChar);
+            }
+            Ok(ClaimMapPatternFormResult::Continue)
+        }
+        KeyCode::Enter => {
+            // Submit form
+            let pattern = pattern_form.fields[0].value().to_string();
+            let is_include = pattern_form.fields[1].value() == "true";
+            let priority: i32 = pattern_form.fields[2].value().parse().unwrap_or(0);
+
+            if pattern.is_empty() {
+                pattern_form.error = Some("Pattern cannot be empty".to_string());
+                return Ok(ClaimMapPatternFormResult::Continue);
+            }
+
+            let result = if let Some(pattern_id) = &pattern_form.pattern_id {
+                // Update existing pattern
+                let url = format!(
+                    "{}/admin/claim-maps/{}/patterns/{}",
+                    http.base_url, pattern_form.claim_map_id, pattern_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .put(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            } else {
+                // Create new pattern
+                let url = format!(
+                    "{}/admin/claim-maps/{}/patterns",
+                    http.base_url, pattern_form.claim_map_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            };
+
+            match result {
+                Ok(response) if response.status().is_success() => {
+                    // Refresh patterns in manager
+                    if let Some(manager) = app.claim_map_patterns_manager.as_mut() {
+                        let url = format!(
+                            "{}/admin/claim-maps/{}/patterns",
+                            http.base_url, manager.claim_map_id
+                        );
+                        if let Ok(response) = http
+                            .client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {}", http.token))
+                            .send()
+                            .await
+                        {
+                            if let Ok(patterns) = response.json::<Vec<ClaimMapPatternRow>>().await {
+                                manager.patterns = patterns;
+                            }
+                        }
+                    }
+                    app.set_status("Pattern saved successfully".to_string());
+                    Ok(ClaimMapPatternFormResult::Saved)
+                }
+                Ok(response) => {
+                    pattern_form.error = Some(format!("HTTP {}", response.status()));
+                    Ok(ClaimMapPatternFormResult::Continue)
+                }
+                Err(err) => {
+                    pattern_form.error = Some(err.to_string());
+                    Ok(ClaimMapPatternFormResult::Continue)
+                }
+            }
+        }
+        _ => Ok(ClaimMapPatternFormResult::Continue),
+    }
+}
+
+async fn handle_user_patterns_manager_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<UserPatternsManagerResult> {
+    let Some(manager) = app.user_patterns_manager.as_mut() else {
+        return Ok(UserPatternsManagerResult::Closed);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(UserPatternsManagerResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => Ok(UserPatternsManagerResult::Closed),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !manager.patterns.is_empty() {
+                manager.index = manager.index.saturating_sub(1);
+            }
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !manager.patterns.is_empty() {
+                manager.index = (manager.index + 1).min(manager.patterns.len() - 1);
+            }
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('n') => {
+            // Open create pattern form
+            app.pattern_form = Some(PatternFormState {
+                user_id: manager.user_id.clone(),
+                pattern_id: None,
+                fields: vec![
+                    FormField::new("pattern", String::new()),
+                    FormField::boolean("is_include", true),
+                    FormField::new("priority", "0".to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::PatternForm;
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            // Open edit pattern form
+            if manager.patterns.is_empty() {
+                return Ok(UserPatternsManagerResult::Continue);
+            }
+            let pattern = &manager.patterns[manager.index];
+            app.pattern_form = Some(PatternFormState {
+                user_id: manager.user_id.clone(),
+                pattern_id: Some(pattern.id.clone()),
+                fields: vec![
+                    FormField::new("pattern", pattern.pattern.clone()),
+                    FormField::boolean("is_include", pattern.is_include),
+                    FormField::new("priority", pattern.priority.to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::PatternForm;
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            // Delete pattern
+            if manager.patterns.is_empty() {
+                return Ok(UserPatternsManagerResult::Continue);
+            }
+
+            let pattern = &manager.patterns[manager.index];
+            let url = format!(
+                "{}/admin/users/{}/group-patterns/{}",
+                http.base_url, manager.user_id, pattern.id
+            );
+
+            let response = http
+                .client
+                .delete(&url)
+                .header("Authorization", format!("Bearer {}", http.token))
+                .send()
+                .await
+                .context("Failed to delete pattern")?;
+
+            if response.status().is_success() {
+                // Refresh patterns list
+                let url = format!(
+                    "{}/admin/users/{}/group-patterns",
+                    http.base_url, manager.user_id
+                );
+                let response = http
+                    .client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .send()
+                    .await?;
+
+                if response.status().is_success() {
+                    let patterns: Vec<UserGroupPatternRow> = response.json().await?;
+                    manager.patterns = patterns;
+                    if manager.index >= manager.patterns.len() && manager.index > 0 {
+                        manager.index -= 1;
+                    }
+                    app.set_status("Pattern deleted successfully".to_string());
+                }
+            } else {
+                app.set_status(format!("Failed to delete pattern: HTTP {}", response.status()));
+            }
+            Ok(UserPatternsManagerResult::Continue)
+        }
+        _ => Ok(UserPatternsManagerResult::Continue),
+    }
+}
+
+async fn handle_pattern_form_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<PatternFormResult> {
+    let Some(pattern_form) = app.pattern_form.as_mut() else {
+        return Ok(PatternFormResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(PatternFormResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => Ok(PatternFormResult::Cancelled),
+        KeyCode::Up => {
+            if pattern_form.index > 0 {
+                pattern_form.index -= 1;
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            if pattern_form.index < pattern_form.fields.len() - 1 {
+                pattern_form.index += 1;
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Char(' ') => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if matches!(field.kind, FieldKind::Bool) {
+                let current = field.value() == "true";
+                field.input = input_with_value((!current).to_string());
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Char(c) => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::InsertChar(c));
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Backspace => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::DeletePrevChar);
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Delete => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::DeleteNextChar);
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Left => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::GoToPrevChar);
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Right => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::GoToNextChar);
+            }
+            Ok(PatternFormResult::Continue)
+        }
+        KeyCode::Enter => {
+            // Submit form
+            let pattern = pattern_form.fields[0].value().to_string();
+            let is_include = pattern_form.fields[1].value() == "true";
+            let priority: i32 = pattern_form.fields[2].value().parse().unwrap_or(0);
+
+            if pattern.is_empty() {
+                pattern_form.error = Some("Pattern cannot be empty".to_string());
+                return Ok(PatternFormResult::Continue);
+            }
+
+            let result = if let Some(pattern_id) = &pattern_form.pattern_id {
+                // Update existing pattern
+                let url = format!(
+                    "{}/admin/users/{}/group-patterns/{}",
+                    http.base_url, pattern_form.user_id, pattern_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .put(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            } else {
+                // Create new pattern
+                let url = format!(
+                    "{}/admin/users/{}/group-patterns",
+                    http.base_url, pattern_form.user_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            };
+
+            match result {
+                Ok(response) if response.status().is_success() => {
+                    // Refresh patterns in manager
+                    if let Some(manager) = app.user_patterns_manager.as_mut() {
+                        let url = format!(
+                            "{}/admin/users/{}/group-patterns",
+                            http.base_url, manager.user_id
+                        );
+                        if let Ok(response) = http
+                            .client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {}", http.token))
+                            .send()
+                            .await
+                        {
+                            if let Ok(patterns) = response.json::<Vec<UserGroupPatternRow>>().await {
+                                manager.patterns = patterns;
+                            }
+                        }
+                    }
+                    app.set_status("Pattern saved successfully".to_string());
+                    Ok(PatternFormResult::Saved)
+                }
+                Ok(response) => {
+                    pattern_form.error = Some(format!("HTTP {}", response.status()));
+                    Ok(PatternFormResult::Continue)
+                }
+                Err(err) => {
+                    pattern_form.error = Some(err.to_string());
+                    Ok(PatternFormResult::Continue)
+                }
+            }
+        }
+        _ => Ok(PatternFormResult::Continue),
+    }
+}
+
+async fn handle_client_patterns_manager_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClientPatternsManagerResult> {
+    let Some(manager) = app.client_patterns_manager.as_mut() else {
+        return Ok(ClientPatternsManagerResult::Closed);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClientPatternsManagerResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Enter => Ok(ClientPatternsManagerResult::Closed),
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !manager.patterns.is_empty() {
+                manager.index = manager.index.saturating_sub(1);
+            }
+            Ok(ClientPatternsManagerResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !manager.patterns.is_empty() {
+                manager.index = (manager.index + 1).min(manager.patterns.len() - 1);
+            }
+            Ok(ClientPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('n') => {
+            // Open create pattern form
+            app.client_pattern_form = Some(ClientPatternFormState {
+                client_id: manager.client_id.clone(),
+                pattern_id: None,
+                fields: vec![
+                    FormField::new("pattern", String::new()),
+                    FormField::boolean("is_include", true),
+                    FormField::new("priority", "0".to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::ClientPatternForm;
+            Ok(ClientPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('e') => {
+            // Open edit pattern form
+            if manager.patterns.is_empty() {
+                return Ok(ClientPatternsManagerResult::Continue);
+            }
+            let pattern = &manager.patterns[manager.index];
+            app.client_pattern_form = Some(ClientPatternFormState {
+                client_id: manager.client_id.clone(),
+                pattern_id: Some(pattern.id.clone()),
+                fields: vec![
+                    FormField::new("pattern", pattern.pattern.clone()),
+                    FormField::boolean("is_include", pattern.is_include),
+                    FormField::new("priority", pattern.priority.to_string()),
+                ],
+                index: 0,
+                error: None,
+            });
+            app.mode = Mode::ClientPatternForm;
+            Ok(ClientPatternsManagerResult::Continue)
+        }
+        KeyCode::Char('d') => {
+            // Delete pattern
+            if manager.patterns.is_empty() {
+                return Ok(ClientPatternsManagerResult::Continue);
+            }
+
+            let pattern = &manager.patterns[manager.index];
+            let url = format!(
+                "{}/admin/oauth-clients/{}/group-patterns/{}",
+                http.base_url, manager.client_id, pattern.id
+            );
+
+            let response = http
+                .client
+                .delete(&url)
+                .header("Authorization", format!("Bearer {}", http.token))
+                .send()
+                .await
+                .context("Failed to delete pattern")?;
+
+            if response.status().is_success() {
+                // Refresh patterns list
+                let url = format!(
+                    "{}/admin/oauth-clients/{}/group-patterns",
+                    http.base_url, manager.client_id
+                );
+                let response = http
+                    .client
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .send()
+                    .await?;
+
+                if response.status().is_success() {
+                    let patterns: Vec<ClientGroupPatternRow> = response.json().await?;
+                    manager.patterns = patterns;
+                    if manager.index >= manager.patterns.len() && manager.index > 0 {
+                        manager.index -= 1;
+                    }
+                    app.set_status("Pattern deleted successfully".to_string());
+                }
+            } else {
+                app.set_status(format!("Failed to delete pattern: HTTP {}", response.status()));
+            }
+            Ok(ClientPatternsManagerResult::Continue)
+        }
+        _ => Ok(ClientPatternsManagerResult::Continue),
+    }
+}
+
+async fn handle_client_pattern_form_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<ClientPatternFormResult> {
+    let Some(pattern_form) = app.client_pattern_form.as_mut() else {
+        return Ok(ClientPatternFormResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(ClientPatternFormResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => Ok(ClientPatternFormResult::Cancelled),
+        KeyCode::Up => {
+            if pattern_form.index > 0 {
+                pattern_form.index -= 1;
+            }
+            Ok(ClientPatternFormResult::Continue)
+        }
+        KeyCode::Down | KeyCode::Tab => {
+            if pattern_form.index < pattern_form.fields.len() - 1 {
+                pattern_form.index += 1;
+            }
+            Ok(ClientPatternFormResult::Continue)
+        }
+        KeyCode::Char(' ') => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if matches!(field.kind, FieldKind::Bool) {
+                let current = field.value() == "true";
+                field.input = input_with_value((!current).to_string());
+            }
+            Ok(ClientPatternFormResult::Continue)
+        }
+        KeyCode::Char(c) => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::InsertChar(c));
+            }
+            Ok(ClientPatternFormResult::Continue)
+        }
+        KeyCode::Backspace => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::DeletePrevChar);
+            }
+            Ok(ClientPatternFormResult::Continue)
+        }
+        KeyCode::Delete => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::DeleteNextChar);
+            }
+            Ok(ClientPatternFormResult::Continue)
+        }
+        KeyCode::Left => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::GoToPrevChar);
+            }
+            Ok(ClientPatternFormResult::Continue)
+        }
+        KeyCode::Right => {
+            let field = &mut pattern_form.fields[pattern_form.index];
+            if !matches!(field.kind, FieldKind::Bool) {
+                field.input.handle(tui_input::InputRequest::GoToNextChar);
+            }
+            Ok(ClientPatternFormResult::Continue)
+        }
+        KeyCode::Enter => {
+            // Submit form
+            let pattern = pattern_form.fields[0].value().to_string();
+            let is_include = pattern_form.fields[1].value() == "true";
+            let priority: i32 = pattern_form.fields[2].value().parse().unwrap_or(0);
+
+            if pattern.is_empty() {
+                pattern_form.error = Some("Pattern cannot be empty".to_string());
+                return Ok(ClientPatternFormResult::Continue);
+            }
+
+            let result = if let Some(pattern_id) = &pattern_form.pattern_id {
+                // Update existing pattern
+                let url = format!(
+                    "{}/admin/oauth-clients/{}/group-patterns/{}",
+                    http.base_url, pattern_form.client_id, pattern_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .put(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            } else {
+                // Create new pattern
+                let url = format!(
+                    "{}/admin/oauth-clients/{}/group-patterns",
+                    http.base_url, pattern_form.client_id
+                );
+                let body = serde_json::json!({
+                    "pattern": pattern,
+                    "is_include": is_include,
+                    "priority": priority,
+                });
+                http.client
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", http.token))
+                    .json(&body)
+                    .send()
+                    .await
+            };
+
+            match result {
+                Ok(response) if response.status().is_success() => {
+                    // Refresh patterns in manager
+                    if let Some(manager) = app.client_patterns_manager.as_mut() {
+                        let url = format!(
+                            "{}/admin/oauth-clients/{}/group-patterns",
+                            http.base_url, manager.client_id
+                        );
+                        if let Ok(response) = http
+                            .client
+                            .get(&url)
+                            .header("Authorization", format!("Bearer {}", http.token))
+                            .send()
+                            .await
+                        {
+                            if let Ok(patterns) = response.json::<Vec<ClientGroupPatternRow>>().await {
+                                manager.patterns = patterns;
+                            }
+                        }
+                    }
+                    app.set_status("Pattern saved successfully".to_string());
+                    Ok(ClientPatternFormResult::Saved)
+                }
+                Ok(response) => {
+                    pattern_form.error = Some(format!("HTTP {}", response.status()));
+                    Ok(ClientPatternFormResult::Continue)
+                }
+                Err(err) => {
+                    pattern_form.error = Some(err.to_string());
+                    Ok(ClientPatternFormResult::Continue)
+                }
+            }
+        }
+        _ => Ok(ClientPatternFormResult::Continue),
+    }
+}
+
+fn handle_password_gen_event(app: &mut App, event: Event) -> Result<PasswordGenResult> {
+    let Some(password_gen) = app.password_gen.as_mut() else {
+        return Ok(PasswordGenResult::Cancelled);
+    };
+
+    let Event::Key(key) = event else {
+        return Ok(PasswordGenResult::Continue);
+    };
+
+    match key.code {
+        KeyCode::Esc => {
+            app.password_gen = None;
+            return Ok(PasswordGenResult::Cancelled);
+        }
+        KeyCode::Tab => password_gen.index = (password_gen.index + 1) % 7,
+        KeyCode::BackTab => {
+            if password_gen.index == 0 {
+                password_gen.index = 6;
+            } else {
+                password_gen.index -= 1;
+            }
+        }
+        KeyCode::Char(' ') => {
+            match password_gen.index {
+                1 => password_gen.include_upper = !password_gen.include_upper,
+                2 => password_gen.include_lower = !password_gen.include_lower,
+                3 => password_gen.include_digits = !password_gen.include_digits,
+                4 => password_gen.include_special_safe = !password_gen.include_special_safe,
+                5 => password_gen.include_special_full = !password_gen.include_special_full,
+                _ => {}
+            }
+        }
+        KeyCode::Enter => {
+            if password_gen.index == 6 {
+                match generate_password(password_gen) {
+                    Ok(value) => {
+                        if let Some(form) = app.form.as_mut() {
+                            set_field_value(form, password_gen.target_field, value);
+                        }
+                        app.password_gen = None;
+                        return Ok(PasswordGenResult::Applied);
+                    }
+                    Err(err) => password_gen.error = Some(err.to_string()),
+                }
+            } else if password_gen.index == 0 {
+                let mut length = password_gen.length.value().to_string();
+                if length.is_empty() {
+                    length = "16".to_string();
+                }
+                password_gen.length = input_with_value(length);
+            } else {
+                password_gen.index = 6;
+            }
+        }
+        _ => {}
+    }
+
+    if password_gen.index == 0 {
+        password_gen.length.handle_event(&event);
+    }
+
+    Ok(PasswordGenResult::Continue)
+}
+
+fn select_next(app: &mut App) {
+    let filtered = filtered_indices(app);
+    match app.tab {
+        Tab::Tenants => select_next_filtered(&mut app.tenants.state, &filtered),
+        Tab::Users => select_next_filtered(&mut app.users.state, &filtered),
+        Tab::Groups => select_next_filtered(&mut app.groups.state, &filtered),
+        Tab::Clients => select_next_filtered(&mut app.clients.state, &filtered),
+        Tab::ClientClaims => select_next_filtered(&mut app.client_claims.state, &filtered),
+        Tab::GroupClaims => select_next_filtered(&mut app.group_claims.state, &filtered),
+        Tab::UserGroups => select_next_filtered(&mut app.user_groups.state, &filtered),
+        Tab::GroupUsers => select_next_filtered(&mut app.group_users.state, &filtered),
+    }
+}
+
+fn select_prev(app: &mut App) {
+    let filtered = filtered_indices(app);
+    match app.tab {
+        Tab::Tenants => select_prev_filtered(&mut app.tenants.state, &filtered),
+        Tab::Users => select_prev_filtered(&mut app.users.state, &filtered),
+        Tab::Groups => select_prev_filtered(&mut app.groups.state, &filtered),
+        Tab::Clients => select_prev_filtered(&mut app.clients.state, &filtered),
+        Tab::ClientClaims => select_prev_filtered(&mut app.client_claims.state, &filtered),
+        Tab::GroupClaims => select_prev_filtered(&mut app.group_claims.state, &filtered),
+        Tab::UserGroups => select_prev_filtered(&mut app.user_groups.state, &filtered),
+        Tab::GroupUsers => select_prev_filtered(&mut app.group_users.state, &filtered),
+    }
+}
+
+fn select_next_filtered(state: &mut TableState, filtered: &[usize]) {
+    if filtered.is_empty() {
+        state.select(None);
+        return;
+    }
+    let current_pos = state
+        .selected()
+        .and_then(|idx| filtered.iter().position(|&value| value == idx));
+    let next_pos = match current_pos {
+        Some(pos) => (pos + 1).min(filtered.len() - 1),
+        None => 0,
+    };
+    state.select(Some(filtered[next_pos]));
+}
+
+fn select_prev_filtered(state: &mut TableState, filtered: &[usize]) {
+    if filtered.is_empty() {
+        state.select(None);
+        return;
+    }
+    let current_pos = state
+        .selected()
+        .and_then(|idx| filtered.iter().position(|&value| value == idx));
+    let prev_pos = match current_pos {
+        Some(pos) => pos.saturating_sub(1),
+        None => 0,
+    };
+    state.select(Some(filtered[prev_pos]));
+}
+
+async fn next_tab(app: &mut App, http: &HttpClient) -> Result<()> {
+    let tabs = App::tabs();
+    let idx = tabs
+        .iter()
+        .position(|(tab, _)| *tab == app.tab)
+        .unwrap_or(0);
+    let next = (idx + 1) % tabs.len();
+    app.tab = tabs[next].0;
+    refresh_active_tab(app, http).await
+}
+
+async fn prev_tab(app: &mut App, http: &HttpClient) -> Result<()> {
+    let tabs = App::tabs();
+    let idx = tabs
+        .iter()
+        .position(|(tab, _)| *tab == app.tab)
+        .unwrap_or(0);
+    let prev = if idx == 0 { tabs.len() - 1 } else { idx - 1 };
+    app.tab = tabs[prev].0;
+    refresh_active_tab(app, http).await
+}
+
+async fn page_next(app: &mut App, http: &HttpClient) -> Result<()> {
+    match app.tab {
+        Tab::Tenants => app.tenants.page += 1,
+        Tab::Users => app.users.page += 1,
+        Tab::Groups => app.groups.page += 1,
+        Tab::Clients => app.clients.page += 1,
+        Tab::ClientClaims => app.client_claims.page += 1,
+        Tab::GroupClaims => app.group_claims.page += 1,
+        Tab::UserGroups => app.user_groups.page += 1,
+        Tab::GroupUsers => app.group_users.page += 1,
+    }
+    refresh_active_tab(app, http).await
+}
+
+async fn page_prev(app: &mut App, http: &HttpClient) -> Result<()> {
+    match app.tab {
+        Tab::Tenants => app.tenants.page = app.tenants.page.saturating_sub(1).max(1),
+        Tab::Users => app.users.page = app.users.page.saturating_sub(1).max(1),
+        Tab::Groups => app.groups.page = app.groups.page.saturating_sub(1).max(1),
+        Tab::Clients => app.clients.page = app.clients.page.saturating_sub(1).max(1),
+        Tab::ClientClaims => app.client_claims.page = app.client_claims.page.saturating_sub(1).max(1),
+        Tab::GroupClaims => app.group_claims.page = app.group_claims.page.saturating_sub(1).max(1),
+        Tab::UserGroups => app.user_groups.page = app.user_groups.page.saturating_sub(1).max(1),
+        Tab::GroupUsers => app.group_users.page = app.group_users.page.saturating_sub(1).max(1),
+    }
+    refresh_active_tab(app, http).await
+}
+
+async fn refresh_active_tab(app: &mut App, http: &HttpClient) -> Result<()> {
+    match app.tab {
+        Tab::Tenants => {
+            match fetch_tenants(http, app.tenants.page).await {
+                Ok(tenants) => {
+                    app.tenants.items = tenants;
+                    app.tenant_domains.clear();
+                    for tenant in &app.tenants.items {
+                        if let Ok(domains) = fetch_tenant_domains(http, &tenant.id).await {
+                            app.tenant_domains.insert(tenant.id.clone(), domains);
+                        }
+                    }
+                    apply_selection(app, EntityKind::Tenants);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::Users => {
+            match fetch_users(http, app.users.page).await {
+                Ok(users) => {
+                    app.users.items = users;
+                    apply_selection(app, EntityKind::Users);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::Groups => {
+            match fetch_groups_tree(http).await {
+                Ok((groups, depths)) => {
+                    app.groups.items = groups;
+                    app.group_depths = depths;
+                    apply_selection(app, EntityKind::Groups);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::Clients => {
+            match fetch_clients(http, app.clients.page).await {
+                Ok(clients) => {
+                    app.clients.items = clients;
+                    apply_selection(app, EntityKind::Clients);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::ClientClaims => {
+            match fetch_client_claims(http).await {
+                Ok(rows) => {
+                    app.client_claims.items = rows;
+                    apply_selection(app, EntityKind::ClientClaims);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::GroupClaims => {
+            match fetch_group_claims(http).await {
+                Ok(rows) => {
+                    app.group_claims.items = rows;
+                    apply_selection(app, EntityKind::GroupClaims);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::UserGroups => {
+            match fetch_user_groups(http).await {
+                Ok(rows) => {
+                    app.user_groups.items = rows;
+                    apply_selection(app, EntityKind::UserGroups);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+        Tab::GroupUsers => {
+            match fetch_group_users(http).await {
+                Ok(rows) => {
+                    app.group_users.items = rows;
+                    apply_selection(app, EntityKind::GroupUsers);
+                }
+                Err(err) => app.set_status(err.to_string()),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum EntityKind {
+    Tenants,
+    Users,
+    Groups,
+    Clients,
+    ClientClaims,
+    GroupClaims,
+    UserGroups,
+    GroupUsers,
+}
+
+fn apply_selection(app: &mut App, kind: EntityKind) {
+    let hint = app.pending_select.clone();
+    let mut matched = false;
+
+    if let Some(hint) = hint {
+        match kind {
+            EntityKind::Tenants if hint.tab == Tab::Tenants => {
+                if let Some(idx) = app.tenants.items.iter().position(|t| t.id == hint.id) {
+                    app.tenants.state.select(Some(idx));
+                    matched = true;
+                }
+            }
+            EntityKind::Users if hint.tab == Tab::Users => {
+                if let Some(idx) = app.users.items.iter().position(|u| u.id == hint.id) {
+                    app.users.state.select(Some(idx));
+                    matched = true;
+                }
+            }
+            EntityKind::Groups if hint.tab == Tab::Groups => {
+                if let Some(idx) = app.groups.items.iter().position(|g| g.id == hint.id) {
+                    app.groups.state.select(Some(idx));
+                    matched = true;
+                }
+            }
+            EntityKind::Clients if hint.tab == Tab::Clients => {
+                if let Some(idx) = app.clients.items.iter().position(|c| c.id == hint.id) {
+                    app.clients.state.select(Some(idx));
+                    matched = true;
+                }
+            }
+            EntityKind::UserGroups if hint.tab == Tab::UserGroups => {
+                if let Some(idx) = app
+                    .user_groups
+                    .items
+                    .iter()
+                    .position(|row| row.user_id == hint.id)
+                {
+                    app.user_groups.state.select(Some(idx));
+                    matched = true;
+                } else if let Some(label) = &hint.label {
+                    if let Some(idx) = app
+                        .user_groups
+                        .items
+                        .iter()
+                        .position(|row| row.username == *label)
+                    {
+                        app.user_groups.state.select(Some(idx));
+                        matched = true;
+                    }
+                }
+            }
+            EntityKind::GroupUsers if hint.tab == Tab::GroupUsers => {
+                if let Some(idx) = app
+                    .group_users
+                    .items
+                    .iter()
+                    .position(|row| row.group_id == hint.id)
+                {
+                    app.group_users.state.select(Some(idx));
+                    matched = true;
+                } else if let Some(label) = &hint.label {
+                    if let Some(idx) = app
+                        .group_users
+                        .items
+                        .iter()
+                        .position(|row| row.name == *label)
+                    {
+                        app.group_users.state.select(Some(idx));
+                        matched = true;
+                    }
+                }
+            }
+            EntityKind::ClientClaims if hint.tab == Tab::ClientClaims => {
+                if let Some(idx) = app
+                    .client_claims
+                    .items
+                    .iter()
+                    .position(|row| row.client_id == hint.id)
+                {
+                    app.client_claims.state.select(Some(idx));
+                    matched = true;
+                } else if let Some(label) = &hint.label {
+                    if let Some(idx) = app
+                        .client_claims
+                        .items
+                        .iter()
+                        .position(|row| row.client_name == *label)
+                    {
+                        app.client_claims.state.select(Some(idx));
+                        matched = true;
+                    }
+                }
+            }
+            EntityKind::GroupClaims if hint.tab == Tab::GroupClaims => {
+                if let Some(idx) = app
+                    .group_claims
+                    .items
+                    .iter()
+                    .position(|row| row.group_id == hint.id)
+                {
+                    app.group_claims.state.select(Some(idx));
+                    matched = true;
+                } else if let Some(label) = &hint.label {
+                    if let Some(idx) = app
+                        .group_claims
+                        .items
+                        .iter()
+                        .position(|row| row.group_name == *label)
+                    {
+                        app.group_claims.state.select(Some(idx));
+                        matched = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+        app.pending_select = None;
+    }
+
+    if !matched {
+        match kind {
+            EntityKind::Tenants => app.tenants.select_first(),
+            EntityKind::Users => app.users.select_first(),
+            EntityKind::Groups => app.groups.select_first(),
+            EntityKind::Clients => app.clients.select_first(),
+            EntityKind::ClientClaims => app.client_claims.select_first(),
+            EntityKind::GroupClaims => app.group_claims.select_first(),
+            EntityKind::UserGroups => app.user_groups.select_first(),
+            EntityKind::GroupUsers => app.group_users.select_first(),
+        }
+    }
+}
+
+async fn fetch_users(http: &HttpClient, page: usize) -> Result<Vec<UserRow>> {
+    let path = format!("/admin/users?page={page}&limit={PAGE_SIZE}");
+    let body = http.get(&path).await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse users: {e}"))
+}
+
+async fn fetch_tenants(http: &HttpClient, page: usize) -> Result<Vec<TenantRow>> {
+    let path = format!("/admin/tenants?page={page}&limit={PAGE_SIZE}");
+    let body = http.get(&path).await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse tenants: {e}"))
+}
+
+async fn fetch_tenant_domains(http: &HttpClient, tenant_id: &str) -> Result<Vec<TenantDomainRow>> {
+    let path = format!("/admin/tenants/{tenant_id}/domains");
+    let body = http.get(&path).await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse tenant domains: {e}"))
+}
+
+async fn fetch_groups_tree(http: &HttpClient) -> Result<(Vec<GroupRow>, HashMap<String, usize>)> {
+    // Fetch complete tree in single API call
+    let body = http.get("/admin/groups/tree").await?;
+
+    #[derive(serde::Deserialize)]
+    struct GroupTreeItem {
+        id: String,
+        name: String,
+        description: Option<String>,
+        is_virtual: bool,
+        children: Vec<String>,
+    }
+
+    let tree: Vec<GroupTreeItem> = serde_json::from_str(&body)
+        .map_err(|e| anyhow!("Failed to parse groups tree: {e}"))?;
+
+    if tree.is_empty() {
+        return Ok((Vec::new(), HashMap::new()));
+    }
+
+    let mut group_map: HashMap<String, GroupRow> = HashMap::new();
+    let mut children_map: HashMap<String, Vec<String>> = HashMap::new();
+
+    // First pass: build group_map
+    for item in &tree {
+        group_map.insert(
+            item.id.clone(),
+            GroupRow {
+                id: item.id.clone(),
+                name: item.name.clone(),
+                description: item.description.clone(),
+                is_virtual: item.is_virtual,
+            },
+        );
+    }
+
+    // Second pass: build children_map with sorted children
+    for item in tree {
+        let mut sorted_children = item.children;
+        sorted_children.sort_by(|a, b| {
+            let name_a = group_map.get(a).map(|g| g.name.as_str()).unwrap_or("");
+            let name_b = group_map.get(b).map(|g| g.name.as_str()).unwrap_or("");
+            name_a.cmp(name_b)
+        });
+        children_map.insert(item.id, sorted_children);
+    }
+
+    let mut child_set: HashSet<String> = HashSet::new();
+    for child_ids in children_map.values() {
+        for child_id in child_ids {
+            child_set.insert(child_id.clone());
+        }
+    }
+
+    let mut root_ids: Vec<String> = group_map
+        .values()
+        .filter(|group| !child_set.contains(&group.id))
+        .map(|group| group.id.clone())
+        .collect();
+    root_ids.sort_by(|a, b| {
+        let name_a = group_map.get(a).map(|g| g.name.as_str()).unwrap_or("");
+        let name_b = group_map.get(b).map(|g| g.name.as_str()).unwrap_or("");
+        name_a.cmp(name_b)
+    });
+
+    let mut ordered = Vec::new();
+    let mut depths = HashMap::new();
+    let mut visited: HashSet<String> = HashSet::new();
+
+    fn visit_group(
+        id: &str,
+        depth: usize,
+        group_map: &HashMap<String, GroupRow>,
+        children_map: &HashMap<String, Vec<String>>,
+        ordered: &mut Vec<GroupRow>,
+        depths: &mut HashMap<String, usize>,
+        visited: &mut HashSet<String>,
+    ) {
+        if visited.contains(id) {
+            return;
+        }
+        let Some(group) = group_map.get(id) else {
+            return;
+        };
+        visited.insert(id.to_string());
+        depths.insert(id.to_string(), depth);
+        ordered.push(group.clone());
+        if let Some(children) = children_map.get(id) {
+            for child_id in children {
+                visit_group(
+                    child_id,
+                    depth + 1,
+                    group_map,
+                    children_map,
+                    ordered,
+                    depths,
+                    visited,
+                );
+            }
+        }
+    }
+
+    for root_id in root_ids {
+        visit_group(
+            &root_id,
+            0,
+            &group_map,
+            &children_map,
+            &mut ordered,
+            &mut depths,
+            &mut visited,
+        );
+    }
+
+    let mut remaining: Vec<String> = group_map
+        .values()
+        .filter(|group| !visited.contains(&group.id))
+        .map(|group| group.id.clone())
+        .collect();
+    remaining.sort_by(|a, b| {
+        let name_a = group_map.get(a).map(|g| g.name.as_str()).unwrap_or("");
+        let name_b = group_map.get(b).map(|g| g.name.as_str()).unwrap_or("");
+        name_a.cmp(name_b)
+    });
+    for id in remaining {
+        visit_group(
+            &id,
+            0,
+            &group_map,
+            &children_map,
+            &mut ordered,
+            &mut depths,
+            &mut visited,
+        );
+    }
+
+    Ok((ordered, depths))
+}
+
+async fn fetch_parent_groups(http: &HttpClient, child_id: &str) -> Result<Vec<String>> {
+    let groups = fetch_groups_for_selector(http).await?;
+    let mut parents = Vec::new();
+    for group in groups {
+        let body = http
+            .get(&format!("/admin/groups/{}/children", group.id))
+            .await?;
+        let children: Vec<GroupRow> =
+            serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse group children: {e}"))?;
+        if children.iter().any(|child| child.id == child_id) {
+            parents.push(group.id);
+        }
+    }
+    Ok(parents)
+}
+
+async fn fetch_users_for_selector(http: &HttpClient) -> Result<Vec<UserRow>> {
+    let body = http.get("/admin/users?page=1&limit=1000").await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse users: {e}"))
+}
+
+async fn fetch_groups_for_selector(http: &HttpClient) -> Result<Vec<GroupRow>> {
+    let body = http.get("/admin/groups?page=1&limit=1000").await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse groups: {e}"))
+}
+
+async fn fetch_clients_for_selector(http: &HttpClient) -> Result<Vec<ClientRow>> {
+    let body = http.get("/admin/oauth-clients?page=1&limit=1000").await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse clients: {e}"))
+}
+
+async fn fetch_clients(http: &HttpClient, page: usize) -> Result<Vec<ClientRow>> {
+    let path = format!("/admin/oauth-clients?page={page}&limit={PAGE_SIZE}");
+    let body = http.get(&path).await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse clients: {e}"))
+}
+
+async fn fetch_claim_maps_flat(http: &HttpClient) -> Result<Vec<ClaimMapRow>> {
+    let body = http.get("/admin/claim-maps?page=1&limit=2000").await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse claim maps: {e}"))
+}
+
+async fn fetch_client_claims(http: &HttpClient) -> Result<Vec<ClientClaimsRow>> {
+    let claim_maps = fetch_claim_maps_flat(http).await?;
+    let clients = fetch_clients_for_selector(http).await?;
+    let groups = fetch_groups_for_selector(http).await?;
+    Ok(aggregate_client_claims(claim_maps, clients, groups))
+}
+
+async fn fetch_group_claims(http: &HttpClient) -> Result<Vec<GroupClaimsRow>> {
+    let claim_maps = fetch_claim_maps_flat(http).await?;
+    let clients = fetch_clients_for_selector(http).await?;
+    let groups = fetch_groups_for_selector(http).await?;
+    Ok(aggregate_group_claims(claim_maps, clients, groups))
+}
+
+async fn fetch_user_groups(http: &HttpClient) -> Result<Vec<UserGroupsRow>> {
+    let rows = fetch_user_groups_flat(http).await?;
+    Ok(aggregate_user_groups(rows))
+}
+
+async fn fetch_group_users(http: &HttpClient) -> Result<Vec<GroupUsersRow>> {
+    let rows = fetch_user_groups_flat(http).await?;
+    let groups = fetch_groups_for_selector(http).await?;
+    Ok(aggregate_group_users(rows, groups))
+}
+
+async fn fetch_user_groups_flat(http: &HttpClient) -> Result<Vec<UserGroupRow>> {
+    let body = http.get("/admin/user-groups?page=1&limit=2000").await?;
+    serde_json::from_str(&body).map_err(|e| anyhow!("Failed to parse user groups: {e}"))
+}
+
+fn open_create_form(app: &mut App) -> Result<()> {
+    let form = match app.tab {
+        Tab::Tenants => FormState {
+            title: "Create tenant".to_string(),
+            action: FormAction::CreateTenant,
+            fields: vec![
+                FormField::new("slug", String::new()),
+                FormField::new("name", String::new()),
+                FormField::new("mode", "single".to_string()),
+                FormField::boolean("is_active", true),
+            ],
+            index: 0,
+            error: None,
+            patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+        },
+        Tab::Users => FormState {
+            title: "Create user".to_string(),
+            action: FormAction::CreateUser,
+            fields: vec![
+                FormField::new("username", String::new()),
+                FormField::new("email", String::new()),
+                FormField::secret("password", String::new()),
+                FormField::boolean("is_active", true),
+            ],
+            index: 0,
+            error: None,
+            patterns: Some(Vec::new()), // New user has no patterns yet
+            client_patterns: None,
+            claim_map_patterns: None,
+        },
+        Tab::Groups => FormState {
+            title: "Create group".to_string(),
+            action: FormAction::CreateGroup,
+            fields: vec![
+                FormField::new("name", String::new()),
+                FormField::new("description", String::new()).optional(),
+                FormField::boolean("is_virtual", false),
+            ],
+            index: 0,
+            error: None,
+            patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+        },
+        Tab::Clients => FormState {
+            title: "Create client".to_string(),
+            action: FormAction::CreateClient,
+            fields: vec![
+                FormField::new("client_id", String::new()),
+                FormField::secret("client_secret", String::new()).optional(),
+                FormField::new("name", String::new()),
+                FormField::new("redirect_uris", String::new()).optional().read_only(),
+                FormField::new("grant_types", String::new()).read_only(),
+                FormField::new("scope", String::new()).read_only(),
+                FormField::boolean("is_active", true),
+                FormField::boolean("is_public", false),
+                FormField::new("groups_claim_mode", "effective".to_string()),
+                FormField::boolean("include_claim_maps", true),
+                FormField::boolean("ignore_virtual_groups", false),
+            ],
+            index: 0,
+            error: None,
+            patterns: None,
+            client_patterns: Some(Vec::new()), // New client has no patterns yet
+            claim_map_patterns: None,
+        },
+        Tab::ClientClaims | Tab::GroupClaims => {
+            open_claim_editor(app)?;
+            return Ok(());
+        }
+        Tab::UserGroups => FormState {
+            title: "Create new user-group".to_string(),
+            action: FormAction::AddUserGroup,
+            fields: vec![
+                FormField::new("user_id", String::new()),
+                FormField::new("group_id", String::new()),
+            ],
+            index: 0,
+            error: None,
+            patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+        },
+        Tab::GroupUsers => {
+            let fields = vec![
+                FormField::new("group_id", String::new()),
+                FormField::new("user_id", String::new()),
+            ];
+            FormState {
+                title: "Create new group-user".to_string(),
+                action: FormAction::AddUserGroup,
+                fields,
+                index: 0,
+                error: None,
+                patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+            }
+        }
+    };
+    app.mode = Mode::Form;
+    app.form = Some(form);
+    Ok(())
+}
+
+fn open_create_subgroup_form(app: &mut App) -> Result<()> {
+    let row = selected_item(&app.groups.items, app.groups.selected())?;
+    let form = FormState {
+        title: "Create subgroup".to_string(),
+        action: FormAction::CreateChildGroup(row.id.clone()),
+        fields: vec![
+            FormField::new("parent_group_id", row.id.clone()).read_only(),
+            FormField::new("name", String::new()),
+            FormField::new("description", String::new()).optional(),
+            FormField::boolean("is_virtual", false),
+        ],
+        index: 0,
+        error: None,
+        patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+    };
+    app.mode = Mode::Form;
+    app.form = Some(form);
+    Ok(())
+}
+
+async fn open_move_group_parent_selector(app: &mut App, http: &HttpClient) -> Result<()> {
+    let row = selected_item(&app.groups.items, app.groups.selected())?;
+    let mut groups = fetch_groups_for_selector(http).await?;
+    groups.retain(|group| group.id != row.id);
+    groups.insert(
+        0,
+        GroupRow {
+            id: ROOT_GROUP_ID.to_string(),
+            name: "<root>".to_string(),
+            description: Some("no parent".to_string()),
+            is_virtual: false,
+        },
+    );
+    app.selector = Some(SelectorState::new_groups(
+        groups,
+        SelectorTarget::GroupParent {
+            child_id: row.id.clone(),
+        },
+    ));
+    app.mode = Mode::Selector;
+    Ok(())
+}
+
+async fn open_edit_form(app: &mut App, http: &HttpClient) -> Result<()> {
+    let form = match app.tab {
+        Tab::Tenants => {
+            let tenant = selected_item(&app.tenants.items, app.tenants.selected())?;
+            FormState {
+                title: "Update tenant".to_string(),
+                action: FormAction::UpdateTenant(tenant.id.clone()),
+                fields: vec![
+                    FormField::new("slug", tenant.slug.clone()).optional(),
+                    FormField::new("name", tenant.name.clone()).optional(),
+                    FormField::new("mode", tenant.mode.clone()).optional(),
+                    FormField::boolean("is_active", tenant.is_active).optional(),
+                ],
+                index: 0,
+                error: None,
+                patterns: None,
+                client_patterns: None,
+                claim_map_patterns: None,
+            }
+        }
+        Tab::Users => {
+            let user = selected_item(&app.users.items, app.users.selected())?;
+
+            // Fetch patterns for this user
+            let url = format!("{}/admin/users/{}/group-patterns", http.base_url, user.id);
+            let patterns = http
+                .client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", http.token))
+                .send()
+                .await
+                .context("Failed to fetch user group patterns")?
+                .json::<Vec<UserGroupPatternRow>>()
+                .await
+                .ok();
+
+            FormState {
+                title: "Update user".to_string(),
+                action: FormAction::UpdateUser(user.id.clone()),
+                fields: vec![
+                    FormField::new("email", user.email.clone()).optional(),
+                    FormField::secret("password", String::new()).optional(),
+                    FormField::boolean("is_active", user.is_active),
+                ],
+                index: 0,
+                error: None,
+                patterns,
+                client_patterns: None,
+            claim_map_patterns: None,
+            }
+        }
+        Tab::Groups => {
+            let group = selected_item(&app.groups.items, app.groups.selected())?;
+            FormState {
+                title: "Update group".to_string(),
+                action: FormAction::UpdateGroup(group.id.clone()),
+                fields: vec![
+                    FormField::new("name", group.name.clone()).optional(),
+                    FormField::new("description", group.description.clone().unwrap_or_default())
+                        .optional(),
+                    FormField::boolean("is_virtual", group.is_virtual).optional(),
+                ],
+                index: 0,
+                error: None,
+                patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+            }
+        }
+        Tab::Clients => {
+            let client = selected_item(&app.clients.items, app.clients.selected())?;
+
+            // Fetch patterns for this client
+            let url = format!("{}/admin/oauth-clients/{}/group-patterns", http.base_url, client.id);
+            let client_patterns = http
+                .client
+                .get(&url)
+                .header("Authorization", format!("Bearer {}", http.token))
+                .send()
+                .await
+                .context("Failed to fetch client group patterns")?
+                .json::<Vec<ClientGroupPatternRow>>()
+                .await
+                .ok();
+
+            FormState {
+                title: "Update client".to_string(),
+                action: FormAction::UpdateClient(client.id.clone()),
+                fields: vec![
+                    FormField::new("name", client.name.clone()).optional(),
+                    FormField::secret("client_secret", String::new()).optional(),
+                    FormField::new("redirect_uris", client.redirect_uris.join(", ")).optional().read_only(),
+                    FormField::new("grant_types", client.grant_types.join(", ")).optional().read_only(),
+                    FormField::new("scope", client.scope.clone()).optional().read_only(),
+                    FormField::boolean("is_active", client.is_active),
+                    FormField::boolean("is_public", client.is_public).optional(),
+                    FormField::new("groups_claim_mode", client.groups_claim_mode.clone())
+                        .optional(),
+                    FormField::boolean("include_claim_maps", client.include_claim_maps)
+                        .optional(),
+                    FormField::boolean("ignore_virtual_groups", client.ignore_virtual_groups)
+                        .optional(),
+                ],
+                index: 0,
+                error: None,
+                patterns: None,
+                client_patterns,
+                claim_map_patterns: None,
+            }
+        }
+        Tab::ClientClaims | Tab::GroupClaims => {
+            open_claim_editor(app)?;
+            return Ok(());
+        }
+        Tab::UserGroups => {
+            let row = selected_item(&app.user_groups.items, app.user_groups.selected())?;
+            let groups = fetch_groups_for_selector(http).await?;
+            let options = groups
+                .into_iter()
+                .map(|group| RelationOption {
+                    id: group.id.clone(),
+                    label: format!("{} ({})", group.name, group.id),
+                    selected: row.groups.iter().any(|g| g.id == group.id),
+                })
+                .collect::<Vec<_>>();
+            app.relation_editor = Some(RelationEditorState::new(
+                RelationMode::UserGroups {
+                    user_id: row.user_id.clone(),
+                    username: row.username.clone(),
+                },
+                options,
+            ));
+            app.mode = Mode::RelationEditor;
+            return Ok(());
+        }
+        Tab::GroupUsers => {
+            let row = selected_item(&app.group_users.items, app.group_users.selected())?;
+            let users = fetch_users_for_selector(http).await?;
+            let options = users
+                .into_iter()
+                .map(|user| RelationOption {
+                    id: user.id.clone(),
+                    label: format!("{} <{}>", user.username, user.email),
+                    selected: row.users.iter().any(|u| u.id == user.id),
+                })
+                .collect::<Vec<_>>();
+            app.relation_editor = Some(RelationEditorState::new(
+                RelationMode::GroupUsers {
+                    group_id: row.group_id.clone(),
+                    group_name: row.name.clone(),
+                },
+                options,
+            ));
+            app.mode = Mode::RelationEditor;
+            return Ok(());
+        }
+    };
+    app.mode = Mode::Form;
+    app.form = Some(form);
+    Ok(())
+}
+
+fn open_delete_form(app: &mut App) -> Result<()> {
+    let form = match app.tab {
+        Tab::Tenants => {
+            let tenant = selected_item(&app.tenants.items, app.tenants.selected())?;
+            FormState {
+                title: "Delete tenant".to_string(),
+                action: FormAction::DeleteTenant(tenant.id.clone()),
+                fields: vec![FormField::boolean("confirm", false)],
+                index: 0,
+                error: None,
+                patterns: None,
+                client_patterns: None,
+                claim_map_patterns: None,
+            }
+        }
+        Tab::Users => {
+            let user = selected_item(&app.users.items, app.users.selected())?;
+            FormState {
+                title: "Delete user".to_string(),
+                action: FormAction::DeleteUser(user.id.clone()),
+                fields: vec![FormField::boolean("confirm", false)],
+                index: 0,
+                error: None,
+                patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+            }
+        }
+        Tab::Groups => {
+            let group = selected_item(&app.groups.items, app.groups.selected())?;
+            FormState {
+                title: "Delete group".to_string(),
+                action: FormAction::DeleteGroup(group.id.clone()),
+                fields: vec![FormField::boolean("confirm", false)],
+                index: 0,
+                error: None,
+                patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+            }
+        }
+        Tab::Clients => {
+            let client = selected_item(&app.clients.items, app.clients.selected())?;
+            FormState {
+                title: "Delete client".to_string(),
+                action: FormAction::DeleteClient(client.id.clone()),
+                fields: vec![FormField::boolean("confirm", false)],
+                index: 0,
+                error: None,
+                patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+            }
+        }
+        Tab::ClientClaims | Tab::GroupClaims => {
+            return Err(anyhow!("Use edit to manage claim maps"));
+        }
+        Tab::UserGroups => {
+            return Err(anyhow!("Use remove to delete user-group mappings"));
+        }
+        Tab::GroupUsers => {
+            return Err(anyhow!("Use remove to delete user-group mappings"));
+        }
+    };
+    app.mode = Mode::Form;
+    app.form = Some(form);
+    Ok(())
+}
+
+fn open_add_user_group(app: &mut App) -> Result<()> {
+    if app.tab != Tab::UserGroups && app.tab != Tab::GroupUsers {
+        return Ok(());
+    }
+    let mut fields = vec![
+        FormField::new("user_id", String::new()),
+        FormField::new("group_id", String::new()),
+    ];
+    if app.tab == Tab::UserGroups {
+        if let Some(row) = app
+            .user_groups
+            .selected()
+            .and_then(|idx| app.user_groups.items.get(idx))
+        {
+            fields[0] = FormField::new("user_id", row.user_id.clone());
+        }
+    }
+    if app.tab == Tab::GroupUsers {
+        if let Some(row) = app
+            .group_users
+            .selected()
+            .and_then(|idx| app.group_users.items.get(idx))
+        {
+            fields[1] = FormField::new("group_id", row.group_id.clone());
+        }
+    }
+    let form = FormState {
+        title: "Add user to group".to_string(),
+        action: FormAction::AddUserGroup,
+        fields,
+        index: 0,
+        error: None,
+        patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+    };
+    app.mode = Mode::Form;
+    app.form = Some(form);
+    Ok(())
+}
+
+fn open_remove_user_group(app: &mut App) -> Result<()> {
+    if app.tab != Tab::UserGroups && app.tab != Tab::GroupUsers {
+        return Ok(());
+    }
+    let mut fields = vec![
+        FormField::new("user_id", String::new()),
+        FormField::new("group_id", String::new()),
+    ];
+    if app.tab == Tab::UserGroups {
+        if let Some(row) = app
+            .user_groups
+            .selected()
+            .and_then(|idx| app.user_groups.items.get(idx))
+        {
+            fields[0] = FormField::new("user_id", row.user_id.clone());
+        }
+    }
+    if app.tab == Tab::GroupUsers {
+        if let Some(row) = app
+            .group_users
+            .selected()
+            .and_then(|idx| app.group_users.items.get(idx))
+        {
+            fields[1] = FormField::new("group_id", row.group_id.clone());
+        }
+    }
+    let form = FormState {
+        title: "Remove user from group".to_string(),
+        action: FormAction::RemoveUserGroup,
+        fields,
+        index: 0,
+        error: None,
+        patterns: None,
+            client_patterns: None,
+            claim_map_patterns: None,
+    };
+    app.mode = Mode::Form;
+    app.form = Some(form);
+    Ok(())
+}
+
+async fn open_tenant_domains_manager(app: &mut App, http: &HttpClient) -> Result<()> {
+    let tenant = selected_item(&app.tenants.items, app.tenants.selected())?;
+    let domains = fetch_tenant_domains(http, &tenant.id).await?;
+    app.tenant_domains.insert(tenant.id.clone(), domains.clone());
+    app.tenant_domains_manager = Some(TenantDomainsManagerState {
+        tenant_id: tenant.id.clone(),
+        tenant_slug: tenant.slug.clone(),
+        domains,
+        index: 0,
+    });
+    app.mode = Mode::TenantDomainsManager;
+    Ok(())
+}
+
+async fn refresh_tenant_domains_manager(app: &mut App, http: &HttpClient) -> Result<()> {
+    let Some(manager) = app.tenant_domains_manager.as_mut() else {
+        return Ok(());
+    };
+    let domains = fetch_tenant_domains(http, &manager.tenant_id).await?;
+    manager.domains = domains.clone();
+    if manager.index >= manager.domains.len() && manager.index > 0 {
+        manager.index -= 1;
+    }
+    app.tenant_domains
+        .insert(manager.tenant_id.clone(), domains);
+    Ok(())
+}
+
+fn open_create_tenant_domain_form(app: &mut App) -> Result<()> {
+    let manager = app
+        .tenant_domains_manager
+        .as_ref()
+        .context("Tenant domains manager is not open")?;
+    app.form = Some(FormState {
+        title: "Create tenant domain".to_string(),
+        action: FormAction::CreateTenantDomain(manager.tenant_id.clone()),
+        fields: vec![
+            FormField::new("domain", String::new()),
+            FormField::boolean("is_primary", false),
+            FormField::boolean("is_active", true),
+        ],
+        index: 0,
+        error: None,
+        patterns: None,
+        client_patterns: None,
+        claim_map_patterns: None,
+    });
+    app.mode = Mode::Form;
+    Ok(())
+}
+
+fn open_edit_tenant_domain_form(app: &mut App) -> Result<()> {
+    let manager = app
+        .tenant_domains_manager
+        .as_ref()
+        .context("Tenant domains manager is not open")?;
+    let domain = manager
+        .domains
+        .get(manager.index)
+        .context("No domain selected")?;
+    app.form = Some(FormState {
+        title: "Update tenant domain".to_string(),
+        action: FormAction::UpdateTenantDomain {
+            tenant_id: manager.tenant_id.clone(),
+            domain_id: domain.id.clone(),
+        },
+        fields: vec![
+            FormField::new("domain", domain.domain.clone()).optional(),
+            FormField::boolean("is_primary", domain.is_primary).optional(),
+            FormField::boolean("is_active", domain.is_active).optional(),
+        ],
+        index: 0,
+        error: None,
+        patterns: None,
+        client_patterns: None,
+        claim_map_patterns: None,
+    });
+    app.mode = Mode::Form;
+    Ok(())
+}
+
+fn open_delete_tenant_domain_form(app: &mut App) -> Result<()> {
+    let manager = app
+        .tenant_domains_manager
+        .as_ref()
+        .context("Tenant domains manager is not open")?;
+    let domain = manager
+        .domains
+        .get(manager.index)
+        .context("No domain selected")?;
+    app.form = Some(FormState {
+        title: "Delete tenant domain".to_string(),
+        action: FormAction::DeleteTenantDomain {
+            tenant_id: manager.tenant_id.clone(),
+            domain_id: domain.id.clone(),
+        },
+        fields: vec![
+            FormField::new("domain", domain.domain.clone()).read_only(),
+            FormField::boolean("confirm", false),
+        ],
+        index: 0,
+        error: None,
+        patterns: None,
+        client_patterns: None,
+        claim_map_patterns: None,
+    });
+    app.mode = Mode::Form;
+    Ok(())
+}
+
+async fn open_user_patterns_manager(app: &mut App, _http: &HttpClient) -> Result<()> {
+    // This should only be called from Create/Update User form
+    let form = app.form.as_ref().context("No active form")?;
+
+    let (user_id, username) = match &form.action {
+        FormAction::CreateUser => {
+            // For new user, use empty ID and get username from form
+            let username = form.fields.iter()
+                .find(|f| f.label == "username")
+                .map(|f| f.value().to_string())
+                .unwrap_or_else(|| "<new user>".to_string());
+            (String::new(), username)
+        }
+        FormAction::UpdateUser(id) => {
+            // For existing user, get from users list
+            let user = app.users.items.iter()
+                .find(|u| &u.id == id)
+                .context("User not found")?;
+            (user.id.clone(), user.username.clone())
+        }
+        _ => bail!("Patterns manager only available for Create/Update User"),
+    };
+
+    let patterns = form.patterns.clone().unwrap_or_default();
+
+    app.user_patterns_manager = Some(UserPatternsManagerState {
+        user_id,
+        username,
+        patterns,
+        index: 0,
+    });
+    app.mode = Mode::UserPatternsManager;
+
+    Ok(())
+}
+
+async fn open_client_patterns_manager(app: &mut App, _http: &HttpClient) -> Result<()> {
+    // This should only be called from Create/Update Client form
+    let form = app.form.as_ref().context("No active form")?;
+
+    let (client_id, client_name) = match &form.action {
+        FormAction::CreateClient => {
+            // For new client, use empty ID and get name from form
+            let client_name = form.fields.iter()
+                .find(|f| f.label == "name")
+                .map(|f| f.value().to_string())
+                .unwrap_or_else(|| "<new client>".to_string());
+            (String::new(), client_name)
+        }
+        FormAction::UpdateClient(id) => {
+            // For existing client, get from clients list
+            let client = app.clients.items.iter()
+                .find(|c| &c.id == id)
+                .context("Client not found")?;
+            (client.id.clone(), client.name.clone())
+        }
+        _ => bail!("Patterns manager only available for Create/Update Client"),
+    };
+
+    let patterns = form.client_patterns.clone().unwrap_or_default();
+
+    app.client_patterns_manager = Some(ClientPatternsManagerState {
+        client_id,
+        client_name,
+        patterns,
+        index: 0,
+    });
+    app.mode = Mode::ClientPatternsManager;
+
+    Ok(())
+}
+
+async fn open_claim_map_patterns_manager(app: &mut App, http: &HttpClient) -> Result<()> {
+    // Can be called from Form mode (UpdateClaimMap) or ClaimEditor mode
+    let (claim_map_id, claim_name) = if let Some(form) = &app.form {
+        // Called from Form mode
+        if let FormAction::UpdateClaimMap(id) = &form.action {
+            let name = form.fields.iter()
+                .find(|f| f.label == "claim_name")
+                .map(|f| f.value())
+                .unwrap_or_default();
+            (id.clone(), name)
+        } else {
+            bail!("Form is not for updating claim map");
+        }
+    } else if let Some(claim_editor) = &app.claim_editor {
+        // Called from ClaimEditor mode (old behavior)
+        let selected_idx = claim_editor.index;
+        if selected_idx >= claim_editor.items.len() {
+            bail!("No claim selected");
+        }
+        let claim = &claim_editor.items[selected_idx];
+        let id = claim.id.as_ref().context("Cannot manage patterns for unsaved claim")?;
+        (id.clone(), claim.claim_name.clone())
+    } else {
+        bail!("No claim editor or form active");
+    };
+
+    // Fetch patterns from API
+    let url = format!("{}/admin/claim-maps/{}/patterns", http.base_url, claim_map_id);
+    let response = http
+        .client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", http.token))
+        .send()
+        .await?;
+
+    let patterns: Vec<ClaimMapPatternRow> = if response.status().is_success() {
+        response.json().await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    app.claim_map_patterns_manager = Some(ClaimMapPatternsManagerState {
+        claim_map_id: claim_map_id.clone(),
+        claim_name: claim_name.clone(),
+        patterns,
+        index: 0,
+    });
+    app.mode = Mode::ClaimMapPatternsManager;
+
+    Ok(())
+}
+
+fn open_claim_editor(app: &mut App) -> Result<()> {
+    match app.tab {
+        Tab::ClientClaims => {
+            let row = selected_item(&app.client_claims.items, app.client_claims.selected())?;
+            let items = row
+                .claims
+                .iter()
+                .map(|claim| ClaimEditorItem {
+                    id: Some(claim.id.clone()),
+                    claim_name: claim.claim_name.clone(),
+                    claim_value_kind: claim.claim_value_kind.clone(),
+                    claim_value: claim.claim_value.clone(),
+                    other_id: claim.other_id.clone(),
+                    other_label: claim.other_label.clone(),
+                })
+                .collect::<Vec<_>>();
+            app.claim_editor = Some(ClaimEditorState::new(
+                ClaimEditorMode::ClientClaims {
+                    client_id: row.client_id.clone(),
+                    client_label: row.client_name.clone(),
+                },
+                items,
+            ));
+            app.mode = Mode::ClaimEditor;
+        }
+        Tab::GroupClaims => {
+            let row = selected_item(&app.group_claims.items, app.group_claims.selected())?;
+            let items = row
+                .claims
+                .iter()
+                .map(|claim| ClaimEditorItem {
+                    id: Some(claim.id.clone()),
+                    claim_name: claim.claim_name.clone(),
+                    claim_value_kind: claim.claim_value_kind.clone(),
+                    claim_value: claim.claim_value.clone(),
+                    other_id: claim.other_id.clone(),
+                    other_label: claim.other_label.clone(),
+                })
+                .collect::<Vec<_>>();
+            app.claim_editor = Some(ClaimEditorState::new(
+                ClaimEditorMode::GroupClaims {
+                    group_id: row.group_id.clone(),
+                    group_label: row.group_name.clone(),
+                },
+                items,
+            ));
+            app.mode = Mode::ClaimEditor;
+        }
+        _ => return Err(anyhow!("Claim editor is not available for this view")),
+    }
+    Ok(())
+}
+
+fn selected_item<T>(items: &[T], idx: Option<usize>) -> Result<&T> {
+    idx.and_then(|i| items.get(i))
+        .ok_or_else(|| anyhow!("No row selected"))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FormResult {
+    Continue,
+    Submitted,
+    Cancelled,
+}
+
+async fn handle_form_event(
+    app: &mut App,
+    event: Event,
+    http: &HttpClient,
+) -> Result<FormResult> {
+    let Event::Key(key) = event else {
+        return Ok(FormResult::Continue);
+    };
+
+    let Some(form) = app.form.as_mut() else {
+        return Ok(FormResult::Cancelled);
+    };
+    let label = form.fields.get(form.index).map(|field| field.label);
+    let is_add_remove = matches!(
+        form.action,
+        FormAction::AddUserGroup | FormAction::RemoveUserGroup
+    );
+    let mut request_selector: Option<(SelectorKind, SelectorTarget)> = None;
+
+    match key.code {
+        KeyCode::Esc => return Ok(FormResult::Cancelled),
+        KeyCode::Tab => form.index = (form.index + 1) % form.fields.len(),
+        KeyCode::BackTab => {
+            if form.index == 0 {
+                form.index = form.fields.len() - 1;
+            } else {
+                form.index -= 1;
+            }
+        }
+        KeyCode::Enter => {
+            // For read-only forms (UpdateClaimMap), Enter closes the form on last field
+            let is_readonly_form = matches!(form.action, FormAction::UpdateClaimMap(_));
+
+            if form.index + 1 < form.fields.len() {
+                form.index += 1;
+            } else if is_readonly_form {
+                // For read-only forms at last field, close the form (return to ClaimEditor)
+                return Ok(FormResult::Cancelled);
+            } else {
+                // Submit editable forms
+                match submit_form(http, form).await {
+                    Ok(result) => {
+                        app.set_status(result.message);
+                        app.pending_select = result.select_id;
+                        return Ok(FormResult::Submitted);
+                    }
+                    Err(err) => {
+                        form.error = Some(err.to_string());
+                    }
+                }
+            }
+        }
+        KeyCode::Char(' ') => {
+            if let Some(field) = form.fields.get_mut(form.index) {
+                if matches!(field.kind, FieldKind::Bool) {
+                    field.toggle_bool();
+                    return Ok(FormResult::Continue);
+                }
+            }
+        }
+        KeyCode::Char('g') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if label == Some("grant_types") {
+                    let values = split_csv(Some(form.fields[form.index].value()));
+                    app.picker = Some(PickerState::new_grant_types(&values));
+                    app.mode = Mode::Picker;
+                    return Ok(FormResult::Continue);
+                }
+                if is_add_remove && label == Some("group_id") {
+                    request_selector = Some((
+                        SelectorKind::Groups,
+                        SelectorTarget::FormField("group_id"),
+                    ));
+                }
+            }
+        }
+        KeyCode::Char('e') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && label == Some("groups_claim_mode")
+            {
+                let current = form.fields[form.index].value();
+                app.picker = Some(PickerState::new_groups_claim_mode(&current));
+                app.mode = Mode::Picker;
+                return Ok(FormResult::Continue);
+            }
+        }
+        KeyCode::Char('u') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if label == Some("redirect_uris") {
+                    // Open array editor for redirect_uris
+                    let current_value = form.fields[form.index].value();
+                    let values: Vec<Input> = if current_value.is_empty() {
+                        vec![]
+                    } else {
+                        current_value
+                            .split(',')
+                            .map(|s| input_with_value(s.trim().to_string()))
+                            .collect()
+                    };
+                    app.array_editor = Some(ArrayEditorState {
+                        title: "Edit Redirect URIs".to_string(),
+                        field_name: "redirect_uris".to_string(),
+                        values,
+                        index: 0,
+                        editing: false,
+                        error: None,
+                    });
+                    app.mode = Mode::ArrayEditor;
+                    return Ok(FormResult::Continue);
+                } else if is_add_remove && label == Some("user_id") {
+                    request_selector =
+                        Some((SelectorKind::Users, SelectorTarget::FormField("user_id")));
+                }
+            }
+        }
+        KeyCode::Char('o') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && label == Some("scope") {
+                // Open scope selector
+                let current_value = form.fields[form.index].value();
+                let current_scopes: HashSet<String> = current_value
+                    .split_whitespace()
+                    .map(|s| s.to_string())
+                    .collect();
+
+                let standard = [
+                    "openid".to_string(),
+                    "profile".to_string(),
+                    "email".to_string(),
+                    "groups".to_string(),
+                    "offline_access".to_string(),
+                ];
+
+                let standard_scopes: Vec<(String, bool)> = standard
+                    .iter()
+                    .map(|s| (s.clone(), current_scopes.contains(s)))
+                    .collect();
+
+                let custom_scopes: Vec<String> = current_scopes
+                    .iter()
+                    .filter(|s| !standard.contains(s))
+                    .cloned()
+                    .collect();
+
+                app.scope_selector = Some(ScopeSelectorState {
+                    standard_scopes,
+                    custom_scopes,
+                    custom_input: Input::default(),
+                    index: 0,
+                    mode: ScopeSelectorMode::SelectStandard,
+                });
+                app.mode = Mode::ScopeSelector;
+                return Ok(FormResult::Continue);
+            }
+        }
+        KeyCode::Char('p') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) {
+                // Open user patterns manager from Create/Update User form
+                if matches!(form.action, FormAction::CreateUser | FormAction::UpdateUser(_)) {
+                    if let Err(err) = open_user_patterns_manager(app, http).await {
+                        app.set_status(format!("Failed to open patterns manager: {}", err));
+                    }
+                    return Ok(FormResult::Continue);
+                }
+                // Open client patterns manager from Create/Update Client form
+                if matches!(form.action, FormAction::CreateClient | FormAction::UpdateClient(_)) {
+                    if let Err(err) = open_client_patterns_manager(app, http).await {
+                        app.set_status(format!("Failed to open patterns manager: {}", err));
+                    }
+                    return Ok(FormResult::Continue);
+                }
+                // Open claim map patterns manager from Update ClaimMap form
+                if matches!(form.action, FormAction::UpdateClaimMap(_)) {
+                    if let Err(err) = open_claim_map_patterns_manager(app, http).await {
+                        app.set_status(format!("Failed to open patterns manager: {}", err));
+                    }
+                    return Ok(FormResult::Continue);
+                }
+            }
+        }
+        KeyCode::Char('m') => {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && label == Some("groups_claim_mode")
+            {
+                let current = form.fields[form.index].value();
+                app.picker = Some(PickerState::new_groups_claim_mode(&current));
+                app.mode = Mode::Picker;
+                return Ok(FormResult::Continue);
+            }
+        }
+        _ => {}
+    }
+
+    if let Some((kind, target)) = request_selector {
+        let _ = form;
+        if let Err(err) = open_selector(app, http, kind, target).await {
+            if let Some(form) = app.form.as_mut() {
+                form.error = Some(err.to_string());
+            }
+        }
+        return Ok(FormResult::Continue);
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        if let Some(field) = form.fields.get_mut(form.index) {
+            if field.label == "client_secret" && key.code == KeyCode::Char('g') {
+                let secret = generate_secret();
+                field.input = input_with_value(secret);
+            }
+            if field.label == "password" && key.code == KeyCode::Char('g') {
+                app.password_gen = Some(PasswordGenState::new(field.label));
+                app.mode = Mode::PasswordGen;
+                return Ok(FormResult::Continue);
+            }
+            if matches!(field.kind, FieldKind::Secret) && key.code == KeyCode::Char('v') {
+                field.reveal = !field.reveal;
+            }
+        }
+        return Ok(FormResult::Continue);
+    }
+
+    if let Some(field) = form.fields.get_mut(form.index) {
+        if !matches!(field.kind, FieldKind::Bool)
+            && field.label != "groups_claim_mode"
+            && !field.read_only
+        {
+            field.input.handle_event(&event);
+        }
+    }
+
+    Ok(FormResult::Continue)
+}
+
+struct SubmitResult {
+    message: String,
+    select_id: Option<SelectHint>,
+}
+
+async fn submit_form(http: &HttpClient, form: &FormState) -> Result<SubmitResult> {
+    match &form.action {
+        FormAction::CreateTenant => {
+            let payload = json!({
+                "slug": field_value(form, "slug")?,
+                "name": field_value(form, "name")?,
+                "mode": field_value(form, "mode")?,
+                "is_active": field_bool(form, "is_active"),
+            });
+            let body = http.post_json("/admin/tenants", payload).await?;
+            let created: TenantRow =
+                serde_json::from_str(&body).context("Failed to parse tenant response")?;
+            Ok(SubmitResult {
+                message: "Tenant created".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Tenants,
+                    id: created.id,
+                    label: Some(created.slug),
+                }),
+            })
+        }
+        FormAction::UpdateTenant(id) => {
+            let payload = json!({
+                "slug": field_optional(form, "slug"),
+                "name": field_optional(form, "name"),
+                "mode": field_optional(form, "mode"),
+                "is_active": field_bool(form, "is_active"),
+            });
+            http.put_json(&format!("/admin/tenants/{id}"), payload).await?;
+            Ok(SubmitResult {
+                message: "Tenant updated".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Tenants,
+                    id: id.clone(),
+                    label: None,
+                }),
+            })
+        }
+        FormAction::DeleteTenant(id) => {
+            ensure_confirm(form)?;
+            http.delete(&format!("/admin/tenants/{id}")).await?;
+            Ok(SubmitResult {
+                message: "Tenant deleted".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::CreateTenantDomain(tenant_id) => {
+            let payload = json!({
+                "domain": field_value(form, "domain")?,
+                "is_primary": field_bool(form, "is_primary"),
+                "is_active": field_bool(form, "is_active"),
+            });
+            http.post_json(&format!("/admin/tenants/{tenant_id}/domains"), payload)
+                .await?;
+            Ok(SubmitResult {
+                message: "Tenant domain created".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::UpdateTenantDomain {
+            tenant_id,
+            domain_id,
+        } => {
+            let payload = json!({
+                "domain": field_optional(form, "domain"),
+                "is_primary": field_bool_optional(form, "is_primary"),
+                "is_active": field_bool_optional(form, "is_active"),
+            });
+            http.put_json(
+                &format!("/admin/tenants/{tenant_id}/domains/{domain_id}"),
+                payload,
+            )
+            .await?;
+            Ok(SubmitResult {
+                message: "Tenant domain updated".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::DeleteTenantDomain {
+            tenant_id,
+            domain_id,
+        } => {
+            ensure_confirm(form)?;
+            http.delete(&format!("/admin/tenants/{tenant_id}/domains/{domain_id}"))
+                .await?;
+            Ok(SubmitResult {
+                message: "Tenant domain deleted".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::CreateUser => {
+            let payload = json!({
+                "username": field_value(form, "username")?,
+                "email": field_value(form, "email")?,
+                "password": field_value(form, "password")?,
+                "is_active": field_bool(form, "is_active"),
+            });
+            let body = http.post_json("/admin/users", payload).await?;
+            let created: UserRow =
+                serde_json::from_str(&body).context("Failed to parse user response")?;
+            Ok(SubmitResult {
+                message: "User created".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Users,
+                    id: created.id,
+                    label: Some(created.username.clone()),
+                }),
+            })
+        }
+        FormAction::UpdateUser(id) => {
+            let email = field_optional(form, "email");
+            let password = field_optional(form, "password");
+            let payload = json!({
+                "email": email,
+                "password": password,
+                "is_active": field_bool(form, "is_active"),
+            });
+            http.put_json(&format!("/admin/users/{id}"), payload)
+                .await?;
+            Ok(SubmitResult {
+                message: "User updated".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Users,
+                    id: id.clone(),
+                    label: None,
+                }),
+            })
+        }
+        FormAction::DeleteUser(id) => {
+            ensure_confirm(form)?;
+            http.delete(&format!("/admin/users/{id}")).await?;
+            Ok(SubmitResult {
+                message: "User deleted".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::CreateGroup => {
+            let payload = json!({
+                "name": field_value(form, "name")?,
+                "description": field_optional(form, "description"),
+                "is_virtual": field_bool(form, "is_virtual"),
+            });
+            let body = http.post_json("/admin/groups", payload).await?;
+            let created: GroupRow =
+                serde_json::from_str(&body).context("Failed to parse group response")?;
+            Ok(SubmitResult {
+                message: "Group created".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Groups,
+                    id: created.id,
+                    label: Some(created.name.clone()),
+                }),
+            })
+        }
+        FormAction::CreateChildGroup(parent_id) => {
+            let payload = json!({
+                "name": field_value(form, "name")?,
+                "description": field_optional(form, "description"),
+                "is_virtual": field_bool(form, "is_virtual"),
+            });
+            let body = http.post_json("/admin/groups", payload).await?;
+            let created: GroupRow =
+                serde_json::from_str(&body).context("Failed to parse group response")?;
+            let payload = json!({ "child_group_id": created.id });
+            http.post_json(&format!("/admin/groups/{parent_id}/children"), payload)
+                .await?;
+            Ok(SubmitResult {
+                message: "Subgroup created".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Groups,
+                    id: created.id,
+                    label: Some(created.name.clone()),
+                }),
+            })
+        }
+        FormAction::UpdateGroup(id) => {
+            let payload = json!({
+                "name": field_optional(form, "name"),
+                "description": field_optional(form, "description"),
+                "is_virtual": field_bool_optional(form, "is_virtual"),
+            });
+            http.put_json(&format!("/admin/groups/{id}"), payload)
+                .await?;
+            Ok(SubmitResult {
+                message: "Group updated".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Groups,
+                    id: id.clone(),
+                    label: None,
+                }),
+            })
+        }
+        FormAction::DeleteGroup(id) => {
+            ensure_confirm(form)?;
+            http.delete(&format!("/admin/groups/{id}")).await?;
+            Ok(SubmitResult {
+                message: "Group deleted".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::CreateClient => {
+            let client_id = field_value(form, "client_id")?;
+            let redirect_uris = parse_redirect_uris(
+                field_optional(form, "redirect_uris"),
+                client_id == "cli-tools",
+            )?;
+            let grant_types = parse_grant_types(Some(field_value(form, "grant_types")?))?;
+            let groups_claim_mode =
+                parse_groups_claim_mode(&field_value(form, "groups_claim_mode")?)?;
+
+            // client_secret is optional for public clients
+            let client_secret = field_optional(form, "client_secret");
+            let is_public = field_bool(form, "is_public");
+
+            let payload = json!({
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "name": field_value(form, "name")?,
+                "redirect_uris": redirect_uris,
+                "grant_types": grant_types,
+                "scope": field_value(form, "scope")?,
+                "is_active": field_bool(form, "is_active"),
+                "is_public": is_public,
+                "groups_claim_mode": groups_claim_mode,
+                "include_claim_maps": field_bool(form, "include_claim_maps"),
+                "ignore_virtual_groups": field_bool(form, "ignore_virtual_groups"),
+            });
+            let body = http.post_json("/admin/oauth-clients", payload).await?;
+            let created: ClientRow =
+                serde_json::from_str(&body).context("Failed to parse client response")?;
+            Ok(SubmitResult {
+                message: "Client created".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Clients,
+                    id: created.id,
+                    label: Some(created.client_id.clone()),
+                }),
+            })
+        }
+        FormAction::UpdateClient(id) => {
+            let client_id = fetch_client_id_by_uuid(http, id).await?;
+            let redirect_uris = parse_redirect_uris(
+                field_optional(form, "redirect_uris"),
+                client_id == "cli-tools",
+            )?;
+            let grant_types = parse_grant_types(field_optional(form, "grant_types"))?;
+            let groups_claim_mode = match field_optional(form, "groups_claim_mode") {
+                Some(value) => Some(parse_groups_claim_mode(&value)?),
+                None => None,
+            };
+            let payload = json!({
+                "name": field_optional(form, "name"),
+                "client_secret": field_optional(form, "client_secret"),
+                "redirect_uris": if redirect_uris.is_empty() { None } else { Some(redirect_uris) },
+                "grant_types": if grant_types.is_empty() { None } else { Some(grant_types) },
+                "scope": field_optional(form, "scope"),
+                "is_active": field_bool(form, "is_active"),
+                "is_public": field_bool_optional(form, "is_public"),
+                "groups_claim_mode": groups_claim_mode,
+                "include_claim_maps": field_bool_optional(form, "include_claim_maps"),
+                "ignore_virtual_groups": field_bool_optional(form, "ignore_virtual_groups"),
+            });
+            http.put_json(&format!("/admin/oauth-clients/{id}"), payload)
+                .await?;
+            Ok(SubmitResult {
+                message: "Client updated".to_string(),
+                select_id: Some(SelectHint {
+                    tab: Tab::Clients,
+                    id: id.clone(),
+                    label: None,
+                }),
+            })
+        }
+        FormAction::DeleteClient(id) => {
+            ensure_confirm(form)?;
+            http.delete(&format!("/admin/oauth-clients/{id}")).await?;
+            Ok(SubmitResult {
+                message: "Client deleted".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::AddUserGroup => {
+            let user_id = field_value(form, "user_id")?;
+            let group_id = field_value(form, "group_id")?;
+            let payload = json!({ "group_id": group_id });
+            http.post_json(&format!("/admin/users/{user_id}/groups"), payload)
+                .await?;
+            Ok(SubmitResult {
+                message: "User added to group".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::RemoveUserGroup => {
+            let user_id = field_value(form, "user_id")?;
+            let group_id = field_value(form, "group_id")?;
+            http.delete(&format!("/admin/users/{user_id}/groups/{group_id}"))
+                .await?;
+            Ok(SubmitResult {
+                message: "User removed from group".to_string(),
+                select_id: None,
+            })
+        }
+        FormAction::CreateClaimMap | FormAction::UpdateClaimMap(_) => {
+            // These forms are read-only and don't submit
+            bail!("Claim map forms are read-only")
+        }
+    }
+}
+
+fn field_value(form: &FormState, name: &str) -> Result<String> {
+    let value = field_optional(form, name).unwrap_or_default();
+    if value.trim().is_empty() {
+        return Err(anyhow!("Field '{name}' is required"));
+    }
+    Ok(value)
+}
+
+fn field_optional(form: &FormState, name: &str) -> Option<String> {
+    form.fields
+        .iter()
+        .find(|f| f.label == name)
+        .map(|f| f.value().trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+fn field_bool(form: &FormState, name: &str) -> bool {
+    form.fields
+        .iter()
+        .find(|f| f.label == name)
+        .map(|f| f.value().eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+fn field_bool_optional(form: &FormState, name: &str) -> Option<bool> {
+    form.fields
+        .iter()
+        .find(|f| f.label == name)
+        .map(|f| f.value().trim().to_string())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+}
+
+fn ensure_confirm(form: &FormState) -> Result<()> {
+    if !field_bool(form, "confirm") {
+        return Err(anyhow!("Confirmation is required"));
+    }
+    Ok(())
+}
+
+fn set_field_value(form: &mut FormState, name: &str, value: String) {
+    if let Some(field) = form.fields.iter_mut().find(|f| f.label == name) {
+        field.input = input_with_value(value);
+    }
+}
+
+async fn open_selector(
+    app: &mut App,
+    http: &HttpClient,
+    kind: SelectorKind,
+    target: SelectorTarget,
+) -> Result<()> {
+    match kind {
+        SelectorKind::Users => {
+            let users = fetch_users_for_selector(http).await?;
+            app.selector = Some(SelectorState::new_users(users, target));
+        }
+        SelectorKind::Groups => {
+            let groups = fetch_groups_for_selector(http).await?;
+            app.selector = Some(SelectorState::new_groups(groups, target));
+        }
+        SelectorKind::Clients => {
+            let clients = fetch_clients_for_selector(http).await?;
+            app.selector = Some(SelectorState::new_clients(clients, target));
+        }
+    }
+    app.mode = Mode::Selector;
+    Ok(())
+}
+
+fn split_csv(input: Option<String>) -> Vec<String> {
+    input
+        .unwrap_or_default()
+        .split(',')
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_string())
+        .collect()
+}
+
+fn input_with_value(value: String) -> Input {
+    let mut input = Input::default();
+    input = input.with_value(value);
+    input
+}
+
+fn generate_secret() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rng().fill_bytes(&mut bytes);
+    BASE64_STANDARD.encode(bytes)
+}
+
+fn parse_redirect_uris(input: Option<String>, _allow_wildcard: bool) -> Result<Vec<String>> {
+    let values = split_csv(input);
+    let mut parsed = Vec::new();
+    for value in values {
+        if value.contains('*') {
+            // Parse URL with wildcard replaced temporarily for validation
+            let test_uri = value.replace('*', "8080");
+            let url = Url::parse(&test_uri)
+                .map_err(|_| anyhow!("Invalid redirect_uri format: {value}"))?;
+
+            // Check if host is loopback (localhost, 127.0.0.1, ::1)
+            let host = url.host_str().unwrap_or("");
+            let is_loopback = host == "localhost"
+                || host == "127.0.0.1"
+                || host == "[::1]"
+                || host == "::1";
+
+            if !is_loopback {
+                return Err(anyhow!(
+                    "Wildcard '*' in redirect_uri is only allowed for loopback addresses (localhost, 127.0.0.1, ::1), got: {}",
+                    host
+                ));
+            }
+
+            // Ensure wildcard is only in port position
+            if !value.contains(":*/") && !value.ends_with(":*") {
+                return Err(anyhow!(
+                    "Wildcard '*' must be used for port only (e.g., http://localhost:*/callback)"
+                ));
+            }
+
+            parsed.push(value);
+            continue;
+        }
+        let url = Url::parse(&value).map_err(|_| anyhow!("Invalid redirect_uri: {value}"))?;
+        let scheme = url.scheme();
+        if scheme != "http" && scheme != "https" {
+            return Err(anyhow!("redirect_uris must be http or https: {value}"));
+        }
+        parsed.push(value);
+    }
+    Ok(parsed)
+}
+
+async fn fetch_client_id_by_uuid(http: &HttpClient, id: &str) -> Result<String> {
+    let body = http.get("/admin/oauth-clients?page=1&limit=1000").await?;
+    let clients: Vec<ClientRow> =
+        serde_json::from_str(&body).context("Failed to parse client response")?;
+    clients
+        .into_iter()
+        .find(|client| client.id == id)
+        .map(|client| client.client_id)
+        .ok_or_else(|| anyhow!("Client not found"))
+}
+
+fn parse_grant_types(input: Option<String>) -> Result<Vec<String>> {
+    let values = split_csv(input);
+    if values.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut mapped = Vec::new();
+    for value in values {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let mut normalized: Option<String> = None;
+        for (label, stored) in supported_grant_types() {
+            if trimmed == label || trimmed == stored {
+                normalized = Some(stored.to_string());
+                break;
+            }
+        }
+        let Some(resolved) = normalized else {
+            return Err(anyhow!("Unsupported grant_type: {trimmed}"));
+        };
+        if !mapped.iter().any(|item: &String| item == &resolved) {
+            mapped.push(resolved);
+        }
+    }
+    Ok(mapped)
+}
+
+fn parse_groups_claim_mode(value: &str) -> Result<String> {
+    match value.trim() {
+        "effective" | "direct" | "none" => Ok(value.trim().to_string()),
+        _ => Err(anyhow!(
+            "groups_claim_mode must be one of: effective, direct, none"
+        )),
+    }
+}
+
+fn aggregate_user_groups(rows: Vec<UserGroupRow>) -> Vec<UserGroupsRow> {
+    let mut map: std::collections::BTreeMap<String, UserGroupsRow> = std::collections::BTreeMap::new();
+    for row in rows {
+        let entry = map.entry(row.user_id.clone()).or_insert_with(|| UserGroupsRow {
+            user_id: row.user_id.clone(),
+            username: row.username.clone(),
+            email: row.email.clone(),
+            groups: Vec::new(),
+        });
+        entry.groups.push(GroupSummary {
+            id: row.group_id.clone(),
+            name: row.group_name.clone(),
+        });
+    }
+    let mut values: Vec<UserGroupsRow> = map.into_values().collect();
+    values.sort_by(|a, b| a.username.cmp(&b.username));
+    values
+}
+
+fn aggregate_group_users(rows: Vec<UserGroupRow>, groups: Vec<GroupRow>) -> Vec<GroupUsersRow> {
+    let mut group_meta: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
+    for group in groups {
+        group_meta.insert(group.id.clone(), (group.name.clone(), group.description.clone()));
+    }
+
+    let mut map: std::collections::BTreeMap<String, GroupUsersRow> = std::collections::BTreeMap::new();
+    for row in rows {
+        let (name, description) = group_meta
+            .get(&row.group_id)
+            .cloned()
+            .unwrap_or((row.group_name.clone(), None));
+        let entry = map.entry(row.group_id.clone()).or_insert_with(|| GroupUsersRow {
+            group_id: row.group_id.clone(),
+            name,
+            description,
+            users: Vec::new(),
+        });
+        entry.users.push(UserSummary {
+            id: row.user_id.clone(),
+            username: row.username.clone(),
+            email: row.email.clone(),
+        });
+    }
+    let mut values: Vec<GroupUsersRow> = map.into_values().collect();
+    values.sort_by(|a, b| a.name.cmp(&b.name));
+    values
+}
+
+fn aggregate_client_claims(
+    rows: Vec<ClaimMapRow>,
+    clients: Vec<ClientRow>,
+    groups: Vec<GroupRow>,
+) -> Vec<ClientClaimsRow> {
+    let mut client_meta: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for client in clients {
+        client_meta.insert(client.id.clone(), client.name.clone());
+    }
+    let mut group_meta: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for group in groups {
+        group_meta.insert(group.id.clone(), group.name.clone());
+    }
+
+    let mut map: std::collections::BTreeMap<String, ClientClaimsRow> =
+        std::collections::BTreeMap::new();
+    for (id, name) in client_meta.iter() {
+        map.entry(id.clone()).or_insert_with(|| ClientClaimsRow {
+            client_id: id.clone(),
+            client_name: name.clone(),
+            claims: Vec::new(),
+        });
+    }
+    for row in rows {
+        let client_name = client_meta
+            .get(&row.client_id)
+            .cloned()
+            .unwrap_or_else(|| row.client_id.clone());
+        let group_name = group_meta
+            .get(&row.group_id)
+            .cloned()
+            .unwrap_or_else(|| row.group_id.clone());
+        let entry = map.entry(row.client_id.clone()).or_insert_with(|| ClientClaimsRow {
+            client_id: row.client_id.clone(),
+            client_name,
+            claims: Vec::new(),
+        });
+        entry.claims.push(ClaimSummary {
+            id: row.id.clone(),
+            claim_name: row.claim_name.clone(),
+            claim_value_kind: row.claim_value_kind.clone(),
+            claim_value: row.claim_value.clone(),
+            other_id: row.group_id.clone(),
+            other_label: group_name,
+        });
+    }
+    let mut values: Vec<ClientClaimsRow> = map.into_values().collect();
+    values.sort_by(|a, b| a.client_name.cmp(&b.client_name));
+    values
+}
+
+fn aggregate_group_claims(
+    rows: Vec<ClaimMapRow>,
+    clients: Vec<ClientRow>,
+    groups: Vec<GroupRow>,
+) -> Vec<GroupClaimsRow> {
+    let mut client_meta: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for client in clients {
+        client_meta.insert(client.id.clone(), client.name.clone());
+    }
+    let mut group_meta: std::collections::HashMap<String, (String, Option<String>)> =
+        std::collections::HashMap::new();
+    for group in groups {
+        group_meta.insert(group.id.clone(), (group.name.clone(), group.description.clone()));
+    }
+
+    let mut map: std::collections::BTreeMap<String, GroupClaimsRow> =
+        std::collections::BTreeMap::new();
+    for (id, (name, description)) in group_meta.iter() {
+        map.entry(id.clone()).or_insert_with(|| GroupClaimsRow {
+            group_id: id.clone(),
+            group_name: name.clone(),
+            description: description.clone(),
+            claims: Vec::new(),
+        });
+    }
+    for row in rows {
+        let (group_name, description) = group_meta
+            .get(&row.group_id)
+            .cloned()
+            .unwrap_or((row.group_id.clone(), None));
+        let client_name = client_meta
+            .get(&row.client_id)
+            .cloned()
+            .unwrap_or_else(|| row.client_id.clone());
+        let entry = map.entry(row.group_id.clone()).or_insert_with(|| GroupClaimsRow {
+            group_id: row.group_id.clone(),
+            group_name,
+            description,
+            claims: Vec::new(),
+        });
+        entry.claims.push(ClaimSummary {
+            id: row.id.clone(),
+            claim_name: row.claim_name.clone(),
+            claim_value_kind: row.claim_value_kind.clone(),
+            claim_value: row.claim_value.clone(),
+            other_id: row.client_id.clone(),
+            other_label: client_name,
+        });
+    }
+    let mut values: Vec<GroupClaimsRow> = map.into_values().collect();
+    values.sort_by(|a, b| a.group_name.cmp(&b.group_name));
+    values
+}
+
+fn generate_password(password_gen: &PasswordGenState) -> Result<String> {
+    let length: usize = password_gen
+        .length
+        .value()
+        .parse()
+        .unwrap_or(16)
+        .clamp(8, 128);
+
+    let mut charset = String::new();
+    if password_gen.include_upper {
+        charset.push_str("ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    }
+    if password_gen.include_lower {
+        charset.push_str("abcdefghijklmnopqrstuvwxyz");
+    }
+    if password_gen.include_digits {
+        charset.push_str("0123456789");
+    }
+    if password_gen.include_special_safe {
+        charset.push_str("-_.:;@+");
+    }
+    if password_gen.include_special_full {
+        charset.push_str("!@#$%^&*()[]{}<>?/\\\\|`~'\"");
+    }
+
+    if charset.is_empty() {
+        return Err(anyhow!("Vyber alespoň jednu sadu znaků."));
+    }
+
+    let bytes = charset.as_bytes();
+    let mut rng = rand::rng();
+    let mut password = String::with_capacity(length);
+    for _ in 0..length {
+        let idx = (rng.next_u32() as usize) % bytes.len();
+        password.push(bytes[idx] as char);
+    }
+
+    Ok(password)
+}
+
+async fn apply_relation_changes(
+    editor: &RelationEditorState,
+    http: &HttpClient,
+) -> Result<()> {
+    let desired = editor.selected_ids();
+    let original = editor.original_selected.clone();
+
+    let to_add: Vec<String> = desired.difference(&original).cloned().collect();
+    let to_remove: Vec<String> = original.difference(&desired).cloned().collect();
+
+    match &editor.mode {
+        RelationMode::UserGroups { user_id, .. } => {
+            for group_id in to_add {
+                let payload = json!({ "group_id": group_id });
+                http.post_json(&format!("/admin/users/{user_id}/groups"), payload)
+                    .await?;
+            }
+            for group_id in to_remove {
+                http.delete(&format!("/admin/users/{user_id}/groups/{group_id}"))
+                    .await?;
+            }
+        }
+        RelationMode::GroupUsers { group_id, .. } => {
+            for user_id in to_add {
+                let payload = json!({ "group_id": group_id });
+                http.post_json(&format!("/admin/users/{user_id}/groups"), payload)
+                    .await?;
+            }
+            for user_id in to_remove {
+                http.delete(&format!("/admin/users/{user_id}/groups/{group_id}"))
+                    .await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn apply_group_parent_move(http: &HttpClient, request: &GroupMoveRequest) -> Result<()> {
+    if let Some(new_parent) = &request.new_parent_id {
+        if new_parent == &request.child_id {
+            bail!("Skupina nemůže být sama sobě rodičem");
+        }
+    }
+
+    let current_parents = fetch_parent_groups(http, &request.child_id).await?;
+    for parent_id in &current_parents {
+        if request.new_parent_id.as_ref() == Some(parent_id) {
+            continue;
+        }
+        http.delete(&format!(
+            "/admin/groups/{parent_id}/children/{}",
+            request.child_id
+        ))
+        .await?;
+    }
+
+    if let Some(new_parent) = &request.new_parent_id {
+        if !current_parents.iter().any(|id| id == new_parent) {
+            let payload = json!({ "child_group_id": request.child_id });
+            http.post_json(&format!("/admin/groups/{new_parent}/children"), payload)
+                .await?;
+        }
+    }
+
+    Ok(())
+}
+
+fn relation_hint(mode: &RelationMode) -> SelectHint {
+    match mode {
+        RelationMode::UserGroups { user_id, username } => SelectHint {
+            tab: Tab::UserGroups,
+            id: user_id.clone(),
+            label: Some(username.clone()),
+        },
+        RelationMode::GroupUsers { group_id, group_name } => SelectHint {
+            tab: Tab::GroupUsers,
+            id: group_id.clone(),
+            label: Some(group_name.clone()),
+        },
+    }
+}
+
+async fn apply_claim_changes(editor: &ClaimEditorState, http: &HttpClient) -> Result<()> {
+    let mut original_map: std::collections::HashMap<String, ClaimEditorItem> =
+        std::collections::HashMap::new();
+    for item in &editor.original {
+        if let Some(id) = &item.id {
+            original_map.insert(id.clone(), item.clone());
+        }
+    }
+
+    let mut current_map: std::collections::HashMap<String, ClaimEditorItem> =
+        std::collections::HashMap::new();
+    for item in &editor.items {
+        if let Some(id) = &item.id {
+            current_map.insert(id.clone(), item.clone());
+        }
+    }
+
+    let original_ids: std::collections::HashSet<String> = original_map.keys().cloned().collect();
+    let current_ids: std::collections::HashSet<String> = current_map.keys().cloned().collect();
+
+    let mut to_delete: Vec<String> = original_ids
+        .difference(&current_ids)
+        .cloned()
+        .collect();
+    let mut to_create: Vec<ClaimEditorItem> = Vec::new();
+
+    for item in &editor.items {
+        match &item.id {
+            None => to_create.push(item.clone()),
+            Some(id) => {
+                if let Some(original) = original_map.get(id) {
+                    let changed = original.claim_name != item.claim_name
+                        || original.claim_value_kind != item.claim_value_kind
+                        || original.claim_value != item.claim_value
+                        || original.other_id != item.other_id;
+                    if changed {
+                        to_delete.push(id.clone());
+                        to_create.push(item.clone());
+                    }
+                } else {
+                    to_create.push(item.clone());
+                }
+            }
+        }
+    }
+
+    for id in to_delete {
+        http.delete(&format!("/admin/claim-maps/{id}")).await?;
+    }
+
+    for item in to_create {
+        let payload = match &editor.mode {
+            ClaimEditorMode::ClientClaims { client_id, .. } => json!({
+                "client_id": client_id,
+                "group_id": item.other_id,
+                "claim_name": item.claim_name,
+                "claim_value": item.claim_value,
+            }),
+            ClaimEditorMode::GroupClaims { group_id, .. } => json!({
+                "client_id": item.other_id,
+                "group_id": group_id,
+                "claim_name": item.claim_name,
+                "claim_value": item.claim_value,
+            }),
+        };
+        http.post_json("/admin/claim-maps", payload).await?;
+    }
+
+    Ok(())
+}
+
+fn claim_editor_hint(mode: &ClaimEditorMode) -> SelectHint {
+    match mode {
+        ClaimEditorMode::ClientClaims {
+            client_id,
+            client_label,
+        } => SelectHint {
+            tab: Tab::ClientClaims,
+            id: client_id.clone(),
+            label: Some(client_label.clone()),
+        },
+        ClaimEditorMode::GroupClaims {
+            group_id,
+            group_label,
+        } => SelectHint {
+            tab: Tab::GroupClaims,
+            id: group_id.clone(),
+            label: Some(group_label.clone()),
+        },
+    }
+}
+
+fn draw_ui(frame: &mut ratatui::Frame, app: &mut App) {
+    let mut cursor_visible = false;
+    let size = frame.area();
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
+        .split(size);
+
+    draw_tabs(frame, layout[0], app);
+    draw_body(frame, layout[1], app);
+    draw_status(frame, layout[2], layout[3], app);
+    if let Some(manager) = &app.tenant_domains_manager {
+        draw_tenant_domains_manager(frame, size, manager);
+        cursor_visible = false;
+    }
+
+    // Draw forms that are NOT UpdateClaimMap (those are drawn later, after claim_editor)
+    if let Some(form) = &app.form {
+        if !matches!(form.action, FormAction::UpdateClaimMap(_)) {
+            draw_form(frame, size, app, &mut cursor_visible);
+        }
+    }
+    if let Some(editor) = &app.relation_editor {
+        draw_relation_editor(frame, size, editor);
+    }
+    if let Some(editor) = &app.claim_editor {
+        draw_claim_editor(frame, size, editor);
+    }
+    // Draw UpdateClaimMap forms AFTER claim_editor (so they appear on top)
+    if let Some(form) = &app.form {
+        if matches!(form.action, FormAction::UpdateClaimMap(_)) {
+            draw_form(frame, size, app, &mut cursor_visible);
+        }
+    }
+    if let Some(entry) = &app.claim_entry {
+        let allow_cursor = app.claim_value_editor.is_none() && app.picker.is_none();
+        draw_claim_entry(frame, size, app, entry, &mut cursor_visible, allow_cursor);
+    }
+    if let Some(editor) = &app.claim_value_editor {
+        draw_claim_value_editor(frame, size, editor, &mut cursor_visible);
+    }
+    if let Some(editor) = &app.array_editor {
+        draw_array_editor(frame, size, editor, &mut cursor_visible);
+    }
+    if let Some(selector) = &app.scope_selector {
+        draw_scope_selector(frame, size, selector, &mut cursor_visible);
+    }
+    if let Some(manager) = &app.user_patterns_manager {
+        draw_user_patterns_manager(frame, size, manager);
+        cursor_visible = false; // Hide cursor from underlying form
+    }
+    if let Some(pattern_form) = &app.pattern_form {
+        draw_pattern_form(frame, size, pattern_form, &mut cursor_visible);
+    }
+    if let Some(manager) = &app.client_patterns_manager {
+        draw_client_patterns_manager(frame, size, manager);
+        cursor_visible = false; // Hide cursor from underlying form
+    }
+    if let Some(pattern_form) = &app.client_pattern_form {
+        draw_client_pattern_form(frame, size, pattern_form, &mut cursor_visible);
+    }
+    if let Some(manager) = &app.claim_map_patterns_manager {
+        draw_claim_map_patterns_manager(frame, size, manager);
+        cursor_visible = false;
+    }
+    if let Some(pattern_form) = &app.claim_map_pattern_form {
+        draw_claim_map_pattern_form(frame, size, pattern_form, &mut cursor_visible);
+    }
+    if let Some(picker) = &app.picker {
+        draw_picker(frame, size, picker);
+    }
+
+    if app.form.is_none() {
+        if let Some(selector) = &app.selector {
+            draw_selector(frame, size, selector, &mut cursor_visible);
+        }
+    }
+
+    if app.filter_active {
+        let area = centered_rect(60, 5, size);
+        frame.render_widget(Clear, area);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title("Filter")
+            .style(Style::default().fg(Color::Yellow))
+            .padding(Padding::horizontal(1));
+        let line = Line::from(vec![
+            Span::raw("> "),
+            Span::raw(app.filter_input.value()),
+        ]);
+        let input = Paragraph::new(vec![Line::from(""), line])
+            .block(block)
+            .style(Style::default().fg(Color::Yellow));
+        frame.render_widget(input, area);
+        let cursor_x = area.x + 2 + app.filter_input.visual_cursor() as u16;
+        let cursor_y = area.y + 2;
+        frame.set_cursor_position((cursor_x, cursor_y));
+        cursor_visible = true;
+    }
+
+    if app.help_active {
+        draw_help(frame, size, app);
+        cursor_visible = false;
+    }
+
+    app.cursor_visible = cursor_visible;
+}
+
+fn draw_tabs(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let titles: Vec<Line> = App::tabs()
+        .iter()
+        .map(|(_, title)| Line::from(Span::raw(*title)))
+        .collect();
+    let selected = App::tabs()
+        .iter()
+        .position(|(tab, _)| *tab == app.tab)
+        .unwrap_or(0);
+    let tabs = Tabs::new(titles)
+        .select(selected)
+        .block(Block::default().borders(Borders::ALL).title("simple-idm-ctl"))
+        .highlight_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+    frame.render_widget(tabs, area);
+}
+
+fn draw_body(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(14)])
+        .split(area);
+    draw_table(frame, chunks[0], app);
+    draw_details(frame, chunks[1], app);
+}
+
+fn draw_table(frame: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    let page = active_page(app);
+    let title = tab_title(app.tab);
+    let filtered = filtered_indices(app);
+    ensure_selection_in_filtered(app, &filtered);
+    let (header, rows, state, constraints) = match app.tab {
+        Tab::Tenants => (
+            Row::new(vec!["Slug", "Name", "Mode", "Active"]),
+            filtered
+                .iter()
+                .filter_map(|&idx| app.tenants.items.get(idx))
+                .map(|t| {
+                    Row::new(vec![
+                        Cell::from(t.slug.clone()),
+                        Cell::from(t.name.clone()),
+                        Cell::from(t.mode.clone()),
+                        Cell::from(t.is_active.to_string()),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.tenants.state,
+            vec![
+                Constraint::Percentage(20),
+                Constraint::Percentage(40),
+                Constraint::Percentage(20),
+                Constraint::Percentage(20),
+            ],
+        ),
+        Tab::Users => (
+            Row::new(vec!["Username", "Email", "Active"]),
+            filtered
+                .iter()
+                .filter_map(|&idx| app.users.items.get(idx))
+                .map(|u| {
+                    Row::new(vec![
+                        Cell::from(u.username.clone()),
+                        Cell::from(u.email.clone()),
+                        Cell::from(u.is_active.to_string()),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.users.state,
+            vec![
+                Constraint::Percentage(20),
+                Constraint::Percentage(30),
+                Constraint::Percentage(50),
+            ],
+        ),
+        Tab::Groups => (
+            Row::new(vec!["Name", "Description"]),
+            filtered
+                .iter()
+                .filter_map(|&idx| app.groups.items.get(idx))
+                .map(|g| {
+                    let depth = app.group_depths.get(&g.id).copied().unwrap_or(0);
+                    let prefix = if depth == 0 {
+                        String::new()
+                    } else {
+                        format!(" {}→ ", " ".repeat(depth.saturating_sub(1)))
+                    };
+                    let mut name_spans = vec![Span::raw(format!("{prefix}{}", g.name))];
+                    if g.is_virtual {
+                        name_spans.push(Span::styled(
+                            " [virt]",
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::DIM),
+                        ));
+                    }
+                    Row::new(vec![
+                        Cell::from(Line::from(name_spans)),
+                        Cell::from(g.description.clone().unwrap_or_default()),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.groups.state,
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
+        ),
+        Tab::Clients => (
+            Row::new(vec!["Client ID", "Name", "Grants"]),
+            filtered
+                .iter()
+                .filter_map(|&idx| app.clients.items.get(idx))
+                .map(|c| {
+                    // Highlight public clients in yellow
+                    let client_id_cell = if c.is_public {
+                        Cell::from(Line::from(vec![
+                            Span::styled(
+                                c.client_id.clone(),
+                                Style::default()
+                                    .fg(Color::Yellow)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]))
+                    } else {
+                        Cell::from(c.client_id.clone())
+                    };
+
+                    Row::new(vec![
+                        client_id_cell,
+                        Cell::from(c.name.clone()),
+                        Cell::from(c.grant_types.join(", ")),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.clients.state,
+            vec![
+                Constraint::Percentage(20),
+                Constraint::Percentage(30),
+                Constraint::Percentage(50),
+            ],
+        ),
+        Tab::ClientClaims => (
+            Row::new(vec!["Client", "Claims"]),
+            filtered
+                .iter()
+                .filter_map(|&idx| app.client_claims.items.get(idx))
+                .map(|row| {
+                    let claims = row
+                        .claims
+                        .iter()
+                        .map(|c| {
+                            let value = claim_value_to_display(&c.claim_value);
+                            if value.is_empty() {
+                                format!("{} ({})", c.claim_name, c.other_label)
+                            } else {
+                                format!("{}={} ({})", c.claim_name, value, c.other_label)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Row::new(vec![Cell::from(row.client_name.clone()), Cell::from(claims)])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.client_claims.state,
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
+        ),
+        Tab::GroupClaims => (
+            Row::new(vec!["Group", "Claims"]),
+            filtered
+                .iter()
+                .filter_map(|&idx| app.group_claims.items.get(idx))
+                .map(|row| {
+                    let claims = row
+                        .claims
+                        .iter()
+                        .map(|c| {
+                            let value = claim_value_to_display(&c.claim_value);
+                            if value.is_empty() {
+                                format!("{} ({})", c.claim_name, c.other_label)
+                            } else {
+                                format!("{}={} ({})", c.claim_name, value, c.other_label)
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    Row::new(vec![Cell::from(row.group_name.clone()), Cell::from(claims)])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.group_claims.state,
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
+        ),
+        Tab::UserGroups => (
+            Row::new(vec!["User", "Groups"]),
+            filtered
+                .iter()
+                .filter_map(|&idx| app.user_groups.items.get(idx))
+                .map(|ug| {
+                    Row::new(vec![
+                        Cell::from(ug.username.clone()),
+                        Cell::from(
+                            ug.groups
+                                .iter()
+                                .map(|g| g.name.clone())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.user_groups.state,
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
+        ),
+        Tab::GroupUsers => (
+            Row::new(vec!["Group", "Users"]),
+            filtered
+                .iter()
+                .filter_map(|&idx| app.group_users.items.get(idx))
+                .map(|gu| {
+                    Row::new(vec![
+                        Cell::from(gu.name.clone()),
+                        Cell::from(
+                            gu.users
+                                .iter()
+                                .map(|u| u.username.clone())
+                                .collect::<Vec<_>>()
+                                .join(", "),
+                        ),
+                    ])
+                })
+                .collect::<Vec<_>>(),
+            &mut app.group_users.state,
+            vec![Constraint::Percentage(20), Constraint::Percentage(80)],
+        ),
+    };
+
+    let table = Table::new(rows, constraints)
+        .header(header.style(Style::default().add_modifier(Modifier::BOLD)))
+        .block(Block::default().borders(Borders::ALL).title(format!(
+            "{title} (page {page})"
+        )))
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+    let mut table_state = TableState::default();
+    if let Some(selected) = state.selected() {
+        if let Some(pos) = filtered.iter().position(|&idx| idx == selected) {
+            table_state.select(Some(pos));
+        }
+    }
+    frame.render_stateful_widget(table, area, &mut table_state);
+}
+
+fn draw_details(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let lines = match app.tab {
+        Tab::Tenants => detail_tenants(app),
+        Tab::Users => detail_users(app),
+        Tab::Groups => detail_groups(app),
+        Tab::Clients => detail_clients(app),
+        Tab::ClientClaims => detail_client_claims(app),
+        Tab::GroupClaims => detail_group_claims(app),
+        Tab::UserGroups => detail_user_groups(app),
+        Tab::GroupUsers => detail_group_users(app),
+    };
+    let paragraph = Paragraph::new(lines)
+        .block(Block::default().borders(Borders::ALL).title("Details"))
+        .alignment(Alignment::Left);
+    frame.render_widget(paragraph, area);
+}
+
+fn draw_help(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let popup = centered_rect(70, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Help");
+    frame.render_widget(block, popup);
+
+    let lines = help_lines(app.tab);
+    let paragraph = Paragraph::new(lines)
+        .alignment(Alignment::Left)
+        .block(Block::default())
+        .wrap(Wrap { trim: true });
+    let inner = popup.inner(Margin::new(1, 1));
+    frame.render_widget(paragraph, inner);
+}
+
+fn help_lines(tab: Tab) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from("Tab/Shift+Tab switch tabs"),
+        Line::from("Up/Down select"),
+        Line::from("/ filter"),
+        Line::from("[ / ] page"),
+        Line::from("r refresh"),
+        Line::from("q quit"),
+        Line::from("h close help"),
+        Line::from(""),
+    ];
+
+    match tab {
+        Tab::Tenants => {
+            lines.push(Line::from("n new tenant"));
+            lines.push(Line::from("e edit tenant"));
+            lines.push(Line::from("d delete tenant"));
+            lines.push(Line::from("c manage domains"));
+        }
+        Tab::Groups => {
+            lines.push(Line::from("n new group"));
+            lines.push(Line::from("e edit group"));
+            lines.push(Line::from("d delete group"));
+            lines.push(Line::from("c add child"));
+            lines.push(Line::from("m move group"));
+        }
+        Tab::ClientClaims | Tab::GroupClaims => {
+            lines.push(Line::from("e edit claim maps"));
+        }
+        Tab::UserGroups => {
+            lines.push(Line::from("n new user-group"));
+            lines.push(Line::from("e edit user groups"));
+            lines.push(Line::from("d delete user-group"));
+        }
+        Tab::GroupUsers => {
+            lines.push(Line::from("n new group-user"));
+            lines.push(Line::from("e edit group users"));
+            lines.push(Line::from("d delete group-user"));
+        }
+        Tab::Users => {
+            lines.push(Line::from("n new user"));
+            lines.push(Line::from("e edit user"));
+            lines.push(Line::from("d delete user"));
+            lines.push(Line::from("Ctrl+P manage group patterns (in list or edit)"));
+        }
+        Tab::Clients => {
+            lines.push(Line::from("n new client"));
+            lines.push(Line::from("e edit client"));
+            lines.push(Line::from("d delete client"));
+            lines.push(Line::from("Ctrl+P manage group patterns (in list or edit)"));
+        }
+    }
+
+    lines
+}
+
+fn draw_status(frame: &mut ratatui::Frame, status_area: Rect, help_area: Rect, app: &App) {
+    let help = if app.tab == Tab::Groups {
+        "help: Tab switch | Up/Down select | / filter | PgUp/PgDn | q quit | h help | c child | m move"
+    } else if app.tab == Tab::Tenants {
+        "help: Tab switch | Up/Down select | / filter | PgUp/PgDn | q quit | h help | c domains"
+    } else {
+        "help: Tab switch | Up/Down select | / filter | PgUp/PgDn | q quit | h help"
+    };
+
+    let status_value = if app.status.is_empty() {
+        "-".to_string()
+    } else {
+        app.status.clone()
+    };
+    let filter_value = app
+        .filter
+        .clone()
+        .unwrap_or_else(|| "-".to_string());
+    let tenant_value = app
+        .auth_tenant
+        .as_deref()
+        .unwrap_or("-");
+    let client_value = app.auth_client_id.as_str();
+    let (filtered_items, total_items) = active_items_count(app);
+    let status = format!(
+        "status: {} | tenant: {} | client: {} | items: {}/{} | filter: {}",
+        status_value,
+        tenant_value,
+        client_value,
+        filtered_items,
+        total_items,
+        filter_value
+    );
+    let status_line = Paragraph::new(status).alignment(Alignment::Left);
+    frame.render_widget(
+        status_line.style(Style::default().add_modifier(Modifier::REVERSED)),
+        status_area,
+    );
+
+    let help_line = Paragraph::new(help).alignment(Alignment::Left);
+    frame.render_widget(help_line, help_area);
+}
+
+fn draw_form(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &App,
+    cursor_visible: &mut bool,
+) {
+    let form = match &app.form {
+        Some(form) => form,
+        None => return,
+    };
+    let popup = centered_rect(70, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(form.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    for (idx, field) in form.fields.iter().enumerate() {
+        let is_active = idx == form.index;
+        let prefix = if is_active { "> " } else { "  " };
+        let value = field.display();
+        let label_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let value_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}: ", field.label), label_style),
+            Span::styled(value, value_style),
+        ];
+        if field.optional {
+            spans.push(Span::styled(
+                " (optional)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if matches!(field.kind, FieldKind::Bool) {
+            spans.push(Span::styled(
+                " (space toggles)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if matches!(field.kind, FieldKind::Secret) {
+            spans.push(Span::styled(
+                " (Ctrl+V reveal)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "client_secret" {
+            spans.push(Span::styled(
+                " (Ctrl+G generate)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "password" {
+            spans.push(Span::styled(
+                " (Ctrl+G generate)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "redirect_uris" {
+            spans.push(Span::styled(
+                " (Ctrl+U edit)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "grant_types" {
+            spans.push(Span::styled(
+                " (Ctrl+G picker)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "scope" {
+            spans.push(Span::styled(
+                " (Ctrl+O edit)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "groups_claim_mode" {
+            spans.push(Span::styled(
+                " (Ctrl+E picker)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "user_id" {
+            spans.push(Span::styled(
+                " (Ctrl+U select)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if field.label == "group_id" {
+            spans.push(Span::styled(
+                " (Ctrl+G select)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if is_active && !matches!(field.kind, FieldKind::Bool) && !field.read_only {
+            let cursor_offset = field.input.cursor();
+            let cursor_x = inner[0].x
+                + (prefix.len() + field.label.len() + 2 + cursor_offset) as u16;
+            let cursor_y = inner[0].y + idx as u16;
+            cursor = Some((cursor_x, cursor_y));
+        }
+        lines.push(Line::from(spans));
+    }
+
+    // Show patterns table for Create/Update User forms
+    if let Some(patterns) = &form.patterns {
+        lines.push(Line::from("")); // Empty line
+        lines.push(Line::from(Span::styled(
+            "Group Patterns:",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+
+        if patterns.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no patterns defined - use Ctrl+P to add)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  # | Pattern              | Type    | Priority",
+                Style::default().fg(Color::Cyan),
+            )));
+            for (idx, pattern) in patterns.iter().enumerate() {
+                let type_str = if pattern.is_include { "include" } else { "exclude" };
+                let line_text = format!(
+                    "  {} | {:<20} | {:<7} | {}",
+                    idx + 1,
+                    pattern.pattern,
+                    type_str,
+                    pattern.priority
+                );
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(Color::White),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "  (Ctrl+P to edit patterns)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    // Show patterns table for Create/Update Client forms
+    if let Some(client_patterns) = &form.client_patterns {
+        lines.push(Line::from("")); // Empty line
+        lines.push(Line::from(Span::styled(
+            "Group Patterns:",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+
+        if client_patterns.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no patterns defined - use Ctrl+P to add)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  # | Pattern              | Type    | Priority",
+                Style::default().fg(Color::Cyan),
+            )));
+            for (idx, pattern) in client_patterns.iter().enumerate() {
+                let type_str = if pattern.is_include { "include" } else { "exclude" };
+                let line_text = format!(
+                    "  {} | {:<20} | {:<7} | {}",
+                    idx + 1,
+                    pattern.pattern,
+                    type_str,
+                    pattern.priority
+                );
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(Color::White),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "  (Ctrl+P to edit patterns)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    // Show patterns table for Create/Update ClaimMap forms
+    if let Some(claim_map_patterns) = &form.claim_map_patterns {
+        lines.push(Line::from("")); // Empty line
+        lines.push(Line::from(Span::styled(
+            "Group Patterns:",
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+
+        if claim_map_patterns.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no patterns defined - use Ctrl+P to add)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                "  # | Pattern              | Type    | Priority",
+                Style::default().fg(Color::Cyan),
+            )));
+            for (idx, pattern) in claim_map_patterns.iter().enumerate() {
+                let type_str = if pattern.is_include { "include" } else { "exclude" };
+                let line_text = format!(
+                    "  {} | {:<20} | {:<7} | {}",
+                    idx + 1,
+                    pattern.pattern,
+                    type_str,
+                    pattern.priority
+                );
+                lines.push(Line::from(Span::styled(
+                    line_text,
+                    Style::default().fg(Color::White),
+                )));
+            }
+            lines.push(Line::from(Span::styled(
+                "  (Ctrl+P to edit patterns)",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+
+    if let Some(error) = &form.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+    if app.selector.is_none()
+        && app.picker.is_none()
+        && app.password_gen.is_none()
+        && app.relation_editor.is_none()
+        && app.claim_editor.is_none()
+        && app.claim_entry.is_none()
+    {
+        if let Some((x, y)) = cursor {
+            frame.set_cursor_position((x, y));
+            *cursor_visible = true;
+        }
+    }
+
+    let footer_text = if matches!(
+        form.action,
+        FormAction::CreateUser
+            | FormAction::UpdateUser(_)
+            | FormAction::CreateClient
+            | FormAction::UpdateClient(_)
+    ) {
+        "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns | Ctrl+G secret | Ctrl+V reveal"
+    } else if matches!(form.action, FormAction::UpdateClaimMap(_)) {
+        "Enter next/submit | Tab switch | Esc cancel | Ctrl+P manage patterns"
+    } else if form
+        .fields
+        .iter()
+        .any(|field| field.label == "groups_claim_mode" || field.label == "grant_types")
+    {
+        "Enter next/submit | Tab switch | Esc cancel | Ctrl+E groups_claim_mode picker | Ctrl+G grant types | Ctrl+U user select | Ctrl+G group select | Ctrl+G secret | Ctrl+V reveal"
+    } else {
+        "Enter next/submit | Tab switch | Esc cancel"
+    };
+    let footer = Paragraph::new(footer_text).alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+
+    if let Some(selector) = &app.selector {
+        draw_selector(frame, area, selector, cursor_visible);
+    }
+    if let Some(password_gen) = &app.password_gen {
+        draw_password_gen(frame, area, password_gen, cursor_visible);
+    }
+}
+
+fn tab_title(tab: Tab) -> &'static str {
+    match tab {
+        Tab::Tenants => "Tenants",
+        Tab::Users => "Users",
+        Tab::Groups => "Groups",
+        Tab::Clients => "Clients",
+        Tab::ClientClaims => "Client claims",
+        Tab::GroupClaims => "Group claims",
+        Tab::UserGroups => "User groups",
+        Tab::GroupUsers => "Group users",
+    }
+}
+
+fn active_page(app: &App) -> usize {
+    match app.tab {
+        Tab::Tenants => app.tenants.page,
+        Tab::Users => app.users.page,
+        Tab::Groups => app.groups.page,
+        Tab::Clients => app.clients.page,
+        Tab::ClientClaims => app.client_claims.page,
+        Tab::GroupClaims => app.group_claims.page,
+        Tab::UserGroups => app.user_groups.page,
+        Tab::GroupUsers => app.group_users.page,
+    }
+}
+
+fn active_items_count(app: &App) -> (usize, usize) {
+    let total = match app.tab {
+        Tab::Tenants => app.tenants.items.len(),
+        Tab::Users => app.users.items.len(),
+        Tab::Groups => app.groups.items.len(),
+        Tab::Clients => app.clients.items.len(),
+        Tab::ClientClaims => app.client_claims.items.len(),
+        Tab::GroupClaims => app.group_claims.items.len(),
+        Tab::UserGroups => app.user_groups.items.len(),
+        Tab::GroupUsers => app.group_users.items.len(),
+    };
+    let filtered = filtered_indices(app).len();
+    (filtered, total)
+}
+
+fn active_filter(app: &App) -> Option<String> {
+    app.filter
+        .as_ref()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_lowercase())
+}
+
+fn matches_filter(needle: &str, value: &str) -> bool {
+    value.to_lowercase().contains(needle)
+}
+
+fn filtered_indices(app: &App) -> Vec<usize> {
+    let Some(needle) = active_filter(app) else {
+        return match app.tab {
+            Tab::Tenants => (0..app.tenants.items.len()).collect(),
+            Tab::Users => (0..app.users.items.len()).collect(),
+            Tab::Groups => (0..app.groups.items.len()).collect(),
+            Tab::Clients => (0..app.clients.items.len()).collect(),
+            Tab::ClientClaims => (0..app.client_claims.items.len()).collect(),
+            Tab::GroupClaims => (0..app.group_claims.items.len()).collect(),
+            Tab::UserGroups => (0..app.user_groups.items.len()).collect(),
+            Tab::GroupUsers => (0..app.group_users.items.len()).collect(),
+        };
+    };
+
+    match app.tab {
+        Tab::Tenants => app
+            .tenants
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, tenant)| {
+                let matches = matches_filter(&needle, &tenant.slug)
+                    || matches_filter(&needle, &tenant.name)
+                    || matches_filter(&needle, &tenant.mode);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::Users => app
+            .users
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, user)| {
+                let matches = matches_filter(&needle, &user.username)
+                    || matches_filter(&needle, &user.email);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::Groups => app
+            .groups
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, group)| {
+                let matches = matches_filter(&needle, &group.name)
+                    || group
+                        .description
+                        .as_deref()
+                        .map(|value| matches_filter(&needle, value))
+                        .unwrap_or(false);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::Clients => app
+            .clients
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, client)| {
+                let grants = client.grant_types.join(" ");
+                let matches = matches_filter(&needle, &client.client_id)
+                    || matches_filter(&needle, &client.name)
+                    || matches_filter(&needle, &client.scope)
+                    || matches_filter(&needle, &grants);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::ClientClaims => app
+            .client_claims
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let claims = row
+                    .claims
+                    .iter()
+                    .map(|claim| {
+                        let value = claim_value_to_display(&claim.claim_value);
+                        format!("{} {} {}", claim.claim_name, value, claim.other_label)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let matches = matches_filter(&needle, &row.client_name)
+                    || matches_filter(&needle, &claims);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::GroupClaims => app
+            .group_claims
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let claims = row
+                    .claims
+                    .iter()
+                    .map(|claim| {
+                        let value = claim_value_to_display(&claim.claim_value);
+                        format!("{} {} {}", claim.claim_name, value, claim.other_label)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let matches = matches_filter(&needle, &row.group_name)
+                    || matches_filter(&needle, &claims);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::UserGroups => app
+            .user_groups
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let groups = row
+                    .groups
+                    .iter()
+                    .map(|group| group.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let matches = matches_filter(&needle, &row.username)
+                    || matches_filter(&needle, &row.email)
+                    || matches_filter(&needle, &groups);
+                matches.then_some(idx)
+            })
+            .collect(),
+        Tab::GroupUsers => app
+            .group_users
+            .items
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, row)| {
+                let users = row
+                    .users
+                    .iter()
+                    .map(|user| user.username.clone())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let matches = matches_filter(&needle, &row.name)
+                    || row
+                        .description
+                        .as_deref()
+                        .map(|value| matches_filter(&needle, value))
+                        .unwrap_or(false)
+                    || matches_filter(&needle, &users);
+                matches.then_some(idx)
+            })
+            .collect(),
+    }
+}
+
+fn ensure_selection_in_filtered(app: &mut App, filtered: &[usize]) {
+    let state = match app.tab {
+        Tab::Tenants => &mut app.tenants.state,
+        Tab::Users => &mut app.users.state,
+        Tab::Groups => &mut app.groups.state,
+        Tab::Clients => &mut app.clients.state,
+        Tab::ClientClaims => &mut app.client_claims.state,
+        Tab::GroupClaims => &mut app.group_claims.state,
+        Tab::UserGroups => &mut app.user_groups.state,
+        Tab::GroupUsers => &mut app.group_users.state,
+    };
+    if filtered.is_empty() {
+        state.select(None);
+        return;
+    }
+    let selected = state.selected();
+    if selected.is_none()
+        || selected
+            .map(|idx| !filtered.contains(&idx))
+            .unwrap_or(true)
+    {
+        state.select(Some(filtered[0]));
+    }
+}
+
+fn detail_users(app: &App) -> Vec<Line<'static>> {
+    let Some(user) = app.users.selected().and_then(|idx| app.users.items.get(idx)) else {
+        return vec![Line::from("No user selected")];
+    };
+    vec![
+        line_kv("id", &user.id),
+        line_kv("username", &user.username),
+        line_kv("email", &user.email),
+        line_kv("is_active", &user.is_active.to_string()),
+    ]
+}
+
+fn detail_tenants(app: &App) -> Vec<Line<'static>> {
+    let Some(tenant) = app
+        .tenants
+        .selected()
+        .and_then(|idx| app.tenants.items.get(idx))
+    else {
+        return vec![Line::from("No tenant selected")];
+    };
+
+    let mut lines = vec![
+        line_kv("id", &tenant.id),
+        line_kv("slug", &tenant.slug),
+        line_kv("name", &tenant.name),
+        line_kv("mode", &tenant.mode),
+        line_kv("is_active", &tenant.is_active.to_string()),
+        Line::from(""),
+        Line::from("domains:"),
+    ];
+
+    if let Some(domains) = app.tenant_domains.get(&tenant.id) {
+        if domains.is_empty() {
+            lines.push(Line::from("  -"));
+        } else {
+            for domain in domains {
+                let primary = if domain.is_primary { " [primary]" } else { "" };
+                lines.push(Line::from(format!(
+                    "  {}{} ({})",
+                    domain.domain,
+                    primary,
+                    if domain.is_active { "active" } else { "inactive" }
+                )));
+            }
+        }
+    } else {
+        lines.push(Line::from("  (not loaded)"));
+    }
+
+    lines
+}
+
+fn detail_groups(app: &App) -> Vec<Line<'static>> {
+    let Some(group) = app.groups.selected().and_then(|idx| app.groups.items.get(idx)) else {
+        return vec![Line::from("No group selected")];
+    };
+    vec![
+        line_kv("id", &group.id),
+        line_kv("name", &group.name),
+        line_kv(
+            "description",
+            group.description.as_deref().unwrap_or(""),
+        ),
+        line_kv("is_virtual", &group.is_virtual.to_string()),
+    ]
+}
+
+fn detail_clients(app: &App) -> Vec<Line<'static>> {
+    let Some(client) = app.clients.selected().and_then(|idx| app.clients.items.get(idx)) else {
+        return vec![Line::from("No client selected")];
+    };
+
+    // Highlight is_public in yellow if true
+    let is_public_line = if client.is_public {
+        Line::from(vec![
+            Span::raw("is_public: "),
+            Span::styled("true", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ])
+    } else {
+        line_kv("is_public", "false")
+    };
+
+    vec![
+        line_kv("id", &client.id),
+        line_kv("client_id", &client.client_id),
+        line_kv("name", &client.name),
+        line_kv("redirect_uris", &client.redirect_uris.join(", ")),
+        line_kv("grant_types", &client.grant_types.join(", ")),
+        line_kv("scope", &client.scope),
+        line_kv("is_active", &client.is_active.to_string()),
+        is_public_line,
+        line_kv("groups_claim_mode", &client.groups_claim_mode),
+        line_kv("include_claim_maps", &client.include_claim_maps.to_string()),
+        line_kv(
+            "ignore_virtual_groups",
+            &client.ignore_virtual_groups.to_string(),
+        ),
+    ]
+}
+
+fn detail_client_claims(app: &App) -> Vec<Line<'static>> {
+    let Some(row) = app
+        .client_claims
+        .selected()
+        .and_then(|idx| app.client_claims.items.get(idx))
+    else {
+        return vec![Line::from("No client selected")];
+    };
+    let mut lines = vec![
+        line_kv("client_id", &row.client_id),
+        line_kv("client_name", &row.client_name),
+    ];
+    for claim in &row.claims {
+        let value = claim_value_to_display(&claim.claim_value);
+        let value = if value.is_empty() {
+            claim.other_label.clone()
+        } else {
+            format!("{} ({})", value, claim.other_label)
+        };
+        lines.push(line_kv(&claim.claim_name, &value));
+    }
+    lines
+}
+
+fn detail_group_claims(app: &App) -> Vec<Line<'static>> {
+    let Some(row) = app
+        .group_claims
+        .selected()
+        .and_then(|idx| app.group_claims.items.get(idx))
+    else {
+        return vec![Line::from("No group selected")];
+    };
+    let mut lines = vec![
+        line_kv("group_id", &row.group_id),
+        line_kv("group_name", &row.group_name),
+        line_kv(
+            "description",
+            row.description.as_deref().unwrap_or(""),
+        ),
+    ];
+    for claim in &row.claims {
+        let value = claim_value_to_display(&claim.claim_value);
+        let value = if value.is_empty() {
+            claim.other_label.clone()
+        } else {
+            format!("{} ({})", value, claim.other_label)
+        };
+        lines.push(line_kv(&claim.claim_name, &value));
+    }
+    lines
+}
+
+fn detail_user_groups(app: &App) -> Vec<Line<'static>> {
+    let Some(row) = app
+        .user_groups
+        .selected()
+        .and_then(|idx| app.user_groups.items.get(idx))
+    else {
+        return vec![Line::from("No entry selected")];
+    };
+    let groups = row
+        .groups
+        .iter()
+        .map(|g| g.name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
+        line_kv("user_id", &row.user_id),
+        line_kv("username", &row.username),
+        line_kv("email", &row.email),
+        line_kv("groups", &groups),
+    ]
+}
+
+fn detail_group_users(app: &App) -> Vec<Line<'static>> {
+    let Some(row) = app
+        .group_users
+        .selected()
+        .and_then(|idx| app.group_users.items.get(idx))
+    else {
+        return vec![Line::from("No entry selected")];
+    };
+    let users = row
+        .users
+        .iter()
+        .map(|u| format!("{} <{}>", u.username, u.email))
+        .collect::<Vec<_>>()
+        .join(", ");
+    vec![
+        line_kv("group_id", &row.group_id),
+        line_kv("name", &row.name),
+        line_kv(
+            "description",
+            row.description.as_deref().unwrap_or(""),
+        ),
+        line_kv("users", &users),
+    ]
+}
+
+fn claim_value_to_display(value: &Option<Value>) -> String {
+    match value {
+        None => String::new(),
+        Some(Value::String(val)) => val.clone(),
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        Some(other) => other.to_string(),
+    }
+}
+
+fn claim_value_to_entry_values_with_kind(kind: &str, value: &Option<Value>) -> Vec<Input> {
+    let mut items = match value {
+        None => vec![Input::default()],
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(|value| value.as_str().map(|value| input_with_value(value.to_string())))
+            .collect::<Vec<_>>(),
+        Some(Value::String(value)) => vec![input_with_value(value.to_string())],
+        Some(value) => vec![input_with_value(value.to_string())],
+    };
+    if items.is_empty() {
+        items.push(Input::default());
+    }
+    if kind == "single" && items.len() > 1 {
+        items.truncate(1);
+    }
+    items
+}
+
+fn build_claim_value(entry: &ClaimEntryState) -> Result<Option<Value>> {
+    let mut values = Vec::new();
+    for input in &entry.claim_values {
+        let trimmed = input.value().trim();
+        if !trimmed.is_empty() {
+            values.push(Value::String(trimmed.to_string()));
+        }
+    }
+    if entry.claim_value_kind == "array" {
+        if values.is_empty() {
+            bail!("claim_value array musí obsahovat alespoň jeden string");
+        }
+        return Ok(Some(Value::Array(values)));
+    }
+    if values.is_empty() {
+        return Ok(None);
+    }
+    let Value::String(value) = values.remove(0) else {
+        bail!("claim_value musí být string");
+    };
+    Ok(Some(Value::String(value)))
+}
+
+fn handle_claim_value_input(entry: &mut ClaimEntryState, event: &Event) {
+    if entry.claim_value_kind == "single" && entry.claim_values.len() == 1 {
+        if let Some(input) = entry.claim_values.first_mut() {
+            input.handle_event(event);
+        }
+    }
+}
+
+fn line_kv(key: &str, value: &str) -> Line<'static> {
+    let key = format!("{key}: ");
+    let value = value.to_string();
+    Line::from(vec![
+        Span::styled(key, Style::default().fg(Color::DarkGray)),
+        Span::raw(value),
+    ])
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, rect: Rect) -> Rect {
+    let popup_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Percentage((100 - percent_y) / 2),
+            Constraint::Percentage(percent_y),
+            Constraint::Percentage((100 - percent_y) / 2),
+        ])
+        .split(rect);
+    Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - percent_x) / 2),
+            Constraint::Percentage(percent_x),
+            Constraint::Percentage((100 - percent_x) / 2),
+        ])
+        .split(popup_layout[1])[1]
+}
+
+fn draw_picker(frame: &mut ratatui::Frame, area: Rect, picker: &PickerState) {
+    let popup = centered_rect(50, 50, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(picker.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let lines: Vec<Line> = picker
+        .options
+        .iter()
+        .enumerate()
+        .map(|(idx, option)| {
+            let prefix = if idx == picker.index { ">" } else { " " };
+            let label = if picker.single_select {
+                format!(" {} ({})", option.label, option.value)
+            } else {
+                let marker = if option.selected { "[x]" } else { "[ ]" };
+                format!(" {marker} {} ({})", option.label, option.value)
+            };
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                Span::raw(label),
+            ])
+        })
+        .collect();
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    let footer = Paragraph::new(if picker.single_select {
+        "Enter select | Esc cancel"
+    } else {
+        "Space select | Enter apply | Esc cancel"
+    })
+    .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_selector(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    selector: &SelectorState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(selector.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let filter_line = if selector.filter_active {
+        format!("/ {}", selector.filter.value())
+    } else if selector.filter.value().is_empty() {
+        "/ (filtr: napiš a potvrď Enter)".to_string()
+    } else {
+        format!("/ {}", selector.filter.value())
+    };
+    let filter = Paragraph::new(filter_line)
+        .block(Block::default().borders(Borders::ALL).title("Filter"));
+    frame.render_widget(filter, inner[0]);
+
+    match &selector.items {
+        SelectorItems::Users(items) => {
+            let rows = selector
+                .filtered
+                .iter()
+                .map(|idx| {
+                    let user = &items[*idx];
+                    Row::new(vec![
+                        Cell::from(user.username.clone()),
+                        Cell::from(user.email.clone()),
+                        Cell::from(user.is_active.to_string()),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let table = Table::new(
+                rows,
+                vec![
+                    Constraint::Percentage(35),
+                    Constraint::Percentage(50),
+                    Constraint::Percentage(15),
+                ],
+            )
+            .header(
+                Row::new(vec!["Username", "Email", "Active"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(Block::default().borders(Borders::ALL))
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+            let mut state = TableState::default();
+            if !selector.filtered.is_empty() {
+                state.select(Some(selector.index));
+            }
+            frame.render_stateful_widget(table, inner[1], &mut state);
+        }
+        SelectorItems::Groups(items) => {
+            let rows = selector
+                .filtered
+                .iter()
+                .map(|idx| {
+                    let group = &items[*idx];
+                    let is_root = group.id == ROOT_GROUP_ID;
+                    let name_style = if is_root {
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                    };
+                    Row::new(vec![
+                        Cell::from(group.name.clone()).style(name_style),
+                        Cell::from(group.description.clone().unwrap_or_default()),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let table = Table::new(
+                rows,
+                vec![Constraint::Percentage(35), Constraint::Percentage(65)],
+            )
+            .header(
+                Row::new(vec!["Name", "Description"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(Block::default().borders(Borders::ALL))
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+            let mut state = TableState::default();
+            if !selector.filtered.is_empty() {
+                state.select(Some(selector.index));
+            }
+            frame.render_stateful_widget(table, inner[1], &mut state);
+        }
+        SelectorItems::Clients(items) => {
+            let rows = selector
+                .filtered
+                .iter()
+                .map(|idx| {
+                    let client = &items[*idx];
+                    Row::new(vec![
+                        Cell::from(client.client_id.clone()),
+                        Cell::from(client.name.clone()),
+                    ])
+                })
+                .collect::<Vec<_>>();
+            let table = Table::new(
+                rows,
+                vec![Constraint::Percentage(45), Constraint::Percentage(55)],
+            )
+            .header(
+                Row::new(vec!["Client ID", "Name"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .block(Block::default().borders(Borders::ALL))
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+            let mut state = TableState::default();
+            if !selector.filtered.is_empty() {
+                state.select(Some(selector.index));
+            }
+            frame.render_stateful_widget(table, inner[1], &mut state);
+        }
+    }
+
+    let footer = Paragraph::new("↑↓ select | Enter apply | / filter | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[2]);
+
+    if selector.filter_active {
+        let cursor_x = inner[0].x + 3 + selector.filter.cursor() as u16;
+        let cursor_y = inner[0].y + 1;
+        frame.set_cursor_position((cursor_x, cursor_y));
+        *cursor_visible = true;
+    }
+}
+
+fn draw_password_gen(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    password_gen: &PasswordGenState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(60, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(password_gen.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let rows = vec![
+        format!("Length: {}", password_gen.length.value()),
+        format!("[{}] Uppercase (A-Z)", mark(password_gen.include_upper)),
+        format!("[{}] Lowercase (a-z)", mark(password_gen.include_lower)),
+        format!("[{}] Digits (0-9)", mark(password_gen.include_digits)),
+        format!(
+            "[{}] Special safe (- _ . , : ; @ +)",
+            mark(password_gen.include_special_safe)
+        ),
+        format!(
+            "[{}] Special full (! @ # $ % ...)",
+            mark(password_gen.include_special_full)
+        ),
+        "Generate".to_string(),
+    ];
+
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| {
+            let prefix = if idx == password_gen.index { "> " } else { "  " };
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                Span::raw(text),
+            ])
+        })
+        .collect();
+
+    let mut lines = lines;
+    if let Some(error) = &password_gen.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    let footer = Paragraph::new("Tab move | Space toggle | Enter apply | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+
+    if password_gen.index == 0 {
+        let prefix = "Length: ";
+        let cursor_x = inner[0].x
+            + 2
+            + prefix.len() as u16
+            + password_gen.length.cursor() as u16;
+        let cursor_y = inner[0].y;
+        frame.set_cursor_position((cursor_x, cursor_y));
+        *cursor_visible = true;
+    }
+}
+
+fn draw_relation_editor(frame: &mut ratatui::Frame, area: Rect, editor: &RelationEditorState) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(editor.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let mut lines: Vec<Line> = editor
+        .options
+        .iter()
+        .enumerate()
+        .map(|(idx, option)| {
+            let marker = if option.selected { "[x]" } else { "[ ]" };
+            let prefix = if idx == editor.index { "> " } else { "  " };
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::Yellow)),
+                Span::raw(format!("{marker} {}", option.label)),
+            ])
+        })
+        .collect();
+
+    if let Some(error) = &editor.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    let footer = Paragraph::new("Space toggle | Enter apply | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_claim_editor(frame: &mut ratatui::Frame, area: Rect, editor: &ClaimEditorState) {
+    let popup = centered_rect(75, 70, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(editor.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let rows = editor
+        .items
+        .iter()
+        .map(|item| {
+            let value = claim_value_to_display(&item.claim_value);
+            let target = format_other_label(&item.other_label, &item.other_id);
+            Row::new(vec![item.claim_name.clone(), value, target])
+        })
+        .collect::<Vec<_>>();
+    let mut state = TableState::default();
+    if !editor.items.is_empty() {
+        state.select(Some(editor.index));
+    }
+    let table = Table::new(
+        rows,
+        vec![
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
+            Constraint::Percentage(40),
+        ],
+    )
+    .header(Row::new(vec!["Claim", "Value", "Target"]).style(Style::default().add_modifier(Modifier::BOLD)))
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(">> ");
+    frame.render_stateful_widget(table, inner[0], &mut state);
+
+    let error_lines = editor
+        .error
+        .as_ref()
+        .map(|err| {
+            err.lines()
+                .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Red))))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![Line::from("")]);
+    let error = Paragraph::new(error_lines).wrap(Wrap { trim: true });
+    frame.render_widget(error, inner[1]);
+
+    let footer = Paragraph::new("a add | e edit | d delete | Enter apply | Esc cancel")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[2]);
+}
+
+fn draw_claim_entry(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    app: &App,
+    entry: &ClaimEntryState,
+    cursor_visible: &mut bool,
+    allow_cursor: bool,
+) {
+    let popup = centered_rect(65, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(entry.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let other_label = entry
+        .other_label
+        .clone()
+        .or_else(|| entry.other_id.clone())
+        .unwrap_or_else(|| "<select>".to_string());
+    let other_line = format_other_label(&other_label, entry.other_id.as_deref().unwrap_or(""));
+
+    let mode = app
+        .claim_editor
+        .as_ref()
+        .map(|editor| editor.mode.clone());
+    let other_hint = match mode {
+        Some(ClaimEditorMode::ClientClaims { .. }) => " (Ctrl+G select group)",
+        Some(ClaimEditorMode::GroupClaims { .. }) => " (Ctrl+C select client)",
+        None => "",
+    };
+
+    let mut lines = Vec::new();
+    let mut cursor = None;
+    let mut line_idx = 0u16;
+
+    let render_field = |lines: &mut Vec<Line<'static>>,
+                        label: &str,
+                        value: String,
+                        hint: String,
+                        is_active: bool|
+     -> usize {
+        let prefix = if is_active { "> " } else { "  " };
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!("{label}: "),
+                Style::default()
+                    .fg(if is_active { Color::Cyan } else { Color::White })
+                    .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+            Span::styled(
+                value,
+                Style::default()
+                    .fg(if is_active { Color::Cyan } else { Color::White })
+                    .add_modifier(if is_active { Modifier::BOLD } else { Modifier::empty() }),
+            ),
+        ];
+        if !hint.is_empty() {
+            spans.push(Span::styled(
+                hint,
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        lines.push(Line::from(spans));
+        prefix.len() + label.len() + 2
+    };
+
+    let claim_name_offset = render_field(
+        &mut lines,
+        "claim_name",
+        entry.claim_name.value().to_string(),
+        String::new(),
+        entry.index == 0,
+    );
+    if entry.index == 0 {
+        let cursor_x = inner[0].x + (claim_name_offset + entry.claim_name.cursor()) as u16;
+        let cursor_y = inner[0].y + line_idx;
+        cursor = Some((cursor_x, cursor_y));
+    }
+    line_idx += 1;
+
+    let _claim_kind_offset = render_field(
+        &mut lines,
+        "claim_value_kind",
+        entry.claim_value_kind.clone(),
+        " (Ctrl+K select)".to_string(),
+        entry.index == 1,
+    );
+    line_idx += 1;
+
+    let claim_value_hint = " (Ctrl+T edit values)".to_string();
+    let claim_value_display = if entry.claim_value_kind == "array" {
+        format!("[array: {}]", entry.claim_values.len())
+    } else if entry.claim_values.len() <= 1 {
+        entry
+            .claim_values
+            .first()
+            .map(|input| input.value().to_string())
+            .unwrap_or_default()
+    } else {
+        entry
+            .claim_values
+            .first()
+            .map(|input| input.value().to_string())
+            .unwrap_or_default()
+    };
+    let value_offset = render_field(
+        &mut lines,
+        "claim_value",
+        claim_value_display,
+        claim_value_hint,
+        entry.index == 2,
+    );
+    if entry.index == 2 && entry.claim_value_kind == "single" && entry.claim_values.len() == 1 {
+        if let Some(input) = entry.claim_values.first() {
+            let cursor_x = inner[0].x + (value_offset + input.cursor()) as u16;
+            let cursor_y = inner[0].y + line_idx;
+            cursor = Some((cursor_x, cursor_y));
+        }
+    }
+    render_field(
+        &mut lines,
+        "target",
+        other_line,
+        other_hint.to_string(),
+        entry.index == 3,
+    );
+
+    if let Some(error) = &entry.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+    if allow_cursor {
+        if let Some((x, y)) = cursor {
+            frame.set_cursor_position((x, y));
+            *cursor_visible = true;
+        }
+    }
+
+    let footer = Paragraph::new(
+        "Tab move | Enter next/save | Esc cancel | Ctrl+K kind | Ctrl+T edit values",
+    )
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_claim_value_editor(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &ClaimValueEditorState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(55, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(editor.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let rows = editor
+        .values
+        .iter()
+        .enumerate()
+        .map(|(idx, input)| {
+            let label = format!("[{}]", idx + 1);
+            Row::new(vec![label, input.value().to_string()])
+        })
+        .collect::<Vec<_>>();
+    let mut state = TableState::default();
+    if !editor.values.is_empty() {
+        state.select(Some(editor.index));
+    }
+    let table = Table::new(
+        rows,
+        vec![Constraint::Length(6), Constraint::Percentage(94)],
+    )
+    .header(Row::new(vec!["#", "Value"]).style(Style::default().add_modifier(Modifier::BOLD)))
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(">> ");
+    frame.render_stateful_widget(table, inner[0], &mut state);
+
+    let error_lines = editor
+        .error
+        .as_ref()
+        .map(|err| {
+            err.lines()
+                .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Red))))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![Line::from("")]);
+    let error = Paragraph::new(error_lines).wrap(Wrap { trim: true });
+    frame.render_widget(error, inner[1]);
+
+    let footer = if editor.editing {
+        "Enter done | Esc cancel edit"
+    } else if editor.allow_multiple {
+        "a add | d delete | e edit | Enter apply | Esc cancel"
+    } else {
+        "e edit | Enter apply | Esc cancel"
+    };
+    let footer = Paragraph::new(footer).alignment(Alignment::Center);
+    frame.render_widget(footer, inner[2]);
+
+    if editor.editing {
+        if let Some(input) = editor.values.get(editor.index) {
+            let cursor_x = inner[0].x + 3 + 6 + 1 + input.cursor() as u16;
+            let cursor_y = inner[0].y + editor.index as u16 + 1;
+            frame.set_cursor_position((cursor_x, cursor_y));
+            *cursor_visible = true;
+        }
+    }
+}
+
+fn format_other_label(label: &str, id: &str) -> String {
+    if id.is_empty() || label == id {
+        label.to_string()
+    } else {
+        format!("{label} ({id})")
+    }
+}
+
+fn mark(value: bool) -> char {
+    if value { 'x' } else { ' ' }
+}
+
+fn draw_array_editor(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    editor: &ArrayEditorState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(70, 70, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(editor.title.clone());
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let rows = editor
+        .values
+        .iter()
+        .enumerate()
+        .map(|(idx, input)| {
+            let label = format!("[{}]", idx + 1);
+            Row::new(vec![label, input.value().to_string()])
+        })
+        .collect::<Vec<_>>();
+    let mut state = TableState::default();
+    if !editor.values.is_empty() {
+        state.select(Some(editor.index));
+    }
+    let table = Table::new(
+        rows,
+        vec![Constraint::Length(6), Constraint::Percentage(94)],
+    )
+    .header(Row::new(vec!["#", "URI"]).style(Style::default().add_modifier(Modifier::BOLD)))
+    .row_highlight_style(
+        Style::default()
+            .bg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
+    .highlight_symbol(">> ");
+    frame.render_stateful_widget(table, inner[0], &mut state);
+
+    let error_lines = editor
+        .error
+        .as_ref()
+        .map(|err| {
+            err.lines()
+                .map(|line| Line::from(Span::styled(line.to_string(), Style::default().fg(Color::Red))))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![Line::from("")]);
+    let error = Paragraph::new(error_lines).wrap(Wrap { trim: true });
+    frame.render_widget(error, inner[1]);
+
+    let footer = if editor.editing {
+        "Enter done | Esc cancel edit"
+    } else {
+        "a add | d delete | e edit | ↑↓ navigate | Enter apply | Esc cancel"
+    };
+    let footer = Paragraph::new(footer).alignment(Alignment::Center);
+    frame.render_widget(footer, inner[2]);
+
+    if editor.editing {
+        if let Some(input) = editor.values.get(editor.index) {
+            let cursor_x = inner[0].x + 3 + 6 + 1 + input.cursor() as u16;
+            let cursor_y = inner[0].y + editor.index as u16 + 1;
+            frame.set_cursor_position((cursor_x, cursor_y));
+            *cursor_visible = true;
+        }
+    }
+}
+
+fn draw_scope_selector(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    selector: &ScopeSelectorState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(60, 60, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Select Scopes");
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(3), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    match selector.mode {
+        ScopeSelectorMode::SelectStandard => {
+            // Display standard and custom scopes
+            let mut rows = Vec::new();
+
+            // Standard scopes
+            for (scope, selected) in &selector.standard_scopes {
+                rows.push(Row::new(vec![
+                    format!("[{}]", mark(*selected)),
+                    scope.clone(),
+                    "standard".to_string(),
+                ]));
+            }
+
+            // Custom scopes
+            for scope in &selector.custom_scopes {
+                rows.push(Row::new(vec![
+                    "[x]".to_string(),
+                    scope.clone(),
+                    "custom".to_string(),
+                ]));
+            }
+
+            let mut state = TableState::default();
+            state.select(Some(selector.index));
+
+            let table = Table::new(
+                rows,
+                vec![
+                    Constraint::Length(5),
+                    Constraint::Percentage(70),
+                    Constraint::Percentage(25),
+                ],
+            )
+            .header(
+                Row::new(vec!["Sel", "Scope", "Type"])
+                    .style(Style::default().add_modifier(Modifier::BOLD)),
+            )
+            .row_highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol(">> ");
+            frame.render_stateful_widget(table, inner[0], &mut state);
+
+            let info = Paragraph::new(Line::from("Space to toggle | a add custom | d delete custom"))
+                .alignment(Alignment::Center);
+            frame.render_widget(info, inner[1]);
+
+            let footer = Paragraph::new("↑↓ navigate | Enter apply | Esc cancel")
+                .alignment(Alignment::Center);
+            frame.render_widget(footer, inner[2]);
+        }
+        ScopeSelectorMode::AddCustom => {
+            let prompt = Paragraph::new("Add custom scope:");
+            frame.render_widget(prompt, inner[0]);
+
+            let input_area = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(2), Constraint::Min(1)])
+                .margin(1)
+                .split(inner[1]);
+
+            let input_widget = Paragraph::new(selector.custom_input.value());
+            frame.render_widget(input_widget, input_area[1]);
+
+            let cursor_x = input_area[1].x + selector.custom_input.cursor() as u16;
+            let cursor_y = input_area[1].y;
+            frame.set_cursor_position((cursor_x, cursor_y));
+            *cursor_visible = true;
+
+            let footer = Paragraph::new("Enter confirm | Esc cancel")
+                .alignment(Alignment::Center);
+            frame.render_widget(footer, inner[2]);
+        }
+    }
+}
+
+fn draw_tenant_domains_manager(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    manager: &TenantDomainsManagerState,
+) {
+    let popup = centered_rect(60, 50, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "Domains for tenant: {}",
+        manager.tenant_slug
+    ));
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    if manager.domains.is_empty() {
+        let empty = Paragraph::new("No domains defined. Press 'n' to create one.")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty, inner[0]);
+    } else {
+        let rows = manager
+            .domains
+            .iter()
+            .map(|d| {
+                Row::new(vec![
+                    d.domain.clone(),
+                    if d.is_primary { "yes" } else { "no" }.to_string(),
+                    if d.is_active { "yes" } else { "no" }.to_string(),
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        state.select(Some(manager.index));
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Percentage(60),
+                Constraint::Length(12),
+                Constraint::Length(12),
+            ],
+        )
+        .header(
+            Row::new(vec!["Domain", "Primary", "Active"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+        frame.render_stateful_widget(table, inner[0], &mut state);
+    }
+
+    let footer = Paragraph::new("n new | e edit | d delete | ↑↓ navigate | Enter/Esc close")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_user_patterns_manager(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    manager: &UserPatternsManagerState,
+) {
+    let popup = centered_rect(60, 50, area);  // Smaller dialog
+    frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "Group Patterns for user: {}",
+        manager.username
+    ));
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    if manager.patterns.is_empty() {
+        let empty = Paragraph::new("No patterns defined. Press 'n' to create one.")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty, inner[0]);
+    } else {
+        let rows = manager
+            .patterns
+            .iter()
+            .map(|p| {
+                let include_exclude = if p.is_include { "Include" } else { "Exclude" };
+                Row::new(vec![
+                    p.priority.to_string(),
+                    p.pattern.clone(),
+                    include_exclude.to_string(),
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        state.select(Some(manager.index));
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(10),
+                Constraint::Percentage(60),
+                Constraint::Percentage(30),
+            ],
+        )
+        .header(
+            Row::new(vec!["Priority", "Pattern", "Action"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+        frame.render_stateful_widget(table, inner[0], &mut state);
+    }
+
+    let footer = Paragraph::new("n new | e edit | d delete | ↑↓ navigate | Enter/Esc close")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_pattern_form(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    pattern_form: &PatternFormState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(50, 40, area);  // Even smaller than patterns manager
+    frame.render_widget(Clear, popup);
+
+    let title = if pattern_form.pattern_id.is_some() {
+        "Edit Pattern"
+    } else {
+        "New Pattern"
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title);
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let mut lines = Vec::new();
+    let mut cursor = None;
+
+    for (idx, field) in pattern_form.fields.iter().enumerate() {
+        let is_active = idx == pattern_form.index;
+        let prefix = if is_active { "> " } else { "  " };
+        let value = field.display();
+
+        let label_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let value_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}: ", field.label), label_style),
+            Span::styled(value, value_style),
+        ];
+
+        if matches!(field.kind, FieldKind::Bool) {
+            spans.push(Span::styled(
+                " (space toggles)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        if is_active && !matches!(field.kind, FieldKind::Bool) {
+            let cursor_offset = field.input.cursor();
+            let cursor_x = inner[0].x
+                + (prefix.len() + field.label.len() + 2 + cursor_offset) as u16;
+            let cursor_y = inner[0].y + idx as u16;
+            cursor = Some((cursor_x, cursor_y));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(error) = &pattern_form.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    if let Some((x, y)) = cursor {
+        frame.set_cursor_position((x, y));
+        *cursor_visible = true;
+    }
+
+    let footer = Paragraph::new("Enter save | Esc cancel | ↑↓ navigate")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_client_patterns_manager(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    manager: &ClientPatternsManagerState,
+) {
+    let popup = centered_rect(60, 50, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "Group Patterns for client: {}",
+        manager.client_name
+    ));
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    if manager.patterns.is_empty() {
+        let empty = Paragraph::new("No patterns defined. Press 'n' to create one.")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty, inner[0]);
+    } else {
+        let rows = manager
+            .patterns
+            .iter()
+            .map(|p| {
+                let include_exclude = if p.is_include { "Include" } else { "Exclude" };
+                Row::new(vec![
+                    p.priority.to_string(),
+                    p.pattern.clone(),
+                    include_exclude.to_string(),
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        state.select(Some(manager.index));
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(10),
+                Constraint::Percentage(60),
+                Constraint::Percentage(30),
+            ],
+        )
+        .header(
+            Row::new(vec!["Priority", "Pattern", "Action"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+        frame.render_stateful_widget(table, inner[0], &mut state);
+    }
+
+    let footer = Paragraph::new("n new | e edit | d delete | ↑↓ navigate | Enter/Esc close")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_client_pattern_form(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    pattern_form: &ClientPatternFormState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(50, 40, area);
+    frame.render_widget(Clear, popup);
+
+    let title = if pattern_form.pattern_id.is_some() {
+        "Edit Pattern"
+    } else {
+        "New Pattern"
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title);
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let mut lines = Vec::new();
+    let mut cursor = None;
+
+    for (idx, field) in pattern_form.fields.iter().enumerate() {
+        let is_active = idx == pattern_form.index;
+        let prefix = if is_active { "> " } else { "  " };
+        let value = field.display();
+
+        let label_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let value_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}: ", field.label), label_style),
+            Span::styled(value, value_style),
+        ];
+
+        if matches!(field.kind, FieldKind::Bool) {
+            spans.push(Span::styled(
+                " (space toggles)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        if is_active && !matches!(field.kind, FieldKind::Bool) {
+            let cursor_offset = field.input.cursor();
+            let cursor_x = inner[0].x
+                + (prefix.len() + field.label.len() + 2 + cursor_offset) as u16;
+            let cursor_y = inner[0].y + idx as u16;
+            cursor = Some((cursor_x, cursor_y));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(error) = &pattern_form.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    if let Some((x, y)) = cursor {
+        frame.set_cursor_position((x, y));
+        *cursor_visible = true;
+    }
+
+    let footer = Paragraph::new("Enter save | Esc cancel | ↑↓ navigate")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+
+fn draw_claim_map_patterns_manager(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    manager: &ClaimMapPatternsManagerState,
+) {
+    let popup = centered_rect(60, 50, area);
+    frame.render_widget(Clear, popup);
+    let block = Block::default().borders(Borders::ALL).title(format!(
+        "Group Patterns for claim: {}",
+        manager.claim_name
+    ));
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    if manager.patterns.is_empty() {
+        let empty = Paragraph::new("No patterns defined. Press 'n' to create one.")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(Color::DarkGray));
+        frame.render_widget(empty, inner[0]);
+    } else {
+        let rows = manager
+            .patterns
+            .iter()
+            .map(|p| {
+                let include_exclude = if p.is_include { "Include" } else { "Exclude" };
+                Row::new(vec![
+                    p.priority.to_string(),
+                    p.pattern.clone(),
+                    include_exclude.to_string(),
+                ])
+            })
+            .collect::<Vec<_>>();
+
+        let mut state = TableState::default();
+        state.select(Some(manager.index));
+
+        let table = Table::new(
+            rows,
+            vec![
+                Constraint::Length(10),
+                Constraint::Percentage(60),
+                Constraint::Percentage(30),
+            ],
+        )
+        .header(
+            Row::new(vec!["Priority", "Pattern", "Action"])
+                .style(Style::default().add_modifier(Modifier::BOLD)),
+        )
+        .row_highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol(">> ");
+        frame.render_stateful_widget(table, inner[0], &mut state);
+    }
+
+    let footer = Paragraph::new("n new | e edit | d delete | ↑↓ navigate | Enter/Esc close")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
+
+fn draw_claim_map_pattern_form(
+    frame: &mut ratatui::Frame,
+    area: Rect,
+    pattern_form: &ClaimMapPatternFormState,
+    cursor_visible: &mut bool,
+) {
+    let popup = centered_rect(50, 40, area);
+    frame.render_widget(Clear, popup);
+
+    let title = if pattern_form.pattern_id.is_some() {
+        "Edit Pattern"
+    } else {
+        "New Pattern"
+    };
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title);
+    frame.render_widget(block, popup);
+
+    let inner = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .margin(1)
+        .split(popup);
+
+    let mut lines = Vec::new();
+    let mut cursor = None;
+
+    for (idx, field) in pattern_form.fields.iter().enumerate() {
+        let is_active = idx == pattern_form.index;
+        let prefix = if is_active { "> " } else { "  " };
+        let value = field.display();
+
+        let label_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let value_style = if is_active {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+
+        let mut spans = vec![
+            Span::styled(prefix, Style::default().fg(Color::Yellow)),
+            Span::styled(format!("{}: ", field.label), label_style),
+            Span::styled(value, value_style),
+        ];
+
+        if matches!(field.kind, FieldKind::Bool) {
+            spans.push(Span::styled(
+                " (space toggles)",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+
+        if is_active && !matches!(field.kind, FieldKind::Bool) {
+            let cursor_offset = field.input.cursor();
+            let cursor_x = inner[0].x
+                + (prefix.len() + field.label.len() + 2 + cursor_offset) as u16;
+            let cursor_y = inner[0].y + idx as u16;
+            cursor = Some((cursor_x, cursor_y));
+        }
+
+        lines.push(Line::from(spans));
+    }
+
+    if let Some(error) = &pattern_form.error {
+        lines.push(Line::from(Span::styled(
+            error.clone(),
+            Style::default().fg(Color::Red),
+        )));
+    }
+
+    let paragraph = Paragraph::new(lines).alignment(Alignment::Left);
+    frame.render_widget(paragraph, inner[0]);
+
+    if let Some((x, y)) = cursor {
+        frame.set_cursor_position((x, y));
+        *cursor_visible = true;
+    }
+
+    let footer = Paragraph::new("Enter save | Esc cancel | ↑↓ navigate")
+        .alignment(Alignment::Center);
+    frame.render_widget(footer, inner[1]);
+}
