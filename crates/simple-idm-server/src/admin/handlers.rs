@@ -1,5 +1,6 @@
 use crate::auth::password::hash_password;
 use crate::password_reset::{create_reset_token_for_user, PasswordResetTokenInfo};
+use crate::audit;
 use crate::db::{models::OAuthClient, DbPool};
 use axum::{
     extract::{Path, Query, State},
@@ -281,6 +282,8 @@ pub async fn create_user(
     State(db_pool): State<DbPool>,
     Json(req): Json<CreateUserRequest>,
 ) -> impl IntoResponse {
+    let requested_username = req.username.clone();
+    let requested_email = req.email.clone();
     let tenant_id = default_tenant_id();
     let conflict = sqlx::query_scalar::<_, i64>(
         "SELECT 1 FROM users WHERE tenant_id = $1 AND (email = $2 OR username = $3) LIMIT 1",
@@ -292,6 +295,18 @@ pub async fn create_user(
     .await;
 
     if let Ok(Some(_)) = conflict {
+        audit::emit_event(
+            &db_pool,
+            "admin.user.create",
+            "user",
+            None,
+            "failure",
+            Some(serde_json::json!({
+                "reason": "username_or_email_conflict",
+                "username": requested_username,
+                "email": requested_email,
+            })),
+        ).await;
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -337,7 +352,19 @@ pub async fn create_user(
     .await;
 
     match result {
-        Ok(user) => (
+        Ok(user) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.user.create",
+                "user",
+                Some(user.id),
+                "success",
+                Some(serde_json::json!({
+                    "username": user.username,
+                    "email": user.email
+                })),
+            ).await;
+            (
             StatusCode::CREATED,
             Json(UserResponse {
                 id: user.id,
@@ -346,8 +373,21 @@ pub async fn create_user(
                 is_active: user.is_active,
             }),
         )
-            .into_response(),
+            .into_response()
+        }
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.user.create",
+                "user",
+                None,
+                "failure",
+                Some(serde_json::json!({
+                    "reason": e.to_string(),
+                    "username": requested_username,
+                    "email": requested_email,
+                })),
+            ).await;
             tracing::error!("Failed to create user: {:?}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -581,7 +621,16 @@ pub async fn update_user(
     .await;
 
     match result {
-        Ok(Some(user)) => (
+        Ok(Some(user)) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.user.update",
+                "user",
+                Some(user.id),
+                "success",
+                None,
+            ).await;
+            (
             StatusCode::OK,
             Json(UserResponse {
                 id: user.id,
@@ -590,7 +639,8 @@ pub async fn update_user(
                 is_active: user.is_active,
             }),
         )
-            .into_response(),
+            .into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -600,6 +650,14 @@ pub async fn update_user(
         )
             .into_response(),
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.user.update",
+                "user",
+                Some(user_id),
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to update user: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -633,6 +691,14 @@ pub async fn delete_user(
                 )
                     .into_response()
             } else {
+                audit::emit_event(
+                    &db_pool,
+                    "admin.user.delete",
+                    "user",
+                    Some(user_id),
+                    "success",
+                    None,
+                ).await;
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
@@ -643,6 +709,14 @@ pub async fn delete_user(
             }
         }
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.user.delete",
+                "user",
+                Some(user_id),
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to delete user: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -680,7 +754,16 @@ pub async fn create_group(
     .await;
 
     match result {
-        Ok(group) => (
+        Ok(group) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.group.create",
+                "group",
+                Some(group.id),
+                "success",
+                Some(serde_json::json!({ "name": group.name })),
+            ).await;
+            (
             StatusCode::CREATED,
             Json(GroupResponse {
                 id: group.id,
@@ -689,8 +772,17 @@ pub async fn create_group(
                 is_virtual: group.is_virtual,
             }),
         )
-            .into_response(),
+            .into_response()
+        }
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.group.create",
+                "group",
+                None,
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to create group: {:?}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -763,7 +855,16 @@ pub async fn update_group(
     .await;
 
     match result {
-        Ok(Some(group)) => (
+        Ok(Some(group)) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.group.update",
+                "group",
+                Some(group.id),
+                "success",
+                None,
+            ).await;
+            (
             StatusCode::OK,
             Json(GroupResponse {
                 id: group.id,
@@ -772,7 +873,8 @@ pub async fn update_group(
                 is_virtual: group.is_virtual,
             }),
         )
-            .into_response(),
+            .into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -782,6 +884,14 @@ pub async fn update_group(
         )
             .into_response(),
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.group.update",
+                "group",
+                Some(group_id),
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to update group: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -927,6 +1037,14 @@ pub async fn delete_group(
                 )
                     .into_response()
             } else {
+                audit::emit_event(
+                    &db_pool,
+                    "admin.group.delete",
+                    "group",
+                    Some(group_id),
+                    "success",
+                    None,
+                ).await;
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
@@ -937,6 +1055,14 @@ pub async fn delete_group(
             }
         }
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.group.delete",
+                "group",
+                Some(group_id),
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to delete group: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1044,6 +1170,7 @@ pub async fn create_oauth_client(
     State(db_pool): State<DbPool>,
     Json(req): Json<CreateOAuthClientRequest>,
 ) -> impl IntoResponse {
+    let requested_client_id = req.client_id.clone();
     let groups_claim_mode = match req.groups_claim_mode.as_deref() {
         None | Some("effective") => "effective",
         Some("direct") => "direct",
@@ -1152,7 +1279,16 @@ pub async fn create_oauth_client(
     .await;
 
     match result {
-        Ok(client) => (
+        Ok(client) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.client.create",
+                "oauth_client",
+                Some(client.id),
+                "success",
+                Some(serde_json::json!({ "client_id": client.client_id })),
+            ).await;
+            (
             StatusCode::CREATED,
             Json(OAuthClientResponse {
                 id: client.id,
@@ -1168,8 +1304,20 @@ pub async fn create_oauth_client(
                 ignore_virtual_groups: client.ignore_virtual_groups,
             }),
         )
-            .into_response(),
+            .into_response()
+        }
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.client.create",
+                "oauth_client",
+                None,
+                "failure",
+                Some(serde_json::json!({
+                    "reason": e.to_string(),
+                    "client_id": requested_client_id
+                })),
+            ).await;
             tracing::error!("Failed to create OAuth client: {:?}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -1259,6 +1407,14 @@ pub async fn delete_oauth_client(
                 )
                     .into_response()
             } else {
+                audit::emit_event(
+                    &db_pool,
+                    "admin.client.delete",
+                    "oauth_client",
+                    Some(client_id),
+                    "success",
+                    None,
+                ).await;
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
@@ -1269,6 +1425,14 @@ pub async fn delete_oauth_client(
             }
         }
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.client.delete",
+                "oauth_client",
+                Some(client_id),
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to delete OAuth client: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1455,7 +1619,16 @@ pub async fn update_oauth_client(
     .await;
 
     match result {
-        Ok(Some(client)) => (
+        Ok(Some(client)) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.client.update",
+                "oauth_client",
+                Some(client.id),
+                "success",
+                None,
+            ).await;
+            (
             StatusCode::OK,
             Json(OAuthClientResponse {
                 id: client.id,
@@ -1471,7 +1644,8 @@ pub async fn update_oauth_client(
                 ignore_virtual_groups: client.ignore_virtual_groups,
             }),
         )
-            .into_response(),
+            .into_response()
+        }
         Ok(None) => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
@@ -1481,6 +1655,14 @@ pub async fn update_oauth_client(
         )
             .into_response(),
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.client.update",
+                "oauth_client",
+                Some(client_id),
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to update OAuth client: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1697,6 +1879,16 @@ pub async fn create_claim_map(
 
     match result {
         Ok(claim_map) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.claim_map.create",
+                "claim_map",
+                Some(claim_map.id),
+                "success",
+                Some(serde_json::json!({
+                    "claim_name": claim_map.claim_name
+                })),
+            ).await;
             // Build response value based on kind
             let response_value = if claim_map.claim_value_kind == "array" {
                 claim_map.claim_value_json.as_ref()
@@ -1719,6 +1911,14 @@ pub async fn create_claim_map(
                 .into_response()
         }
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.claim_map.create",
+                "claim_map",
+                None,
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to create claim map: {:?}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -1829,6 +2029,14 @@ pub async fn delete_claim_map(
                 )
                     .into_response()
             } else {
+                audit::emit_event(
+                    &db_pool,
+                    "admin.claim_map.delete",
+                    "claim_map",
+                    Some(claim_map_id),
+                    "success",
+                    None,
+                ).await;
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
@@ -1839,6 +2047,14 @@ pub async fn delete_claim_map(
             }
         }
         Err(e) => {
+            audit::emit_event(
+                &db_pool,
+                "admin.claim_map.delete",
+                "claim_map",
+                Some(claim_map_id),
+                "failure",
+                Some(serde_json::json!({ "reason": e.to_string() })),
+            ).await;
             tracing::error!("Failed to delete claim map: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
