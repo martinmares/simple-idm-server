@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, name, description, is_virtual\n        FROM groups\n        WHERE tenant_id = $1\n        ORDER BY name\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        UPDATE groups\n        SET\n            name = COALESCE($1, name),\n            description = COALESCE($2, description),\n            is_virtual = COALESCE($3, is_virtual)\n        WHERE id = $4 AND tenant_id = $5 AND deleted_at IS NULL\n        RETURNING id, name, description, is_virtual\n        ",
   "describe": {
     "columns": [
       {
@@ -26,9 +26,11 @@
     ],
     "parameters": {
       "Left": [
+        "Varchar",
+        "Text",
+        "Bool",
         "Uuid",
-        "Int8",
-        "Int8"
+        "Uuid"
       ]
     },
     "nullable": [
@@ -38,5 +40,5 @@
       false
     ]
   },
-  "hash": "1c3467e1e3dc1a935b337eb93883a9906053f1511e85ba73a64874f18aa804a3"
+  "hash": "d57bf7968e48595a115ad060ab3f80a94bbb33be8ab72cdb8bee514baf1ff37f"
 }

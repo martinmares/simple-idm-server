@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT id FROM oauth_client_group_patterns WHERE id = $1 AND client_id = $2",
+  "query": "SELECT id FROM oauth_client_group_patterns WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -19,5 +19,5 @@
       false
     ]
   },
-  "hash": "8c8a41f58217e1785f83d595736e7ff47bb88417f857f7a6f78eb6e85aadac46"
+  "hash": "4bafdc74ab9a5105bff2e7800c729d61d16c05b09960448954a30dab5b210ccc"
 }

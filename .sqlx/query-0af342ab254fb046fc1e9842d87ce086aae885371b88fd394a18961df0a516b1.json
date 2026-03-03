@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT id, user_id, pattern, is_include, priority, created_at\n            FROM user_group_patterns\n            WHERE user_id = $1\n            ORDER BY priority ASC\n            ",
+  "query": "\n            SELECT id, user_id, pattern, is_include, priority, created_at\n            FROM user_group_patterns\n            WHERE user_id = $1\n              AND deleted_at IS NULL\n            ORDER BY priority ASC\n            ",
   "describe": {
     "columns": [
       {
@@ -48,5 +48,5 @@
       false
     ]
   },
-  "hash": "a50e68e9d0ea04b3c2bc8a1d5c3cd78b38ad706ee8554bef902dfadfea30a440"
+  "hash": "0af342ab254fb046fc1e9842d87ce086aae885371b88fd394a18961df0a516b1"
 }

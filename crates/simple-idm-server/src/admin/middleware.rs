@@ -160,7 +160,7 @@ pub async fn admin_auth_middleware(
 
 async fn load_active_client_ids(db_pool: &DbPool) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
-        "SELECT client_id FROM oauth_clients WHERE is_active = true",
+        "SELECT client_id FROM oauth_clients WHERE is_active = true AND deleted_at IS NULL",
     )
     .fetch_all(db_pool)
     .await

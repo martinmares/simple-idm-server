@@ -192,7 +192,7 @@ pub async fn handle_introspect(
 
 async fn load_active_client_ids(pool: &crate::db::DbPool) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
-        "SELECT client_id FROM oauth_clients WHERE is_active = true",
+        "SELECT client_id FROM oauth_clients WHERE is_active = true AND deleted_at IS NULL",
     )
     .fetch_all(pool)
     .await
@@ -252,7 +252,7 @@ async fn introspect_refresh_token(
             .into_response();
     }
 
-    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
         .bind(refresh_token.user_id)
         .fetch_optional(pool)
         .await

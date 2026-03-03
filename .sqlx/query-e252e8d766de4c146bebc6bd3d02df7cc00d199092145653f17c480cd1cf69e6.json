@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, user_id, pattern, is_include, priority, created_at\n        FROM user_group_patterns\n        WHERE user_id = $1\n        ORDER BY priority ASC, created_at ASC\n        ",
+  "query": "\n        SELECT id, client_id, pattern, is_include, priority, created_at\n        FROM oauth_client_group_patterns\n        WHERE client_id = $1\n          AND deleted_at IS NULL\n        ORDER BY priority ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -10,7 +10,7 @@
       },
       {
         "ordinal": 1,
-        "name": "user_id",
+        "name": "client_id",
         "type_info": "Uuid"
       },
       {
@@ -48,5 +48,5 @@
       false
     ]
   },
-  "hash": "b00036d5e9aad113f21b939fa5dd7c6d96068f7418ce3c3a58e99a9ad178983e"
+  "hash": "e252e8d766de4c146bebc6bd3d02df7cc00d199092145653f17c480cd1cf69e6"
 }

@@ -345,7 +345,7 @@ pub async fn handle_device_verify(
     // Ověř uživatele
     let user = match if state.allow_username_login {
         sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE tenant_id = $1 AND (username = $2 OR email = $2) AND is_active = true",
+            "SELECT * FROM users WHERE tenant_id = $1 AND (username = $2 OR email = $2) AND is_active = true AND deleted_at IS NULL",
         )
         .bind(tenant_id)
         .bind(&req.username)
@@ -353,7 +353,7 @@ pub async fn handle_device_verify(
         .await
     } else {
         sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE tenant_id = $1 AND email = $2 AND is_active = true",
+            "SELECT * FROM users WHERE tenant_id = $1 AND email = $2 AND is_active = true AND deleted_at IS NULL",
         )
         .bind(tenant_id)
         .bind(&req.username)
@@ -656,7 +656,7 @@ pub async fn handle_device_token_internal(
 
     // Načti klienta
     let client = match sqlx::query_as::<_, OAuthClient>(
-        "SELECT * FROM oauth_clients WHERE id = $1 AND is_active = true",
+        "SELECT * FROM oauth_clients WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
     )
     .bind(device_code.client_id)
     .fetch_optional(&state.db_pool)
@@ -686,7 +686,7 @@ pub async fn handle_device_token_internal(
     };
 
     // Načti uživatele
-    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1")
+    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
         .bind(user_id)
         .fetch_optional(&state.db_pool)
         .await
@@ -729,6 +729,7 @@ pub async fn handle_device_token_internal(
         SELECT id, client_id, pattern, is_include, priority, created_at
         FROM oauth_client_group_patterns
         WHERE client_id = $1
+          AND deleted_at IS NULL
         ORDER BY priority ASC
         "#,
         client.id

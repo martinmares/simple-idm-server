@@ -81,6 +81,7 @@ pub async fn resolve_oauth_client(
             JOIN tenants t ON t.id = oc.tenant_id
             WHERE oc.client_id = $1
               AND oc.is_active = true
+              AND oc.deleted_at IS NULL
               AND t.slug = $2
               AND t.is_active = true
             LIMIT 1
@@ -97,7 +98,7 @@ pub async fn resolve_oauth_client(
         }
 
         let tenant_exists = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM tenants WHERE slug = $1 AND is_active = true LIMIT 1",
+            "SELECT 1 FROM tenants WHERE slug = $1 AND is_active = true AND deleted_at IS NULL LIMIT 1",
         )
         .bind(hint)
         .fetch_optional(db_pool)
@@ -115,7 +116,7 @@ pub async fn resolve_oauth_client(
         r#"
         SELECT *
         FROM oauth_clients
-        WHERE client_id = $1 AND is_active = true
+        WHERE client_id = $1 AND is_active = true AND deleted_at IS NULL
         ORDER BY created_at ASC
         LIMIT 2
         "#,

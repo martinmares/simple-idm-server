@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, claim_map_id, pattern, is_include, priority, created_at\n        FROM claim_map_patterns\n        WHERE claim_map_id = $1\n        ORDER BY priority ASC\n        ",
+  "query": "\n        SELECT id, user_id, pattern, is_include, priority, created_at\n        FROM user_group_patterns\n        WHERE user_id = $1\n          AND deleted_at IS NULL\n        ORDER BY priority ASC, created_at ASC\n        ",
   "describe": {
     "columns": [
       {
@@ -10,7 +10,7 @@
       },
       {
         "ordinal": 1,
-        "name": "claim_map_id",
+        "name": "user_id",
         "type_info": "Uuid"
       },
       {
@@ -48,5 +48,5 @@
       false
     ]
   },
-  "hash": "2c0c10c76cf18a34874386694a23536a3f28eaad37fc847817fe38304d588921"
+  "hash": "525d43ba95d0262285cca9b960c56c18751cd95a5430a51bdc878196d99a3ed3"
 }

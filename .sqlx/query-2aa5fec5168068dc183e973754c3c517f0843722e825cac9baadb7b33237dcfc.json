@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT\n            ug.user_id,\n            u.username,\n            u.email,\n            ug.group_id,\n            g.name as group_name\n        FROM user_groups ug\n        JOIN users u ON u.id = ug.user_id\n        JOIN groups g ON g.id = ug.group_id\n        WHERE ug.tenant_id = $1\n        ORDER BY u.username, g.name\n        LIMIT $2 OFFSET $3\n        ",
+  "query": "\n        SELECT\n            ug.user_id,\n            u.username,\n            u.email,\n            ug.group_id,\n            g.name as group_name\n        FROM user_groups ug\n        JOIN users u ON u.id = ug.user_id\n        JOIN groups g ON g.id = ug.group_id\n        WHERE ug.tenant_id = $1\n          AND u.deleted_at IS NULL\n          AND g.deleted_at IS NULL\n        ORDER BY u.username, g.name\n        LIMIT $2 OFFSET $3\n        ",
   "describe": {
     "columns": [
       {
@@ -44,5 +44,5 @@
       false
     ]
   },
-  "hash": "6071b0fb05df8dd000c37e0623f56294ee0ce63e3ad3c09fd6c0768050f00ee9"
+  "hash": "2aa5fec5168068dc183e973754c3c517f0843722e825cac9baadb7b33237dcfc"
 }

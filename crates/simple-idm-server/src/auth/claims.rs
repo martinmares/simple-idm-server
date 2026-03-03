@@ -31,6 +31,7 @@ pub async fn build_custom_claims(
         SELECT id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json, updated_at
         FROM claim_maps
         WHERE client_id = $1
+          AND deleted_at IS NULL
         ORDER BY claim_name
         "#,
     )
@@ -63,6 +64,7 @@ pub async fn build_custom_claims(
                 SELECT id, claim_map_id, pattern, is_include, priority, created_at
                 FROM claim_map_patterns
                 WHERE claim_map_id = $1
+                  AND deleted_at IS NULL
                 ORDER BY priority ASC
                 "#,
             )
@@ -239,7 +241,7 @@ pub async fn get_user_group_names(
             r#"
             SELECT name
             FROM groups
-            WHERE id = ANY($1) AND is_virtual = false
+            WHERE id = ANY($1) AND is_virtual = false AND deleted_at IS NULL
             ORDER BY name
             "#,
         )
@@ -251,7 +253,7 @@ pub async fn get_user_group_names(
             r#"
             SELECT name
             FROM groups
-            WHERE id = ANY($1)
+            WHERE id = ANY($1) AND deleted_at IS NULL
             ORDER BY name
             "#,
         )
@@ -280,7 +282,7 @@ pub async fn get_direct_user_group_names(
             r#"
             SELECT name
             FROM groups
-            WHERE id = ANY($1) AND is_virtual = false
+            WHERE id = ANY($1) AND is_virtual = false AND deleted_at IS NULL
             ORDER BY name
             "#,
         )
@@ -292,7 +294,7 @@ pub async fn get_direct_user_group_names(
             r#"
             SELECT name
             FROM groups
-            WHERE id = ANY($1)
+            WHERE id = ANY($1) AND deleted_at IS NULL
             ORDER BY name
             "#,
         )

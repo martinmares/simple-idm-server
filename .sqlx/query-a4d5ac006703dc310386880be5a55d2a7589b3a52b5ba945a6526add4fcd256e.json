@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE users\n        SET\n            email = COALESCE($1, email),\n            password_hash = COALESCE($2, password_hash),\n            is_active = COALESCE($3, is_active),\n            updated_at = NOW()\n        WHERE id = $4 AND tenant_id = $5\n        RETURNING id, username, email, is_active\n        ",
+  "query": "\n        SELECT id, username, email, is_active\n        FROM users\n        WHERE tenant_id = $1 AND deleted_at IS NULL\n        ORDER BY username\n        LIMIT $2 OFFSET $3\n        ",
   "describe": {
     "columns": [
       {
@@ -26,11 +26,9 @@
     ],
     "parameters": {
       "Left": [
-        "Varchar",
-        "Varchar",
-        "Bool",
         "Uuid",
-        "Uuid"
+        "Int8",
+        "Int8"
       ]
     },
     "nullable": [
@@ -40,5 +38,5 @@
       false
     ]
   },
-  "hash": "8547bb747c5e815ddb87560aa2100eb0f436f28c601284f58025f1ec789be6cd"
+  "hash": "a4d5ac006703dc310386880be5a55d2a7589b3a52b5ba945a6526add4fcd256e"
 }

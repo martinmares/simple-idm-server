@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE user_group_patterns SET deleted_at = NOW() WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af71752785bcbd0ef421e306aea92e7cc1fad8bf39ad72f402e1bf27e6488bc0"
+}

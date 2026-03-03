@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, client_id, pattern, is_include, priority, created_at\n        FROM oauth_client_group_patterns\n        WHERE client_id = $1\n        ORDER BY priority ASC\n        ",
+  "query": "SELECT id, claim_map_id, pattern, is_include, priority, created_at FROM claim_map_patterns WHERE id = $1 AND claim_map_id = $2 AND deleted_at IS NULL",
   "describe": {
     "columns": [
       {
@@ -10,7 +10,7 @@
       },
       {
         "ordinal": 1,
-        "name": "client_id",
+        "name": "claim_map_id",
         "type_info": "Uuid"
       },
       {
@@ -36,6 +36,7 @@
     ],
     "parameters": {
       "Left": [
+        "Uuid",
         "Uuid"
       ]
     },
@@ -48,5 +49,5 @@
       false
     ]
   },
-  "hash": "88a636a27118fcc4797edcb38de6139adc1da51da42ef6822543b4af7862c178"
+  "hash": "266c16f7dfb1a2b57790be472ac593d396525a9b50d96b573326c4554f9d8e79"
 }

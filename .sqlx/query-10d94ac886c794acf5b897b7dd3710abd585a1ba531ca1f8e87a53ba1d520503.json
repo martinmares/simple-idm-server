@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE oauth_client_group_patterns SET deleted_at = NOW() WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "10d94ac886c794acf5b897b7dd3710abd585a1ba531ca1f8e87a53ba1d520503"
+}

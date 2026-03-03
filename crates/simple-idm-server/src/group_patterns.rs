@@ -80,7 +80,7 @@ pub async fn evaluate_and_sync_patterns(pool: &DbPool) {
     // Fetch all users who have patterns
     let users_with_patterns = match sqlx::query!(
         r#"
-        SELECT DISTINCT user_id FROM user_group_patterns
+        SELECT DISTINCT user_id FROM user_group_patterns WHERE deleted_at IS NULL
         "#
     )
     .fetch_all(pool)
@@ -101,7 +101,7 @@ pub async fn evaluate_and_sync_patterns(pool: &DbPool) {
     // Fetch all groups
     let all_groups = match sqlx::query_as!(
         Group,
-        r#"SELECT id, name, description, is_virtual, created_at, updated_at FROM groups"#
+        r#"SELECT id, name, description, is_virtual, created_at, updated_at FROM groups WHERE deleted_at IS NULL"#
     )
     .fetch_all(pool)
     .await
@@ -127,6 +127,7 @@ pub async fn evaluate_and_sync_patterns(pool: &DbPool) {
             SELECT id, user_id, pattern, is_include, priority, created_at
             FROM user_group_patterns
             WHERE user_id = $1
+              AND deleted_at IS NULL
             ORDER BY priority ASC
             "#,
             user_id

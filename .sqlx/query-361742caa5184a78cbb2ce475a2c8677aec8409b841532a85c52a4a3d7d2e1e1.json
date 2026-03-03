@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT id, name, description, is_virtual\n        FROM groups\n        ORDER BY name\n        ",
+  "query": "\n        SELECT id, name, description, is_virtual\n        FROM groups\n        WHERE deleted_at IS NULL\n        ORDER BY name\n        ",
   "describe": {
     "columns": [
       {
@@ -34,5 +34,5 @@
       false
     ]
   },
-  "hash": "f53a59641b655001ea5e0f36b1722f18642f54c8777f572b78213f9bfb11efb5"
+  "hash": "361742caa5184a78cbb2ce475a2c8677aec8409b841532a85c52a4a3d7d2e1e1"
 }

@@ -135,7 +135,7 @@ pub async fn handle_userinfo(
 
 async fn load_active_client_ids(pool: &DbPool) -> Result<Vec<String>, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
-        "SELECT client_id FROM oauth_clients WHERE is_active = true",
+        "SELECT client_id FROM oauth_clients WHERE is_active = true AND deleted_at IS NULL",
     )
     .fetch_all(pool)
     .await

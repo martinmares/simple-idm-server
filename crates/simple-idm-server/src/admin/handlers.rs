@@ -286,7 +286,7 @@ pub async fn create_user(
     let requested_email = req.email.clone();
     let tenant_id = default_tenant_id();
     let conflict = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM users WHERE tenant_id = $1 AND (email = $2 OR username = $3) LIMIT 1",
+        "SELECT 1 FROM users WHERE tenant_id = $1 AND deleted_at IS NULL AND (email = $2 OR username = $3) LIMIT 1",
     )
     .bind(tenant_id)
     .bind(&req.email)
@@ -406,7 +406,7 @@ pub async fn create_password_reset(
     Path(user_id): Path<Uuid>,
 ) -> impl IntoResponse {
     let user_exists = sqlx::query_scalar::<_, i64>(
-        "SELECT 1 FROM users WHERE id = $1 LIMIT 1",
+        "SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
     )
     .bind(user_id)
     .fetch_optional(&db_pool)
@@ -503,7 +503,7 @@ pub async fn list_users(
         r#"
         SELECT id, username, email, is_active
         FROM users
-        WHERE tenant_id = $1
+        WHERE tenant_id = $1 AND deleted_at IS NULL
         ORDER BY username
         LIMIT $2 OFFSET $3
         "#,
@@ -550,7 +550,7 @@ pub async fn update_user(
     let email = req.email.clone();
     if let Some(email) = &email {
         let conflict = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM users WHERE tenant_id = $1 AND username = $2 AND id <> $3 LIMIT 1",
+            "SELECT 1 FROM users WHERE tenant_id = $1 AND deleted_at IS NULL AND username = $2 AND id <> $3 LIMIT 1",
         )
         .bind(tenant_id)
         .bind(email)
@@ -608,7 +608,7 @@ pub async fn update_user(
             password_hash = COALESCE($2, password_hash),
             is_active = COALESCE($3, is_active),
             updated_at = NOW()
-        WHERE id = $4 AND tenant_id = $5
+        WHERE id = $4 AND tenant_id = $5 AND deleted_at IS NULL
         RETURNING id, username, email, is_active
         "#,
         email,
@@ -675,7 +675,10 @@ pub async fn delete_user(
     State(db_pool): State<DbPool>,
     Path(user_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!("DELETE FROM users WHERE id = $1", user_id)
+    let result = sqlx::query(
+        "UPDATE users SET is_active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+    )
+        .bind(user_id)
         .execute(&db_pool)
         .await;
 
@@ -702,7 +705,7 @@ pub async fn delete_user(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "User deleted successfully".to_string(),
+                        message: "User soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
@@ -815,7 +818,7 @@ pub async fn update_group(
 
     if let Some(name) = &req.name {
         let conflict = sqlx::query_scalar::<_, i64>(
-            "SELECT 1 FROM groups WHERE tenant_id = $1 AND name = $2 AND id <> $3 LIMIT 1",
+            "SELECT 1 FROM groups WHERE tenant_id = $1 AND deleted_at IS NULL AND name = $2 AND id <> $3 LIMIT 1",
         )
         .bind(tenant_id)
         .bind(name)
@@ -842,7 +845,7 @@ pub async fn update_group(
             name = COALESCE($1, name),
             description = COALESCE($2, description),
             is_virtual = COALESCE($3, is_virtual)
-        WHERE id = $4 AND tenant_id = $5
+        WHERE id = $4 AND tenant_id = $5 AND deleted_at IS NULL
         RETURNING id, name, description, is_virtual
         "#,
         req.name,
@@ -919,7 +922,7 @@ pub async fn list_groups(
         r#"
         SELECT id, name, description, is_virtual
         FROM groups
-        WHERE tenant_id = $1
+        WHERE tenant_id = $1 AND deleted_at IS NULL
         ORDER BY name
         LIMIT $2 OFFSET $3
         "#,
@@ -979,6 +982,8 @@ pub async fn list_user_groups(
         JOIN users u ON u.id = ug.user_id
         JOIN groups g ON g.id = ug.group_id
         WHERE ug.tenant_id = $1
+          AND u.deleted_at IS NULL
+          AND g.deleted_at IS NULL
         ORDER BY u.username, g.name
         LIMIT $2 OFFSET $3
         "#,
@@ -1021,7 +1026,10 @@ pub async fn delete_group(
     State(db_pool): State<DbPool>,
     Path(group_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!("DELETE FROM groups WHERE id = $1", group_id)
+    let result = sqlx::query(
+        "UPDATE groups SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+    )
+        .bind(group_id)
         .execute(&db_pool)
         .await;
 
@@ -1048,7 +1056,7 @@ pub async fn delete_group(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "Group deleted successfully".to_string(),
+                        message: "Group soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
@@ -1341,7 +1349,7 @@ pub async fn list_oauth_clients(
     };
 
     let result = sqlx::query_as::<_, OAuthClient>(
-        "SELECT * FROM oauth_clients WHERE tenant_id = $1 ORDER BY name LIMIT $2 OFFSET $3",
+        "SELECT * FROM oauth_clients WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name LIMIT $2 OFFSET $3",
     )
     .bind(default_tenant_id())
     .bind(limit)
@@ -1387,11 +1395,11 @@ pub async fn delete_oauth_client(
     State(db_pool): State<DbPool>,
     Path(client_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!(
-        "DELETE FROM oauth_clients WHERE id = $1 AND tenant_id = $2",
-        client_id,
-        default_tenant_id()
+    let result = sqlx::query(
+        "UPDATE oauth_clients SET is_active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL",
     )
+        .bind(client_id)
+        .bind(default_tenant_id())
         .execute(&db_pool)
         .await;
 
@@ -1418,7 +1426,7 @@ pub async fn delete_oauth_client(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "OAuth client deleted successfully".to_string(),
+                        message: "OAuth client soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
@@ -1534,7 +1542,7 @@ pub async fn update_oauth_client(
 
     if let Some(uris) = redirect_uris {
         let client = sqlx::query_scalar::<_, String>(
-            "SELECT client_id FROM oauth_clients WHERE id = $1 AND tenant_id = $2"
+            "SELECT client_id FROM oauth_clients WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL"
         )
         .bind(client_id)
         .bind(default_tenant_id())
@@ -1785,6 +1793,8 @@ pub async fn create_claim_map(
             WHERE oc.id = $1
               AND oc.tenant_id = $3
               AND g.tenant_id = $3
+              AND oc.deleted_at IS NULL
+              AND g.deleted_at IS NULL
         )
         "#,
     )
@@ -1949,6 +1959,9 @@ pub async fn list_claim_maps(
         JOIN groups g ON g.id = cm.group_id
         WHERE oc.tenant_id = $1
           AND g.tenant_id = $1
+          AND cm.deleted_at IS NULL
+          AND oc.deleted_at IS NULL
+          AND g.deleted_at IS NULL
         ORDER BY claim_name
         LIMIT $2 OFFSET $3
         "#,
@@ -2001,19 +2014,23 @@ pub async fn delete_claim_map(
     State(db_pool): State<DbPool>,
     Path(claim_map_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!(
+    let result = sqlx::query(
         r#"
-        DELETE FROM claim_maps cm
-        USING oauth_clients oc, groups g
+        UPDATE claim_maps cm
+        SET deleted_at = NOW(), updated_at = NOW()
+        FROM oauth_clients oc, groups g
         WHERE cm.id = $1
+          AND cm.deleted_at IS NULL
           AND oc.id = cm.client_id
           AND g.id = cm.group_id
           AND oc.tenant_id = $2
           AND g.tenant_id = $2
+          AND oc.deleted_at IS NULL
+          AND g.deleted_at IS NULL
         "#,
-        claim_map_id,
-        default_tenant_id()
     )
+        .bind(claim_map_id)
+        .bind(default_tenant_id())
         .execute(&db_pool)
         .await;
 
@@ -2040,7 +2057,7 @@ pub async fn delete_claim_map(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "Claim map deleted successfully".to_string(),
+                        message: "Claim map soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
@@ -2164,14 +2181,14 @@ pub async fn add_child_group(
 
     // Validate that both groups exist
     let parent_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1)"
+        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)"
     )
     .bind(parent_id)
     .fetch_one(&db_pool)
     .await;
 
     let child_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1)"
+        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)"
     )
     .bind(child_id)
     .fetch_one(&db_pool)
@@ -2241,7 +2258,7 @@ pub async fn add_child_group(
         Ok(_) => {
             // Fetch child group details for response
             let child = sqlx::query!(
-                "SELECT id, name, description FROM groups WHERE id = $1",
+                "SELECT id, name, description FROM groups WHERE id = $1 AND deleted_at IS NULL",
                 child_id
             )
             .fetch_one(&db_pool)
@@ -2358,7 +2375,7 @@ pub async fn list_child_groups(
 
                 // Fetch group details for all children
         let children = sqlx::query_as::<_, (Uuid, String, Option<String>, bool)>(
-            "SELECT id, name, description, is_virtual FROM groups WHERE id = ANY($1) ORDER BY name"
+            "SELECT id, name, description, is_virtual FROM groups WHERE id = ANY($1) AND deleted_at IS NULL ORDER BY name"
         )
         .bind(&child_ids)
         .fetch_all(&db_pool)
@@ -2527,6 +2544,7 @@ pub async fn list_user_group_patterns(
         SELECT id, user_id, pattern, is_include, priority, created_at
         FROM user_group_patterns
         WHERE user_id = $1
+          AND deleted_at IS NULL
         ORDER BY priority ASC, created_at ASC
         "#,
         user_id
@@ -2579,7 +2597,7 @@ pub async fn update_user_group_pattern(
 ) -> impl IntoResponse {
     // Verify the pattern belongs to the user
     let exists = sqlx::query!(
-        "SELECT id FROM user_group_patterns WHERE id = $1 AND user_id = $2",
+        "SELECT id FROM user_group_patterns WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
         pattern_id,
         user_id
     )
@@ -2687,7 +2705,7 @@ pub async fn delete_user_group_pattern(
     Path((user_id, pattern_id)): Path<(Uuid, Uuid)>,
 ) -> impl IntoResponse {
     let result = sqlx::query!(
-        "DELETE FROM user_group_patterns WHERE id = $1 AND user_id = $2",
+        "UPDATE user_group_patterns SET deleted_at = NOW() WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL",
         pattern_id,
         user_id
     )
@@ -2710,7 +2728,7 @@ pub async fn delete_user_group_pattern(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "Pattern deleted successfully".to_string(),
+                        message: "Pattern soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
@@ -2819,6 +2837,7 @@ pub async fn list_client_group_patterns(
         SELECT id, client_id, pattern, is_include, priority, created_at
         FROM oauth_client_group_patterns
         WHERE client_id = $1
+          AND deleted_at IS NULL
         ORDER BY priority ASC, created_at ASC
         "#,
         client_id
@@ -2864,7 +2883,7 @@ pub async fn update_client_group_pattern(
 ) -> impl IntoResponse {
     // Verify pattern belongs to client
     let verify = sqlx::query!(
-        "SELECT id FROM oauth_client_group_patterns WHERE id = $1 AND client_id = $2",
+        "SELECT id FROM oauth_client_group_patterns WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL",
         pattern_id,
         client_id
     )
@@ -2978,7 +2997,7 @@ pub async fn delete_client_group_pattern(
     Path((client_id, pattern_id)): Path<(Uuid, Uuid)>,
 ) -> impl IntoResponse {
     let result = sqlx::query!(
-        "DELETE FROM oauth_client_group_patterns WHERE id = $1 AND client_id = $2",
+        "UPDATE oauth_client_group_patterns SET deleted_at = NOW() WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL",
         pattern_id,
         client_id
     )
@@ -3001,7 +3020,7 @@ pub async fn delete_client_group_pattern(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "Pattern deleted successfully".to_string(),
+                        message: "Pattern soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
@@ -3033,6 +3052,7 @@ pub async fn get_groups_tree(State(db_pool): State<DbPool>) -> impl IntoResponse
         r#"
         SELECT id, name, description, is_virtual
         FROM groups
+        WHERE deleted_at IS NULL
         ORDER BY name
         "#
     )
@@ -3143,7 +3163,7 @@ pub async fn create_claim_map_pattern(
 ) -> impl IntoResponse {
     // Validate claim_map exists
     let claim_map_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM claim_maps WHERE id = $1)"
+        "SELECT EXISTS(SELECT 1 FROM claim_maps WHERE id = $1 AND deleted_at IS NULL)"
     )
     .bind(claim_map_id)
     .fetch_one(&db_pool)
@@ -3216,6 +3236,7 @@ pub async fn list_claim_map_patterns(
         SELECT id, claim_map_id, pattern, is_include, priority, created_at
         FROM claim_map_patterns
         WHERE claim_map_id = $1
+          AND deleted_at IS NULL
         ORDER BY priority ASC
         "#,
         claim_map_id
@@ -3262,7 +3283,7 @@ pub async fn update_claim_map_pattern(
     // Fetch existing pattern
     let existing = sqlx::query_as!(
         crate::db::models::ClaimMapPattern,
-        "SELECT id, claim_map_id, pattern, is_include, priority, created_at FROM claim_map_patterns WHERE id = $1 AND claim_map_id = $2",
+        "SELECT id, claim_map_id, pattern, is_include, priority, created_at FROM claim_map_patterns WHERE id = $1 AND claim_map_id = $2 AND deleted_at IS NULL",
         pattern_id,
         claim_map_id
     )
@@ -3349,11 +3370,11 @@ pub async fn delete_claim_map_pattern(
     State(db_pool): State<DbPool>,
     Path((claim_map_id, pattern_id)): Path<(Uuid, Uuid)>,
 ) -> impl IntoResponse {
-    let result = sqlx::query!(
-        "DELETE FROM claim_map_patterns WHERE id = $1 AND claim_map_id = $2",
-        pattern_id,
-        claim_map_id
+    let result = sqlx::query(
+        "UPDATE claim_map_patterns SET deleted_at = NOW() WHERE id = $1 AND claim_map_id = $2 AND deleted_at IS NULL",
     )
+    .bind(pattern_id)
+    .bind(claim_map_id)
     .execute(&db_pool)
     .await;
 
@@ -3373,7 +3394,7 @@ pub async fn delete_claim_map_pattern(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "Pattern deleted successfully".to_string(),
+                        message: "Pattern soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
@@ -3450,6 +3471,7 @@ pub async fn list_tenants(
         r#"
         SELECT id, slug, name, mode::text AS mode, is_active
         FROM tenants
+        WHERE deleted_at IS NULL
         ORDER BY slug
         LIMIT $1 OFFSET $2
         "#,
@@ -3515,7 +3537,7 @@ pub async fn update_tenant(
             name = COALESCE($2, name),
             mode = COALESCE($3::tenant_mode, mode),
             is_active = COALESCE($4, is_active)
-        WHERE id = $5
+        WHERE id = $5 AND deleted_at IS NULL
         RETURNING id, slug, name, mode::text AS mode, is_active
         "#,
     )
@@ -3566,7 +3588,7 @@ pub async fn delete_tenant(
             .into_response();
     }
 
-    let result = sqlx::query("DELETE FROM tenants WHERE id = $1")
+    let result = sqlx::query("UPDATE tenants SET is_active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL")
         .bind(tenant_id)
         .execute(&db_pool)
         .await;
@@ -3586,7 +3608,7 @@ pub async fn delete_tenant(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "Tenant deleted successfully".to_string(),
+                        message: "Tenant soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
@@ -3689,7 +3711,7 @@ pub async fn list_tenant_domains(
         r#"
         SELECT id, tenant_id, domain, is_primary, is_active
         FROM tenant_domains
-        WHERE tenant_id = $1
+        WHERE tenant_id = $1 AND deleted_at IS NULL
         ORDER BY is_primary DESC, domain ASC
         "#,
     )
@@ -3761,7 +3783,7 @@ pub async fn update_tenant_domain(
             domain = COALESCE($1, domain),
             is_primary = COALESCE($2, is_primary),
             is_active = COALESCE($3, is_active)
-        WHERE tenant_id = $4 AND id = $5
+        WHERE tenant_id = $4 AND id = $5 AND deleted_at IS NULL
         RETURNING id, tenant_id, domain, is_primary, is_active
         "#,
     )
@@ -3819,7 +3841,7 @@ pub async fn delete_tenant_domain(
     State(db_pool): State<DbPool>,
     Path((tenant_id, domain_id)): Path<(Uuid, Uuid)>,
 ) -> impl IntoResponse {
-    let result = sqlx::query("DELETE FROM tenant_domains WHERE tenant_id = $1 AND id = $2")
+    let result = sqlx::query("UPDATE tenant_domains SET is_active = false, deleted_at = NOW() WHERE tenant_id = $1 AND id = $2 AND deleted_at IS NULL")
     .bind(tenant_id)
     .bind(domain_id)
     .execute(&db_pool)
@@ -3840,7 +3862,7 @@ pub async fn delete_tenant_domain(
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
-                        message: "Tenant domain deleted successfully".to_string(),
+                        message: "Tenant domain soft-deleted successfully".to_string(),
                     }),
                 )
                     .into_response()
