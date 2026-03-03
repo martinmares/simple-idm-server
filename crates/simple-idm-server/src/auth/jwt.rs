@@ -1,5 +1,7 @@
 use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use jsonwebtoken::{
+    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+};
 use rsa::pkcs8::DecodePublicKey;
 use rsa::traits::PublicKeyParts;
 use rsa::RsaPublicKey;
@@ -19,6 +21,10 @@ pub enum JwtError {
     KeyFileError(String),
     #[error("Invalid token")]
     InvalidToken,
+    #[error("Invalid token audience")]
+    InvalidAudience,
+    #[error("Insufficient scope")]
+    InsufficientScope,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -42,9 +48,10 @@ pub struct Claims {
 
 pub struct JwtService {
     encoding_key: EncodingKey,
-    decoding_key: DecodingKey,
+    active_decoding_key: DecodingKey,
     pub issuer: String,
-    public_key_path: String,
+    public_key_paths: Vec<(String, String)>, // (kid, path)
+    decoding_keys: HashMap<String, DecodingKey>,
     key_id: String,
 }
 
@@ -54,6 +61,7 @@ impl JwtService {
         public_key_path: &str,
         issuer: String,
         key_id: String,
+        additional_public_keys: Vec<(String, String)>,
     ) -> Result<Self, JwtError> {
         let private_key = fs::read(private_key_path)
             .map_err(|e| JwtError::KeyFileError(format!("Private key: {}", e)))?;
@@ -62,14 +70,32 @@ impl JwtService {
 
         let encoding_key = EncodingKey::from_rsa_pem(&private_key)
             .map_err(|e| JwtError::KeyFileError(format!("Invalid private key: {}", e)))?;
-        let decoding_key = DecodingKey::from_rsa_pem(&public_key)
+        let active_decoding_key = DecodingKey::from_rsa_pem(&public_key)
             .map_err(|e| JwtError::KeyFileError(format!("Invalid public key: {}", e)))?;
+
+        let mut decoding_keys = HashMap::new();
+        decoding_keys.insert(key_id.clone(), active_decoding_key.clone());
+
+        let mut public_key_paths = vec![(key_id.clone(), public_key_path.to_string())];
+        for (kid, path) in additional_public_keys {
+            if kid == key_id {
+                continue;
+            }
+            let additional_pem = fs::read(&path)
+                .map_err(|e| JwtError::KeyFileError(format!("Public key ({}): {}", path, e)))?;
+            let additional_decoding_key = DecodingKey::from_rsa_pem(&additional_pem).map_err(|e| {
+                JwtError::KeyFileError(format!("Invalid additional public key ({}): {}", path, e))
+            })?;
+            decoding_keys.insert(kid.clone(), additional_decoding_key);
+            public_key_paths.push((kid, path));
+        }
 
         Ok(Self {
             encoding_key,
-            decoding_key,
+            active_decoding_key,
             issuer,
-            public_key_path: public_key_path.to_string(),
+            public_key_paths,
+            decoding_keys,
             key_id,
         })
     }
@@ -144,13 +170,26 @@ impl JwtService {
             .map_err(|e| JwtError::EncodeError(e.to_string()))
     }
 
-    pub fn verify_token(&self, token: &str) -> Result<Claims, JwtError> {
+    fn decode_token_without_audience_validation(
+        &self,
+        token: &str,
+    ) -> Result<Claims, JwtError> {
+        let header = decode_header(token)
+            .map_err(|e| JwtError::DecodeError(format!("Invalid token header: {}", e)))?;
+
+        let decoding_key = if let Some(kid) = header.kid {
+            self.decoding_keys.get(&kid).ok_or_else(|| {
+                JwtError::DecodeError(format!("Unknown key id (kid): {}", kid))
+            })?
+        } else {
+            &self.active_decoding_key
+        };
+
         let mut validation = Validation::new(Algorithm::RS256);
         validation.set_issuer(&[&self.issuer]);
-        // Don't validate audience for now - allows more flexible token usage
         validation.validate_aud = false;
 
-        decode::<Claims>(token, &self.decoding_key, &validation)
+        decode::<Claims>(token, decoding_key, &validation)
             .map(|data| data.claims)
             .map_err(|e| {
                 tracing::error!("JWT verification failed: {}", e);
@@ -158,25 +197,105 @@ impl JwtService {
             })
     }
 
+    #[deprecated(
+        note = "Use verify_access_token(token, expected_audiences, required_scopes) for access-token protected endpoints"
+    )]
+    pub fn verify_token(&self, token: &str) -> Result<Claims, JwtError> {
+        self.decode_token_without_audience_validation(token)
+    }
+
+    pub fn verify_access_token(
+        &self,
+        token: &str,
+        expected_audiences: &[String],
+        required_scopes: &[&str],
+    ) -> Result<Claims, JwtError> {
+        let claims = self.decode_token_without_audience_validation(token)?;
+
+        if claims.aud.is_empty()
+            || !claims
+                .aud
+                .iter()
+                .any(|aud| expected_audiences.iter().any(|expected| expected == aud))
+        {
+            return Err(JwtError::InvalidAudience);
+        }
+
+        if !required_scopes.is_empty() {
+            let token_scopes = claims.scope.as_deref().unwrap_or("");
+            let has_all_scopes = required_scopes.iter().all(|required| {
+                token_scopes
+                    .split_whitespace()
+                    .any(|value| value == *required)
+            });
+            if !has_all_scopes {
+                return Err(JwtError::InsufficientScope);
+            }
+        }
+
+        Ok(claims)
+    }
+
+    pub fn verify_token_for_audience(
+        &self,
+        token: &str,
+        expected_audience: &str,
+    ) -> Result<Claims, JwtError> {
+        self.verify_access_token(token, &[expected_audience.to_string()], &[])
+    }
+
     /// Get JWKS (JSON Web Key Set) for public key distribution
     ///
     /// Reads the public key from PEM file and converts it to JWK format
     pub fn get_jwks(&self) -> Result<crate::jwks::JsonWebKeySet, JwtError> {
-        // Read public key PEM file
-        let pem_data = fs::read_to_string(&self.public_key_path)
-            .map_err(|e| JwtError::KeyFileError(format!("Failed to read public key: {}", e)))?;
+        let mut keys = Vec::new();
+        for (kid, path) in &self.public_key_paths {
+            let pem_data = fs::read_to_string(path).map_err(|e| {
+                JwtError::KeyFileError(format!("Failed to read public key ({}): {}", path, e))
+            })?;
+            let public_key = RsaPublicKey::from_public_key_pem(&pem_data).map_err(|e| {
+                JwtError::KeyFileError(format!("Failed to parse public key ({}): {}", path, e))
+            })?;
+            let n = public_key.n().to_bytes_be();
+            let e = public_key.e().to_bytes_be();
+            keys.push(crate::jwks::rsa_components_to_jwk(&n, &e, Some(kid.clone())));
+        }
 
-        // Parse RSA public key from PEM
-        let public_key = RsaPublicKey::from_public_key_pem(&pem_data)
-            .map_err(|e| JwtError::KeyFileError(format!("Failed to parse public key: {}", e)))?;
+        Ok(crate::jwks::JsonWebKeySet { keys })
+    }
+}
 
-        // Extract RSA components (n and e)
-        let n = public_key.n().to_bytes_be();
-        let e = public_key.e().to_bytes_be();
+#[cfg(test)]
+mod tests {
+    use super::JwtService;
+    use std::path::PathBuf;
 
-        // Convert to JWK with configured key_id
-        let jwk = crate::jwks::rsa_components_to_jwk(&n, &e, Some(self.key_id.clone()));
+    fn repo_path(rel: &str) -> String {
+        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        p.push("..");
+        p.push("..");
+        p.push(rel);
+        p.to_string_lossy().to_string()
+    }
 
-        Ok(crate::jwks::JsonWebKeySet { keys: vec![jwk] })
+    #[test]
+    fn jwks_contains_active_and_additional_keys() {
+        let private_key = repo_path("keys/private.pem");
+        let public_key = repo_path("keys/public.pem");
+
+        let service = JwtService::new(
+            &private_key,
+            &public_key,
+            "http://localhost:8080".to_string(),
+            "active-key".to_string(),
+            vec![("old-key".to_string(), public_key.clone())],
+        )
+        .expect("jwt service should initialize");
+
+        let jwks = service.get_jwks().expect("jwks should generate");
+        assert_eq!(jwks.keys.len(), 2);
+        let kids: Vec<String> = jwks.keys.into_iter().filter_map(|k| k.kid).collect();
+        assert!(kids.iter().any(|k| k == "active-key"));
+        assert!(kids.iter().any(|k| k == "old-key"));
     }
 }

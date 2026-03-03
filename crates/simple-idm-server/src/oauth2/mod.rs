@@ -5,6 +5,7 @@ pub mod device_flow;
 pub mod introspection;
 pub mod revocation;
 pub mod userinfo;
+mod throttle;
 mod utils;
 pub mod templates;
 

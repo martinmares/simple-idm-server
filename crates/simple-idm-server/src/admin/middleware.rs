@@ -22,6 +22,8 @@ struct ErrorResponse {
 #[derive(Clone)]
 pub struct AdminAuth {
     pub admin_root_token: Option<String>,
+    pub allow_legacy_admin_group: bool,
+    pub allow_admin_substring_claim: bool,
     pub jwt_service: Arc<JwtService>,
     pub db_pool: DbPool,
 }
@@ -30,6 +32,8 @@ impl AdminAuth {
     pub fn new(config: &Config, jwt_service: Arc<JwtService>, db_pool: DbPool) -> Self {
         Self {
             admin_root_token: config.admin.root_token.clone(),
+            allow_legacy_admin_group: config.admin.allow_legacy_admin_group,
+            allow_admin_substring_claim: config.admin.allow_admin_substring_claim,
             jwt_service,
             db_pool,
         }
@@ -85,59 +89,47 @@ pub async fn admin_auth_middleware(
     }
 
     // Strategy 2: Verify JWT token and check for admin permissions
-    match admin_auth.jwt_service.verify_token(token) {
-        Ok(claims) => {
-            if claims.aud.is_empty() {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "unauthorized".to_string(),
-                        error_description: "Missing token audience".to_string(),
-                    }),
-                )
-                    .into_response());
-            }
-
-            let aud_valid = match sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*) FROM oauth_clients WHERE client_id = ANY($1) AND is_active = true",
+    let active_audiences = match load_active_client_ids(&admin_auth.db_pool).await {
+        Ok(list) if !list.is_empty() => list,
+        _ => {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "unauthorized".to_string(),
+                    error_description: "No active audiences available".to_string(),
+                }),
             )
-            .bind(&claims.aud)
-            .fetch_one(&admin_auth.db_pool)
-            .await
-            {
-                Ok(count) => count > 0,
-                Err(_) => false,
-            };
+                .into_response())
+        }
+    };
 
-            if !aud_valid {
-                return Err((
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "unauthorized".to_string(),
-                        error_description: "Invalid token audience".to_string(),
-                    }),
-                )
-                    .into_response());
-            }
-
+    match admin_auth
+        .jwt_service
+        .verify_access_token(token, &active_audiences, &[])
+    {
+        Ok(claims) => {
             // Check if token has admin permissions
             // 1. Check groups for "simple-idm:role:admin" group (naming convention)
             if claims.groups.contains(&"simple-idm:role:admin".to_string()) {
                 return Ok(next.run(request).await);
             }
 
-            // 2. DEPRECATED: Backward compatibility for old "admin" group
-            if claims.groups.contains(&"admin".to_string()) {
+            // 2. Optional backward compatibility for old "admin" group
+            if admin_auth.allow_legacy_admin_group
+                && claims.groups.contains(&"admin".to_string())
+            {
                 tracing::warn!(
                     "User has deprecated 'admin' group - please migrate to 'simple-idm:role:admin'"
                 );
                 return Ok(next.run(request).await);
             }
 
-            // 3. Check custom claims for admin-related claims (fallback)
-            for key in claims.custom_claims.keys() {
-                if key.starts_with("admin") || key.contains("admin") {
-                    return Ok(next.run(request).await);
+            // 3. Optional legacy fallback: admin substring in custom claim key
+            if admin_auth.allow_admin_substring_claim {
+                for key in claims.custom_claims.keys() {
+                    if key.starts_with("admin") || key.contains("admin") {
+                        return Ok(next.run(request).await);
+                    }
                 }
             }
 
@@ -164,4 +156,12 @@ pub async fn admin_auth_middleware(
                 .into_response())
         }
     }
+}
+
+async fn load_active_client_ids(db_pool: &DbPool) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT client_id FROM oauth_clients WHERE is_active = true",
+    )
+    .fetch_all(db_pool)
+    .await
 }

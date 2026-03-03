@@ -63,47 +63,27 @@ pub async fn handle_userinfo(
 
     let token = &auth_header[7..]; // Skip "Bearer "
 
+    let active_audiences = match load_active_client_ids(&state.db_pool).await {
+        Ok(audiences) if !audiences.is_empty() => audiences,
+        _ => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "invalid_token".to_string(),
+                    error_description: "No active audiences available".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    };
+
     // Verify and decode token
-    match state.jwt_service.verify_token(token) {
+    match state
+        .jwt_service
+        .verify_access_token(token, &active_audiences, &["openid"])
+    {
         Ok(claims) => {
-            if claims.aud.is_empty() {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "invalid_token".to_string(),
-                        error_description: "Missing token audience".to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-
-            let aud_valid = has_valid_audience(&state.db_pool, &claims.aud)
-                .await
-                .unwrap_or_default();
-
-            if !aud_valid {
-                return (
-                    StatusCode::UNAUTHORIZED,
-                    Json(ErrorResponse {
-                        error: "invalid_token".to_string(),
-                        error_description: "Invalid token audience".to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-
             let scope = claims.scope.as_deref().unwrap_or("");
-            if !has_scope(scope, "openid") {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(ErrorResponse {
-                        error: "insufficient_scope".to_string(),
-                        error_description: "Missing required scope: openid".to_string(),
-                    }),
-                )
-                    .into_response();
-            }
-
             let email = if has_scope(scope, "email") {
                 claims.email
             } else {
@@ -132,26 +112,33 @@ pub async fn handle_userinfo(
 
             (StatusCode::OK, Json(userinfo)).into_response()
         }
-        Err(_) => (
-            StatusCode::UNAUTHORIZED,
-            Json(ErrorResponse {
-                error: "invalid_token".to_string(),
-                error_description: "Invalid or expired token".to_string(),
-            }),
-        )
-            .into_response(),
+        Err(err) => match err {
+            crate::auth::jwt::JwtError::InsufficientScope => (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "insufficient_scope".to_string(),
+                    error_description: "Missing required scope: openid".to_string(),
+                }),
+            )
+                .into_response(),
+            _ => (
+                StatusCode::UNAUTHORIZED,
+                Json(ErrorResponse {
+                    error: "invalid_token".to_string(),
+                    error_description: "Invalid or expired token".to_string(),
+                }),
+            )
+                .into_response(),
+        },
     }
 }
 
-async fn has_valid_audience(pool: &DbPool, audiences: &[String]) -> Result<bool, sqlx::Error> {
-    let count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM oauth_clients WHERE client_id = ANY($1) AND is_active = true",
+async fn load_active_client_ids(pool: &DbPool) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT client_id FROM oauth_clients WHERE is_active = true",
     )
-    .bind(audiences)
-    .fetch_one(pool)
-    .await?;
-
-    Ok(count > 0)
+    .fetch_all(pool)
+    .await
 }
 
 fn has_scope(scope: &str, expected: &str) -> bool {

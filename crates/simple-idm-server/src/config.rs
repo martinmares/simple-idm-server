@@ -13,6 +13,8 @@ pub struct Config {
     pub ui: UiConfig,
     pub identity: IdentityConfig,
     pub ad_auth: AdAuthConfig,
+    pub security: SecurityConfig,
+    pub auth_protection: AuthProtectionConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +38,7 @@ pub struct JwtConfig {
     pub private_key_path: String,
     pub public_key_path: String,
     pub key_id: String, // kid for JWKS
+    pub additional_public_keys: Vec<(String, String)>, // (kid, public_key_path)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -49,6 +52,8 @@ pub struct RateLimitConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct AdminConfig {
     pub root_token: Option<String>,
+    pub allow_legacy_admin_group: bool,
+    pub allow_admin_substring_claim: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -95,6 +100,21 @@ pub struct AdAuthConfig {
     pub domains: Vec<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct SecurityConfig {
+    pub app_env: String,
+    pub trust_proxy_headers: bool,
+    pub force_secure_cookies: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AuthProtectionConfig {
+    pub enabled: bool,
+    pub failure_window_seconds: i64,
+    pub max_failures: i32,
+    pub lockout_seconds: i64,
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, config::ConfigError> {
         let server_host = env::var("SERVER_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
@@ -130,8 +150,20 @@ impl Config {
             .unwrap_or_else(|_| "./keys/public.pem".to_string());
         let key_id = env::var("JWT_KEY_ID")
             .unwrap_or_else(|_| "default-key-2025".to_string());
+        let additional_public_keys = parse_additional_public_keys(
+            &env::var("JWT_ADDITIONAL_PUBLIC_KEYS").unwrap_or_default(),
+        );
 
         let admin_root_token = env::var("ADMIN_ROOT_TOKEN").ok();
+        let admin_allow_legacy_admin_group = env::var("ALLOW_LEGACY_ADMIN_GROUP")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse()
+            .unwrap_or(false);
+        let admin_allow_admin_substring_claim =
+            env::var("ALLOW_ADMIN_SUBSTRING_CLAIM")
+                .unwrap_or_else(|_| "false".to_string())
+                .parse()
+                .unwrap_or(false);
         let rate_limit_rps = env::var("RATE_LIMIT_REQUESTS_PER_SECOND")
             .unwrap_or_else(|_| "5".to_string())
             .parse()
@@ -240,6 +272,43 @@ impl Config {
             .filter(|d| !d.is_empty())
             .collect::<Vec<_>>();
 
+        let app_env = env::var("APP_ENV")
+            .or_else(|_| env::var("MODE"))
+            .unwrap_or_else(|_| "development".to_string())
+            .to_lowercase();
+        let trust_proxy_headers = env::var("TRUST_PROXY_HEADERS")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse()
+            .unwrap_or(false);
+        let force_secure_cookies = env::var("FORCE_SECURE_COOKIES")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .unwrap_or(true);
+        let auth_protection_enabled = env::var("AUTH_PROTECTION_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .unwrap_or(true);
+        let auth_failure_window_seconds = env::var("AUTH_FAILURE_WINDOW_SECONDS")
+            .unwrap_or_else(|_| "900".to_string())
+            .parse()
+            .unwrap_or(900);
+        let auth_max_failures = env::var("AUTH_MAX_FAILURES")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .unwrap_or(5);
+        let auth_lockout_seconds = env::var("AUTH_LOCKOUT_SECONDS")
+            .unwrap_or_else(|_| "900".to_string())
+            .parse()
+            .unwrap_or(900);
+
+        if matches!(app_env.as_str(), "prod" | "production")
+            && admin_root_token.is_some()
+        {
+            return Err(config::ConfigError::Message(
+                "ADMIN_ROOT_TOKEN is forbidden in production".to_string(),
+            ));
+        }
+
         Ok(Config {
             server: ServerConfig {
                 host: server_host,
@@ -255,6 +324,7 @@ impl Config {
                 private_key_path,
                 public_key_path,
                 key_id,
+                additional_public_keys,
             },
             rate_limit: RateLimitConfig {
                 requests_per_second: rate_limit_rps,
@@ -264,6 +334,8 @@ impl Config {
             },
             admin: AdminConfig {
                 root_token: admin_root_token,
+                allow_legacy_admin_group: admin_allow_legacy_admin_group,
+                allow_admin_substring_claim: admin_allow_admin_substring_claim,
             },
             device_flow: DeviceFlowConfig {
                 expiry_seconds: device_code_expiry,
@@ -299,6 +371,65 @@ impl Config {
                 allow_insecure: ad_auth_allow_insecure,
                 domains: ad_auth_domains,
             },
+            security: SecurityConfig {
+                app_env,
+                trust_proxy_headers,
+                force_secure_cookies,
+            },
+            auth_protection: AuthProtectionConfig {
+                enabled: auth_protection_enabled,
+                failure_window_seconds: auth_failure_window_seconds,
+                max_failures: auth_max_failures,
+                lockout_seconds: auth_lockout_seconds,
+            },
         })
+    }
+}
+
+fn parse_additional_public_keys(input: &str) -> Vec<(String, String)> {
+    input
+        .split(',')
+        .filter_map(|entry| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let mut parts = trimmed.splitn(2, '=');
+            let kid = parts.next()?.trim();
+            let path = parts.next()?.trim();
+            if kid.is_empty() || path.is_empty() {
+                return None;
+            }
+            Some((kid.to_string(), path.to_string()))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_additional_public_keys;
+
+    #[test]
+    fn parse_additional_public_keys_empty() {
+        assert!(parse_additional_public_keys("").is_empty());
+        assert!(parse_additional_public_keys(" , ").is_empty());
+    }
+
+    #[test]
+    fn parse_additional_public_keys_valid_entries() {
+        let parsed = parse_additional_public_keys("old-key=./keys/old.pem,new-key=./keys/new.pem");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].0, "old-key");
+        assert_eq!(parsed[0].1, "./keys/old.pem");
+        assert_eq!(parsed[1].0, "new-key");
+        assert_eq!(parsed[1].1, "./keys/new.pem");
+    }
+
+    #[test]
+    fn parse_additional_public_keys_skips_invalid_entries() {
+        let parsed = parse_additional_public_keys("bad-entry,ok=./keys/ok.pem,also-bad=");
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].0, "ok");
+        assert_eq!(parsed[0].1, "./keys/ok.pem");
     }
 }

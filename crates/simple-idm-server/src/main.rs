@@ -128,6 +128,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.jwt.public_key_path,
         config.jwt.issuer.clone(),
         config.jwt.key_id.clone(),
+        config.jwt.additional_public_keys.clone(),
     )?);
 
     // Vytvoř OAuth2 state
@@ -180,6 +181,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allowed_email_domains: config.identity.allowed_email_domains.clone(),
         ldap_auth,
         ldap_auth_domains: config.ad_auth.domains.clone(),
+        trust_proxy_headers: config.security.trust_proxy_headers,
+        force_secure_cookies: config.security.force_secure_cookies,
+        auth_protection: config.auth_protection.clone(),
     });
 
     let cleanup_interval = config.jwt.refresh_token_cleanup_interval_seconds;
@@ -422,6 +426,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.rate_limit.burst_size,
         config.rate_limit.token_endpoint_requests_per_second,
         config.rate_limit.token_endpoint_burst_size
+    );
+    tracing::info!(
+        "Auth protection {} (window={}s, max_failures={}, lockout={}s)",
+        if config.auth_protection.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        config.auth_protection.failure_window_seconds,
+        config.auth_protection.max_failures,
+        config.auth_protection.lockout_seconds
     );
 
     // Globální rate limiter

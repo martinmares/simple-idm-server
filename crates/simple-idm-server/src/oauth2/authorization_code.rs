@@ -2,6 +2,7 @@ use crate::auth::{
     build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
     get_user_group_names, verify_password,
 };
+use crate::audit;
 use crate::client_group_filters::apply_client_group_filters;
 use crate::db::models::{AuthenticationSession, AuthorizationCode, OAuthClient, OAuthClientGroupPattern, RefreshToken, UsedRefreshToken, User};
 use axum::{
@@ -27,6 +28,7 @@ const EMPTY_CLIENT_SECRET_HASH: &str =
 
 use super::client_credentials::{ErrorResponse, OAuth2State};
 use super::cleanup::cleanup_refresh_tokens;
+use super::throttle;
 use super::templates;
 use super::utils::{apply_client_auth, resolve_oauth_client, ClientLookupError};
 use simple_idm_ad_auth::verify_ldap_password;
@@ -62,6 +64,7 @@ pub struct LoginRequest {
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
     pub nonce: Option<String>,
+    pub csrf_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -280,8 +283,23 @@ pub async fn handle_authorize(
     }
 
     // No valid session - show login form
+    let csrf_token: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    let mut params = params;
+    params.insert("csrf_token".to_string(), csrf_token.clone());
     let html = templates::login_page(&params, None);
-    Html(html).into_response()
+
+    let secure =
+        state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+    let csrf_cookie = build_csrf_cookie(&csrf_token, secure);
+    let mut response = Html(html).into_response();
+    response
+        .headers_mut()
+        .insert(SET_COOKIE, csrf_cookie.parse().unwrap());
+    response
 }
 
 fn is_redirect_uri_allowed(client: &OAuthClient, redirect_uri: &str) -> bool {
@@ -371,8 +389,46 @@ async fn create_auth_session(
 /// Přijímá HTML form data a redirectuje zpět na aplikaci
 pub async fn handle_login(
     State(state): State<Arc<OAuth2State>>,
+    headers: HeaderMap,
     Form(req): Form<LoginRequest>,
 ) -> impl IntoResponse {
+    let login_throttle_keys = build_login_throttle_keys(
+        &req.username,
+        throttle::extract_client_ip(&headers, state.trust_proxy_headers),
+    );
+    if state.auth_protection.enabled
+        && is_any_identity_locked(&state.db_pool, "oauth2_login", &login_throttle_keys)
+            .await
+            .unwrap_or(false)
+    {
+        return rate_limited_login_response(&req);
+    }
+
+    let req_csrf = req.csrf_token.clone().unwrap_or_default();
+    let cookie_csrf = cookie_value(&headers, "csrf_token").unwrap_or_default();
+    if req_csrf.is_empty() || cookie_csrf.is_empty() || req_csrf != cookie_csrf {
+        register_failures(
+            &state.db_pool,
+            "oauth2_login",
+            &login_throttle_keys,
+            &state.auth_protection,
+        )
+        .await;
+        audit::emit_event(
+            &state.db_pool,
+            "auth.login",
+            "session",
+            None,
+            "failure",
+            Some(serde_json::json!({
+                "reason": "csrf_mismatch",
+                "username": req.username,
+                "client_id": req.client_id
+            })),
+        ).await;
+        return invalid_login_response(&req);
+    }
+
     let tenant_id = if req.username.contains('@') {
         resolve_tenant_for_email(&state.db_pool, &req.username)
             .await
@@ -382,6 +438,25 @@ pub async fn handle_login(
     };
 
     if !state.allow_username_login && !req.username.contains('@') {
+        register_failures(
+            &state.db_pool,
+            "oauth2_login",
+            &login_throttle_keys,
+            &state.auth_protection,
+        )
+        .await;
+        audit::emit_event(
+            &state.db_pool,
+            "auth.login",
+            "session",
+            None,
+            "failure",
+            Some(serde_json::json!({
+                "reason": "username_login_disabled",
+                "username": req.username,
+                "client_id": req.client_id
+            })),
+        ).await;
         return invalid_login_response(&req);
     }
 
@@ -404,7 +479,28 @@ pub async fn handle_login(
         .await
     } {
         Ok(Some(user)) => user,
-        Ok(None) => return invalid_login_response(&req),
+        Ok(None) => {
+            register_failures(
+                &state.db_pool,
+                "oauth2_login",
+                &login_throttle_keys,
+                &state.auth_protection,
+            )
+            .await;
+            audit::emit_event(
+                &state.db_pool,
+                "auth.login",
+                "session",
+                None,
+                "failure",
+                Some(serde_json::json!({
+                    "reason": "user_not_found",
+                    "username": req.username,
+                    "client_id": req.client_id
+                })),
+            ).await;
+            return invalid_login_response(&req);
+        }
         Err(_) => {
             let html = templates::error_page(
                 "server_error",
@@ -415,11 +511,49 @@ pub async fn handle_login(
     };
 
     if !is_email_domain_allowed(&user.email, &state.allowed_email_domains) {
+        register_failures(
+            &state.db_pool,
+            "oauth2_login",
+            &login_throttle_keys,
+            &state.auth_protection,
+        )
+        .await;
+        audit::emit_event(
+            &state.db_pool,
+            "auth.login",
+            "session",
+            Some(user.id),
+            "failure",
+            Some(serde_json::json!({
+                "reason": "email_domain_not_allowed",
+                "email": user.email,
+                "client_id": req.client_id
+            })),
+        ).await;
         return invalid_login_response(&req);
     }
 
     // Ověř heslo (lokálně nebo delegovaně přes AD/LDAP)
     if !verify_user_password(state.as_ref(), &user, &req.password).await {
+        register_failures(
+            &state.db_pool,
+            "oauth2_login",
+            &login_throttle_keys,
+            &state.auth_protection,
+        )
+        .await;
+        audit::emit_event(
+            &state.db_pool,
+            "auth.login",
+            "session",
+            Some(user.id),
+            "failure",
+            Some(serde_json::json!({
+                "reason": "invalid_password",
+                "email": user.email,
+                "client_id": req.client_id
+            })),
+        ).await;
         return invalid_login_response(&req);
     }
 
@@ -519,6 +653,19 @@ pub async fn handle_login(
         }
     };
 
+    audit::emit_event(
+        &state.db_pool,
+        "auth.login",
+        "session",
+        Some(user.id),
+        "success",
+        Some(serde_json::json!({
+            "client_id": client.client_id,
+            "scope": scope
+        })),
+    ).await;
+    clear_failures(&state.db_pool, "oauth2_login", &login_throttle_keys).await;
+
     // Redirect zpět na aplikaci s authorization code
     let mut redirect_url = req.redirect_uri.clone();
     redirect_url.push_str(&format!("?code={}", code));
@@ -528,10 +675,10 @@ pub async fn handle_login(
 
     // Set session cookie if session was created
     if !session_token.is_empty() {
-        let cookie = format!(
-            "auth_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
-            session_token, state.auth_session_expiry
-        );
+        let secure =
+            state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+        let cookie =
+            build_auth_session_cookie(Some(&session_token), state.auth_session_expiry, secure);
 
         let mut response = Redirect::to(&redirect_url).into_response();
         response.headers_mut().insert(
@@ -570,6 +717,88 @@ fn invalid_login_response(req: &LoginRequest) -> Response {
     Html(html).into_response()
 }
 
+fn rate_limited_login_response(req: &LoginRequest) -> Response {
+    let mut params = HashMap::new();
+    params.insert("client_id".to_string(), req.client_id.clone());
+    if let Some(tenant) = &req.tenant {
+        params.insert("tenant".to_string(), tenant.clone());
+    }
+    params.insert("redirect_uri".to_string(), req.redirect_uri.clone());
+    if let Some(state) = &req.state {
+        params.insert("state".to_string(), state.clone());
+    }
+    if let Some(nonce) = &req.nonce {
+        params.insert("nonce".to_string(), nonce.clone());
+    }
+    if let Some(scope) = &req.scope {
+        params.insert("scope".to_string(), scope.clone());
+    }
+    if let Some(challenge) = &req.code_challenge {
+        params.insert("code_challenge".to_string(), challenge.clone());
+    }
+    if let Some(method) = &req.code_challenge_method {
+        params.insert("code_challenge_method".to_string(), method.clone());
+    }
+    let html = templates::login_page(
+        &params,
+        Some("Too many failed attempts. Please wait and try again."),
+    );
+    (StatusCode::TOO_MANY_REQUESTS, Html(html)).into_response()
+}
+
+fn build_login_throttle_keys(username: &str, ip: Option<String>) -> Vec<String> {
+    let mut keys = vec![format!("login:{}", username.trim().to_lowercase())];
+    if let Some(ip) = ip {
+        keys.push(format!("ip:{}", ip));
+    }
+    keys
+}
+
+fn build_token_throttle_keys(client_id: Option<&str>, ip: Option<String>) -> Vec<String> {
+    let mut keys = Vec::new();
+    if let Some(client_id) = client_id {
+        keys.push(format!("client:{}", client_id.trim().to_lowercase()));
+    }
+    if let Some(ip) = ip {
+        keys.push(format!("ip:{}", ip));
+    }
+    keys
+}
+
+async fn is_any_identity_locked(
+    db_pool: &sqlx::PgPool,
+    endpoint: &str,
+    keys: &[String],
+) -> Result<bool, sqlx::Error> {
+    for key in keys {
+        if throttle::is_locked(db_pool, endpoint, key).await? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+async fn register_failures(
+    db_pool: &sqlx::PgPool,
+    endpoint: &str,
+    keys: &[String],
+    cfg: &crate::config::AuthProtectionConfig,
+) {
+    for key in keys {
+        let _ = throttle::register_failure(db_pool, endpoint, key, cfg).await;
+    }
+}
+
+async fn clear_failures(
+    db_pool: &sqlx::PgPool,
+    endpoint: &str,
+    keys: &[String],
+) {
+    for key in keys {
+        let _ = throttle::clear_failures(db_pool, endpoint, key).await;
+    }
+}
+
 fn is_email_domain_allowed(email: &str, allowed_domains: &[String]) -> bool {
     if allowed_domains.is_empty() {
         return true;
@@ -579,6 +808,53 @@ fn is_email_domain_allowed(email: &str, allowed_domains: &[String]) -> bool {
         None => return false,
     };
     allowed_domains.iter().any(|d| d == &domain)
+}
+
+fn request_is_https(headers: &HeaderMap, trust_proxy_headers: bool) -> bool {
+    if !trust_proxy_headers {
+        return false;
+    }
+    headers
+        .get("x-forwarded-proto")
+        .and_then(|h| h.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(|v| v.trim().eq_ignore_ascii_case("https"))
+        .unwrap_or(false)
+}
+
+fn build_auth_session_cookie(token: Option<&str>, max_age: i64, secure: bool) -> String {
+    let value = token.unwrap_or("");
+    let mut cookie = format!(
+        "auth_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        value, max_age
+    );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn build_csrf_cookie(token: &str, secure: bool) -> String {
+    let mut cookie = format!(
+        "csrf_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=1200",
+        token
+    );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie_header.split(';').find_map(|cookie| {
+        let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
+        if parts.len() == 2 && parts[0] == name {
+            Some(parts[1].to_string())
+        } else {
+            None
+        }
+    })
 }
 
 fn should_use_ldap_for_email(state: &OAuth2State, email: &str) -> bool {
@@ -684,22 +960,57 @@ pub async fn handle_token(
 
     let mut req = req;
     apply_client_auth(&mut req.client_id, &mut req.client_secret, &headers);
+    let token_throttle_keys = build_token_throttle_keys(
+        req.client_id.as_deref(),
+        throttle::extract_client_ip(&headers, state.trust_proxy_headers),
+    );
+    if state.auth_protection.enabled
+        && is_any_identity_locked(&state.db_pool, "oauth2_token", &token_throttle_keys)
+            .await
+            .unwrap_or(false)
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: "rate_limited".to_string(),
+                error_description: "Too many failed attempts. Please wait and try again.".to_string(),
+            }),
+        )
+            .into_response();
+    }
 
-    match req.grant_type.as_str() {
-        "authorization_code" => handle_authorization_code_token(state, req).await,
-        "refresh_token" => handle_refresh_token(state, req).await,
+    let response = match req.grant_type.as_str() {
+        "authorization_code" => handle_authorization_code_token(state.clone(), req).await,
+        "refresh_token" => handle_refresh_token(state.clone(), req).await,
         "urn:ietf:params:oauth:grant-type:device_code" => {
-            handle_device_code_token(state, req).await
+            handle_device_code_token(state.clone(), req).await
         }
         _ => (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: "unsupported_grant_type".to_string(),
                 error_description: "Unsupported grant type".to_string(),
-            }),
+                }),
+            )
+                .into_response(),
+    };
+
+    if response.status().is_success() {
+        clear_failures(&state.db_pool, "oauth2_token", &token_throttle_keys).await;
+    } else if matches!(
+        response.status(),
+        StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED
+    ) {
+        register_failures(
+            &state.db_pool,
+            "oauth2_token",
+            &token_throttle_keys,
+            &state.auth_protection,
         )
-            .into_response(),
+        .await;
     }
+
+    response
 }
 
 fn parse_token_request(headers: &HeaderMap, body: &[u8]) -> Result<TokenRequest, Box<Response>> {
@@ -1145,6 +1456,18 @@ async fn handle_authorization_code_token(
         scope: Some(auth_code.scope),
     };
 
+    audit::emit_event(
+        &state.db_pool,
+        "oauth.token.issue",
+        "token",
+        Some(user.id),
+        "success",
+        Some(serde_json::json!({
+            "grant_type": "authorization_code",
+            "client_id": client.client_id
+        })),
+    ).await;
+
     tracing::debug!("Token response: {:?}", response);
 
     Json(response).into_response()
@@ -1465,15 +1788,28 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         .into_response();
     }
 
-    Json(TokenResponseWithRefresh {
+    let response = TokenResponseWithRefresh {
         access_token,
         token_type: "Bearer".to_string(),
         expires_in: state.access_token_expiry,
         refresh_token: Some(new_refresh_token),
         id_token: None,
         scope: Some(refresh_token.scope),
-    })
-    .into_response()
+    };
+
+    audit::emit_event(
+        &state.db_pool,
+        "oauth.token.refresh",
+        "token",
+        Some(user.id),
+        "success",
+        Some(serde_json::json!({
+            "grant_type": "refresh_token",
+            "client_id": client.client_id
+        })),
+    ).await;
+
+    Json(response).into_response()
 }
 
 /// Logout endpoint - invalidates authentication session
@@ -1504,7 +1840,9 @@ pub async fn handle_logout(
     }
 
     // Clear cookie by setting Max-Age=0
-    let cookie = "auth_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0";
+    let secure =
+        state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+    let cookie = build_auth_session_cookie(None, 0, secure);
 
     let mut response = Html("<html><body><h1>Logged out</h1><p>You have been successfully logged out.</p></body></html>")
         .into_response();

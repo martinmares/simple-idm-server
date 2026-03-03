@@ -164,7 +164,13 @@ pub async fn handle_introspect(
         return introspect_refresh_token(&state.db_pool, &req.token, &client).await;
     }
 
-    if let Ok(claims) = state.jwt_service.verify_token(&req.token) {
+    let active_audiences = load_active_client_ids(&state.db_pool)
+        .await
+        .unwrap_or_default();
+    if let Ok(claims) = state
+        .jwt_service
+        .verify_access_token(&req.token, &active_audiences, &[])
+    {
         let response = IntrospectionResponse {
             active: true,
             scope: None,
@@ -182,6 +188,14 @@ pub async fn handle_introspect(
     }
 
     introspect_refresh_token(&state.db_pool, &req.token, &client).await
+}
+
+async fn load_active_client_ids(pool: &crate::db::DbPool) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar::<_, String>(
+        "SELECT client_id FROM oauth_clients WHERE is_active = true",
+    )
+    .fetch_all(pool)
+    .await
 }
 
 async fn introspect_refresh_token(

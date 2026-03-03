@@ -1,6 +1,7 @@
 // Library modules for simple-idm-server project
 
 pub mod admin;
+pub mod audit;
 pub mod auth;
 pub mod claim_map_patterns;
 pub mod client_group_filters;
@@ -11,6 +12,7 @@ pub mod jwks;
 pub mod oauth2;
 pub mod oidc;
 pub mod password_reset;
+pub mod security_headers;
 
 // OAuth2 Proxy modules
 pub mod proxy;

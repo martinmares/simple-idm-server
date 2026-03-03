@@ -151,6 +151,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
     let nonce = params.get("nonce").map(|s| s.as_str()).unwrap_or("");
     let tenant = params.get("tenant").map(|s| s.as_str()).unwrap_or("");
     let scope = params.get("scope").map(|s| s.as_str()).unwrap_or("");
+    let csrf_token = params.get("csrf_token").map(|s| s.as_str()).unwrap_or("");
     let code_challenge = params
         .get("code_challenge")
         .map(|s| s.as_str())
@@ -326,6 +327,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
                 <input type="hidden" name="nonce" value="{}">
                 <input type="hidden" name="tenant" value="{}">
                 <input type="hidden" name="scope" value="{}">
+                <input type="hidden" name="csrf_token" value="{}">
                 <input type="hidden" name="code_challenge" value="{}">
                 <input type="hidden" name="code_challenge_method" value="{}">
 
@@ -377,6 +379,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
         nonce,
         tenant,
         scope,
+        csrf_token,
         code_challenge,
         code_challenge_method
     ))
