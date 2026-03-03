@@ -291,6 +291,7 @@ fn generate_pkce_challenge(verifier: &str, method: &str) -> String {
 
 fn build_client() -> Client {
     Client::builder()
+        .cookie_store(true)
         .redirect(Policy::none())
         .build()
         .expect("Failed to build HTTP client")
@@ -314,12 +315,51 @@ async fn login_and_get_code(
     code_challenge: Option<&str>,
     code_challenge_method: Option<&str>,
 ) -> String {
+    login_and_get_code_with_scope(
+        client,
+        username,
+        password,
+        code_challenge,
+        code_challenge_method,
+        "openid profile email groups",
+    )
+    .await
+}
+
+async fn login_and_get_code_with_scope(
+    client: &Client,
+    username: &str,
+    password: &str,
+    code_challenge: Option<&str>,
+    code_challenge_method: Option<&str>,
+    scope: &str,
+) -> String {
+    let authorize_query = serde_urlencoded::to_string([
+        ("response_type", "code"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
+        ("scope", scope),
+        ("state", "test-state-123"),
+    ])
+    .expect("Failed to encode authorize query");
+
+    let authorize_response = client
+        .get(&format!("{}/oauth2/authorize?{}", BASE_URL, authorize_query))
+        .send()
+        .await
+        .expect("Failed to call authorize");
+    assert_eq!(authorize_response.status(), 200);
+    let authorize_body = authorize_response.text().await.unwrap();
+    let csrf_token = extract_hidden_input_value(&authorize_body, "csrf_token")
+        .expect("Missing csrf_token in authorize page");
+
     let mut form = vec![
         ("username".to_string(), username.to_string()),
         ("password".to_string(), password.to_string()),
         ("client_id".to_string(), TEST_CLIENT_ID.to_string()),
         ("redirect_uri".to_string(), TEST_REDIRECT_URI.to_string()),
-        ("scope".to_string(), "openid profile email groups".to_string()),
+        ("scope".to_string(), scope.to_string()),
+        ("csrf_token".to_string(), csrf_token),
     ];
 
     if let Some(challenge) = code_challenge {
@@ -347,6 +387,15 @@ async fn login_and_get_code(
         .expect("Missing redirect location");
 
     extract_code_from_location(location)
+}
+
+fn extract_hidden_input_value(html: &str, name: &str) -> Option<String> {
+    let needle = format!("name=\"{}\" value=\"", name);
+    let start = html.find(&needle)?;
+    let value_start = start + needle.len();
+    let rest = &html[value_start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
 }
 
 async fn exchange_code_for_tokens(client: &Client, code: &str) -> serde_json::Value {
@@ -420,11 +469,31 @@ async fn test_login_with_invalid_password() {
 
     let client = build_client();
 
+    let authorize_query = serde_urlencoded::to_string([
+        ("response_type", "code"),
+        ("client_id", TEST_CLIENT_ID),
+        ("redirect_uri", TEST_REDIRECT_URI),
+        ("scope", "openid profile email groups"),
+        ("state", "test-state-invalid-pw"),
+    ])
+    .expect("Failed to encode authorize query");
+
+    let authorize_response = client
+        .get(&format!("{}/oauth2/authorize?{}", BASE_URL, authorize_query))
+        .send()
+        .await
+        .expect("Failed to call authorize");
+    assert_eq!(authorize_response.status(), 200);
+    let authorize_body = authorize_response.text().await.unwrap();
+    let csrf_token = extract_hidden_input_value(&authorize_body, "csrf_token")
+        .expect("Missing csrf_token in authorize page");
+
     let encoded = serde_urlencoded::to_string([
         ("username", TEST_USERNAME),
         ("password", "wrong-password"),
         ("client_id", TEST_CLIENT_ID),
         ("redirect_uri", TEST_REDIRECT_URI),
+        ("csrf_token", csrf_token.as_str()),
     ])
     .expect("Failed to encode login form");
 
@@ -439,6 +508,37 @@ async fn test_login_with_invalid_password() {
     assert_eq!(login_response.status(), 200);
     let body = login_response.text().await.unwrap();
     assert!(body.contains("Invalid username or password"));
+}
+
+#[tokio::test]
+async fn test_userinfo_requires_openid_scope() {
+    let mutex = TEST_MUTEX.get_or_init(|| async { Mutex::new(()) }).await;
+    let _lock = mutex.lock().await;
+    let _env = setup_env().await;
+
+    let client = build_client();
+    let code = login_and_get_code_with_scope(
+        &client,
+        TEST_USERNAME,
+        TEST_PASSWORD,
+        None,
+        None,
+        "profile email groups",
+    )
+    .await;
+    let token_json = exchange_code_for_tokens(&client, &code).await;
+    let access_token = token_json["access_token"].as_str().unwrap();
+
+    let userinfo_response = client
+        .get(&format!("{}/oauth2/userinfo", BASE_URL))
+        .header("Authorization", format!("Bearer {}", access_token))
+        .send()
+        .await
+        .expect("Failed to call userinfo");
+
+    assert_eq!(userinfo_response.status(), 403);
+    let body: serde_json::Value = userinfo_response.json().await.unwrap();
+    assert_eq!(body["error"].as_str().unwrap(), "insufficient_scope");
 }
 
 #[tokio::test]
