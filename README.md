@@ -667,6 +667,11 @@ curl http://localhost:8080/admin/users/{user_id}/group-patterns \
 ```bash
 # .env file
 GROUP_PATTERNS_SYNC_INTERVAL_SECONDS=300  # Default: 5 minutes, 0 = disabled
+
+# Optional hard-purge for soft-deleted records
+SOFT_DELETE_PURGE_ENABLED=false
+SOFT_DELETE_PURGE_INTERVAL_SECONDS=3600
+SOFT_DELETE_RETENTION_DAYS=30
 ```
 
 ### TUI Keyboard Shortcuts

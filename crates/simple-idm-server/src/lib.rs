@@ -13,6 +13,7 @@ pub mod oauth2;
 pub mod oidc;
 pub mod password_reset;
 pub mod security_headers;
+pub mod soft_delete_cleanup;
 
 // OAuth2 Proxy modules
 pub mod proxy;

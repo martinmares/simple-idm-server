@@ -10,6 +10,7 @@ pub struct Config {
     pub admin: AdminConfig,
     pub device_flow: DeviceFlowConfig,
     pub group_patterns: GroupPatternsConfig,
+    pub soft_delete_purge: SoftDeletePurgeConfig,
     pub ui: UiConfig,
     pub identity: IdentityConfig,
     pub ad_auth: AdAuthConfig,
@@ -69,6 +70,13 @@ pub struct DeviceFlowConfig {
 #[derive(Debug, Clone, Deserialize)]
 pub struct GroupPatternsConfig {
     pub sync_interval_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SoftDeletePurgeConfig {
+    pub enabled: bool,
+    pub interval_seconds: u64,
+    pub retention_days: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -208,6 +216,19 @@ impl Config {
             .unwrap_or_else(|_| "300".to_string())
             .parse()
             .unwrap_or(300); // Default 5 minutes
+        let soft_delete_purge_enabled = env::var("SOFT_DELETE_PURGE_ENABLED")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse()
+            .unwrap_or(false);
+        let soft_delete_purge_interval_seconds =
+            env::var("SOFT_DELETE_PURGE_INTERVAL_SECONDS")
+                .unwrap_or_else(|_| "3600".to_string())
+                .parse()
+                .unwrap_or(3600);
+        let soft_delete_purge_retention_days = env::var("SOFT_DELETE_RETENTION_DAYS")
+            .unwrap_or_else(|_| "30".to_string())
+            .parse()
+            .unwrap_or(30);
 
         let ui_brand_name =
             env::var("UI_BRAND_NAME").unwrap_or_else(|_| "Cloud App".to_string());
@@ -301,13 +322,7 @@ impl Config {
             .parse()
             .unwrap_or(900);
 
-        if matches!(app_env.as_str(), "prod" | "production")
-            && admin_root_token.is_some()
-        {
-            return Err(config::ConfigError::Message(
-                "ADMIN_ROOT_TOKEN is forbidden in production".to_string(),
-            ));
-        }
+        validate_admin_root_token_policy(&app_env, &admin_root_token)?;
 
         Ok(Config {
             server: ServerConfig {
@@ -348,6 +363,11 @@ impl Config {
             group_patterns: GroupPatternsConfig {
                 sync_interval_seconds: group_patterns_sync_interval,
             },
+            soft_delete_purge: SoftDeletePurgeConfig {
+                enabled: soft_delete_purge_enabled,
+                interval_seconds: soft_delete_purge_interval_seconds,
+                retention_days: soft_delete_purge_retention_days,
+            },
             ui: UiConfig {
                 brand_name: ui_brand_name,
                 brand_domain: ui_brand_domain,
@@ -386,6 +406,18 @@ impl Config {
     }
 }
 
+fn validate_admin_root_token_policy(
+    app_env: &str,
+    admin_root_token: &Option<String>,
+) -> Result<(), config::ConfigError> {
+    if matches!(app_env, "prod" | "production") && admin_root_token.is_some() {
+        return Err(config::ConfigError::Message(
+            "ADMIN_ROOT_TOKEN is forbidden in production".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn parse_additional_public_keys(input: &str) -> Vec<(String, String)> {
     input
         .split(',')
@@ -407,7 +439,7 @@ fn parse_additional_public_keys(input: &str) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_additional_public_keys;
+    use super::{parse_additional_public_keys, validate_admin_root_token_policy};
 
     #[test]
     fn parse_additional_public_keys_empty() {
@@ -431,5 +463,23 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].0, "ok");
         assert_eq!(parsed[0].1, "./keys/ok.pem");
+    }
+
+    #[test]
+    fn production_rejects_admin_root_token() {
+        let result = validate_admin_root_token_policy(
+            "production",
+            &Some("dev-root-token".to_string()),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn development_allows_admin_root_token() {
+        let result = validate_admin_root_token_policy(
+            "development",
+            &Some("dev-root-token".to_string()),
+        );
+        assert!(result.is_ok());
     }
 }

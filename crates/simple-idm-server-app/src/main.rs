@@ -17,9 +17,10 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use simple_idm_server::{
     admin, auth, config, db, group_patterns, jwks, oauth2, oidc, password_reset,
-    security_headers,
+    security_headers, soft_delete_cleanup,
 };
 use simple_idm_ad_auth::{LdapAuthConfig, LdapTlsMode};
+mod web_admin;
 
 #[derive(Parser, Debug)]
 #[command(name = "simple-idm-server")]
@@ -252,8 +253,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    if config.soft_delete_purge.enabled && config.soft_delete_purge.interval_seconds > 0 {
+        let purge_pool = db_pool.clone();
+        let purge_interval_seconds = config.soft_delete_purge.interval_seconds;
+        let retention_days = config.soft_delete_purge.retention_days;
+        tokio::spawn(async move {
+            tracing::info!(
+                "Soft-delete purge scheduler enabled (interval {}s, retention {}d)",
+                purge_interval_seconds,
+                retention_days
+            );
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(purge_interval_seconds));
+            loop {
+                interval.tick().await;
+                tracing::info!("Running soft-delete purge");
+                soft_delete_cleanup::purge_soft_deleted(&purge_pool, retention_days).await;
+            }
+        });
+    }
+
     // Vytvoř Admin auth state
     let admin_auth = admin::AdminAuth::new(&config, jwt_service.clone(), db_pool.clone());
+    let web_admin_state = web_admin::WebAdminState {
+        db_pool: db_pool.clone(),
+        admin_auth: admin_auth.clone(),
+        secure_cookies: config.security.force_secure_cookies,
+    };
 
     // Admin API routes (protected by middleware)
     let admin_routes = Router::new()
@@ -500,6 +526,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(discovery_routes)
         // Merge admin routes
         .merge(admin_routes)
+        // Web admin UI
+        .merge(web_admin::router(web_admin_state))
         .layer(middleware::from_fn_with_state(
             security_headers_state,
             security_headers::security_headers_middleware,
