@@ -6,6 +6,7 @@ use crate::client_group_filters::apply_client_group_filters;
 use crate::db::models::{DeviceCode, OAuthClient, OAuthClientGroupPattern, User};
 use axum::{
     extract::{Query, State},
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     Form, Json,
 };
@@ -17,6 +18,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::client_credentials::{ErrorResponse, OAuth2State};
+use super::throttle;
 use super::templates;
 use super::utils::{resolve_oauth_client, ClientLookupError};
 use simple_idm_ad_auth::verify_ldap_password;
@@ -211,8 +213,32 @@ pub async fn handle_device_authorization(
 /// Podporuje JSON i HTML formuláře
 pub async fn handle_device_verify(
     State(state): State<Arc<OAuth2State>>,
+    headers: HeaderMap,
     axum::extract::Form(req): axum::extract::Form<DeviceVerifyRequest>,
 ) -> impl IntoResponse {
+    let mut throttle_keys = vec![format!("login:{}", req.username.trim().to_lowercase())];
+    if let Some(ip) = throttle::extract_client_ip(&headers, state.trust_proxy_headers) {
+        throttle_keys.push(format!("ip:{}", ip));
+    }
+    if state.auth_protection.enabled {
+        for key in &throttle_keys {
+            if throttle::is_locked(&state.db_pool, "oauth2_device_verify", key)
+                .await
+                .unwrap_or(false)
+            {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Html(templates::device_verify_page(
+                        Some(&req.user_code),
+                        Some("Too many failed attempts. Please wait and try again."),
+                        None,
+                    )),
+                )
+                    .into_response();
+            }
+        }
+    }
+
     let tenant_id = if req.username.contains('@') {
         resolve_tenant_for_email(&state.db_pool, &req.username)
             .await
@@ -297,6 +323,17 @@ pub async fn handle_device_verify(
     }
 
     if !state.allow_username_login && !req.username.contains('@') {
+        if state.auth_protection.enabled {
+            for key in &throttle_keys {
+                let _ = throttle::register_failure(
+                    &state.db_pool,
+                    "oauth2_device_verify",
+                    key,
+                    &state.auth_protection,
+                )
+                .await;
+            }
+        }
         return Html(templates::device_verify_page(
             Some(&req.user_code),
             Some("Invalid credentials"),
@@ -325,6 +362,17 @@ pub async fn handle_device_verify(
     } {
         Ok(Some(user)) => user,
         Ok(None) => {
+            if state.auth_protection.enabled {
+                for key in &throttle_keys {
+                    let _ = throttle::register_failure(
+                        &state.db_pool,
+                        "oauth2_device_verify",
+                        key,
+                        &state.auth_protection,
+                    )
+                    .await;
+                }
+            }
             // Log failed attempt
             let _ = sqlx::query(
                 "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)"
@@ -352,6 +400,17 @@ pub async fn handle_device_verify(
     };
 
     if !is_email_domain_allowed(&user.email, &state.allowed_email_domains) {
+        if state.auth_protection.enabled {
+            for key in &throttle_keys {
+                let _ = throttle::register_failure(
+                    &state.db_pool,
+                    "oauth2_device_verify",
+                    key,
+                    &state.auth_protection,
+                )
+                .await;
+            }
+        }
         return Html(templates::device_verify_page(
             Some(&req.user_code),
             Some("Invalid credentials"),
@@ -362,6 +421,17 @@ pub async fn handle_device_verify(
 
     // Ověř heslo (lokálně nebo delegovaně přes AD/LDAP)
     if !verify_user_password(state.as_ref(), &user, &req.password).await {
+        if state.auth_protection.enabled {
+            for key in &throttle_keys {
+                let _ = throttle::register_failure(
+                    &state.db_pool,
+                    "oauth2_device_verify",
+                    key,
+                    &state.auth_protection,
+                )
+                .await;
+            }
+        }
         // Log failed attempt
         let _ = sqlx::query(
             "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)"
@@ -395,6 +465,12 @@ pub async fn handle_device_verify(
             None,
         ))
         .into_response();
+    }
+
+    if state.auth_protection.enabled {
+        for key in &throttle_keys {
+            let _ = throttle::clear_failures(&state.db_pool, "oauth2_device_verify", key).await;
+        }
     }
 
     Html(templates::device_verify_page(
