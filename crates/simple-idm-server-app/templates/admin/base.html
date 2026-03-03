@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Simple IDM Admin</title>
+  <link href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta21/dist/css/tabler.min.css" rel="stylesheet">
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+</head>
+<body>
+  <div class="page">
+    <header class="navbar navbar-expand-md d-print-none">
+      <div class="container-xl">
+        <div class="navbar-brand">Simple IDM Admin</div>
+        <div class="navbar-nav flex-row order-md-last">
+          <form method="post" action="/admin/ui/logout">
+            <button type="submit" class="btn btn-outline-danger btn-sm">Logout</button>
+          </form>
+        </div>
+      </div>
+    </header>
+
+    <div class="page-wrapper">
+      <div class="page-body">
+        <div class="container-xl">
+          <div class="row g-3">
+            <div class="col-12 col-md-3 col-xl-2">
+              <div class="card">
+                <div class="list-group list-group-flush">
+                  {% for s in sections %}
+                  <a class="list-group-item list-group-item-action {% if s.active %}active{% endif %}" href="{{ s.path }}">{{ s.title }}</a>
+                  {% endfor %}
+                </div>
+              </div>
+            </div>
+            <div class="col-12 col-md-9 col-xl-10">
+              {% if let Some(msg) = message %}
+              <div class="alert alert-success">{{ msg }}</div>
+              {% endif %}
+              {% if let Some(err) = error %}
+              <div class="alert alert-danger">{{ err }}</div>
+              {% endif %}
+              {% block content %}{% endblock %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

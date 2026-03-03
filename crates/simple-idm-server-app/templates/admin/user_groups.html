@@ -1,0 +1,20 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card">
+  <div class="card-header"><h3 class="card-title">User → groups</h3></div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead><tr><th>User</th><th>Email</th><th>Group</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.username }}</td>
+        <td>{{ r.email }}</td>
+        <td>{{ r.group_name }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

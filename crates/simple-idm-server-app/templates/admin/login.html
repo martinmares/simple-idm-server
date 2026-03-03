@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Admin Login</title>
+  <link href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta21/dist/css/tabler.min.css" rel="stylesheet">
+</head>
+<body class="d-flex align-items-center justify-content-center min-vh-100">
+  <div class="container container-tight py-4">
+    <div class="card card-md">
+      <div class="card-body">
+        <h2 class="h2 text-center mb-4">Simple IDM Admin Login</h2>
+        {% if let Some(err) = error %}
+        <div class="alert alert-danger">{{ err }}</div>
+        {% endif %}
+        <form method="post" action="/admin/ui/login">
+          <div class="mb-3">
+            <label class="form-label">Admin token (Bearer)</label>
+            <input class="form-control" type="password" name="token" required>
+          </div>
+          <button type="submit" class="btn btn-primary w-100">Login</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

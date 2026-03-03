@@ -1,0 +1,41 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card mb-3">
+  <div class="card-header"><h3 class="card-title">Create group</h3></div>
+  <div class="card-body">
+    <form method="post" action="/admin/ui/groups/create" class="row g-2">
+      <div class="col-md-3"><input class="form-control" name="name" placeholder="name" required></div>
+      <div class="col-md-6"><input class="form-control" name="description" placeholder="description"></div>
+      <div class="col-md-2 form-check mt-2"><input class="form-check-input" name="is_virtual" type="checkbox"> <label class="form-check-label">virtual</label></div>
+      <div class="col-md-1"><button class="btn btn-primary w-100" type="submit">Create</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead><tr><th>Name</th><th>Description</th><th>Virtual</th><th>Actions</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.name }}</td>
+        <td>{% if let Some(d) = r.description %}{{ d }}{% endif %}</td>
+        <td>{% if r.is_virtual %}yes{% else %}no{% endif %}</td>
+        <td>
+          <form method="post" action="/admin/ui/groups/{{ r.id }}/update" class="d-flex gap-2">
+            <input class="form-control form-control-sm" name="name" value="{{ r.name }}" required>
+            <input class="form-control form-control-sm" name="description" value="{% if let Some(d) = r.description %}{{ d }}{% endif %}">
+            <label class="form-check form-switch mt-1">
+              <input class="form-check-input" type="checkbox" name="is_virtual" {% if r.is_virtual %}checked{% endif %}>
+            </label>
+            <button class="btn btn-sm btn-outline-primary" type="submit">Save</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

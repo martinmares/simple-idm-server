@@ -74,3 +74,4 @@ open = "5.3"
 simple-idm-common = { path = "../simple-idm-common" }
 simple-idm-ad-auth = { path = "../simple-idm-ad-auth" }
 simple-idm-server = { path = "../simple-idm-server" }
+askama = "0.14"
