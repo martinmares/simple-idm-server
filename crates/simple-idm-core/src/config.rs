@@ -106,6 +106,10 @@ pub struct AdAuthConfig {
     pub timeout_seconds: u64,
     pub allow_insecure: bool,
     pub domains: Vec<String>,
+    pub role_sync_enabled: bool,
+    pub role_sync_ttl_seconds: u64,
+    pub role_sync_timeout_seconds: u64,
+    pub onboarding_token_ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -292,6 +296,22 @@ impl Config {
             .map(|d| d.trim().to_lowercase())
             .filter(|d| !d.is_empty())
             .collect::<Vec<_>>();
+        let ad_auth_role_sync_enabled = env::var("AD_AUTH_ROLE_SYNC_ENABLED")
+            .unwrap_or_else(|_| "true".to_string())
+            .parse()
+            .unwrap_or(true);
+        let ad_auth_role_sync_ttl_seconds = env::var("AD_AUTH_ROLE_SYNC_TTL_SECONDS")
+            .unwrap_or_else(|_| "3600".to_string())
+            .parse()
+            .unwrap_or(3600);
+        let ad_auth_role_sync_timeout_seconds = env::var("AD_AUTH_ROLE_SYNC_TIMEOUT_SECONDS")
+            .unwrap_or_else(|_| "5".to_string())
+            .parse()
+            .unwrap_or(5);
+        let ad_onboarding_token_ttl_seconds = env::var("AD_ONBOARDING_TOKEN_TTL_SECONDS")
+            .unwrap_or_else(|_| "86400".to_string())
+            .parse()
+            .unwrap_or(86400);
 
         let app_env = env::var("APP_ENV")
             .or_else(|_| env::var("MODE"))
@@ -390,6 +410,10 @@ impl Config {
                 timeout_seconds: ad_auth_timeout_seconds,
                 allow_insecure: ad_auth_allow_insecure,
                 domains: ad_auth_domains,
+                role_sync_enabled: ad_auth_role_sync_enabled,
+                role_sync_ttl_seconds: ad_auth_role_sync_ttl_seconds,
+                role_sync_timeout_seconds: ad_auth_role_sync_timeout_seconds,
+                onboarding_token_ttl_seconds: ad_onboarding_token_ttl_seconds,
             },
             security: SecurityConfig {
                 app_env,

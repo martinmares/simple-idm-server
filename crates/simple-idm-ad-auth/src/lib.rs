@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Context, Result};
 use ldap3::{LdapConnAsync, Scope, SearchEntry};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum LdapTlsMode {
@@ -131,6 +132,105 @@ pub async fn verify_ldap_password(
             .context("LDAP direct bind failed")?;
         Ok(())
     }
+}
+
+async fn connect_and_bind_service(cfg: &LdapAuthConfig) -> Result<ldap3::Ldap> {
+    cfg.validate()?;
+
+    let url = cfg.url();
+    let (conn, mut ldap) = LdapConnAsync::new(&url)
+        .await
+        .with_context(|| format!("Failed to connect to LDAP server: {}", url))?;
+    ldap3::drive!(conn);
+
+    match cfg.tls_mode {
+        LdapTlsMode::Ldaps => {}
+        LdapTlsMode::StartTls => {
+            return Err(anyhow!(
+                "StartTLS mode is not implemented in MVP; use LDAPS"
+            ));
+        }
+    }
+
+    let bind_dn = cfg
+        .bind_dn
+        .as_deref()
+        .ok_or_else(|| anyhow!("LDAP bind_dn is required for role sync"))?;
+    let bind_password = cfg
+        .bind_password
+        .as_deref()
+        .ok_or_else(|| anyhow!("LDAP bind_password is required for role sync"))?;
+
+    ldap.simple_bind(bind_dn, bind_password)
+        .await
+        .context("LDAP service bind request failed")?
+        .success()
+        .context("LDAP service bind failed")?;
+
+    Ok(ldap)
+}
+
+async fn find_user_dn(ldap: &mut ldap3::Ldap, cfg: &LdapAuthConfig, login: &str) -> Result<String> {
+    let escaped_login = ldap3::ldap_escape(login);
+    let filter = cfg
+        .user_filter
+        .replace("{login}", &escaped_login)
+        .replace("{1}", &escaped_login);
+
+    let (entries, _res) = ldap
+        .search(&cfg.base_dn, Scope::Subtree, &filter, vec!["dn", "memberOf"])
+        .await
+        .with_context(|| format!("LDAP search request failed with filter: {}", filter))?
+        .success()
+        .context("LDAP search failed")?;
+
+    let dn = entries
+        .into_iter()
+        .next()
+        .map(SearchEntry::construct)
+        .map(|e| e.dn)
+        .ok_or_else(|| anyhow!("LDAP user not found"))?;
+
+    Ok(dn)
+}
+
+/// Fetch AD/LDAP direct roles (memberOf DNs) for `login`.
+///
+/// This call uses service bind (`bind_dn` + `bind_password`) and does not
+/// require user password.
+pub async fn fetch_ldap_roles(cfg: &LdapAuthConfig, login: &str) -> Result<Vec<String>> {
+    let mut ldap = connect_and_bind_service(cfg).await?;
+    let user_dn = find_user_dn(&mut ldap, cfg, login).await?;
+
+    let escaped_dn = ldap3::ldap_escape(&user_dn);
+    let user_dn_filter = format!("(distinguishedName={})", escaped_dn);
+
+    let (entries, _res) = ldap
+        .search(
+            &cfg.base_dn,
+            Scope::Subtree,
+            &user_dn_filter,
+            vec!["memberOf"],
+        )
+        .await
+        .with_context(|| format!("LDAP role search failed for DN: {}", user_dn))?
+        .success()
+        .context("LDAP role search failed")?;
+
+    let mut roles = BTreeSet::new();
+    if let Some(entry) = entries.into_iter().next() {
+        let se = SearchEntry::construct(entry);
+        if let Some(vals) = se.attrs.get("memberOf") {
+            for v in vals {
+                let s = v.trim();
+                if !s.is_empty() {
+                    roles.insert(s.to_string());
+                }
+            }
+        }
+    }
+
+    Ok(roles.into_iter().collect())
 }
 
 #[cfg(test)]

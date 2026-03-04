@@ -152,6 +152,10 @@ The `/oauth2/token` endpoint has stricter rate limiting by default to prevent br
 - `UI_THEME` - UI theme preset for auth pages (`blue`, `red`, `white`, `green`, `gold`; default: `blue`)
 - `UI_CUSTOM_CSS_PATH` - Optional path to CSS file injected into auth pages at runtime (default: empty)
 - `IDP_SECRETS_MASTER_KEY` - Master key for encrypting federated IdP client secrets in DB (`identity_providers.client_secret_encrypted`)
+- `AD_AUTH_ROLE_SYNC_ENABLED` - Enable LDAP role sync after successful AD login (default: `true`)
+- `AD_AUTH_ROLE_SYNC_TTL_SECONDS` - Skip role refresh if cached sync is newer than TTL (default: `3600`)
+- `AD_AUTH_ROLE_SYNC_TIMEOUT_SECONDS` - Timeout for LDAP role sync on login (default: `5`)
+- `AD_ONBOARDING_TOKEN_TTL_SECONDS` - One-time AD onboarding link validity in seconds (default: `86400`)
 
 CLI overrides for branding are also available:
 

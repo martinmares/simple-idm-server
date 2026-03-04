@@ -18,6 +18,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::client_credentials::{ErrorResponse, OAuth2State};
+use super::ldap_role_sync::sync_ldap_roles_if_stale;
 use super::throttle;
 use super::templates;
 use super::utils::{resolve_oauth_client, ClientLookupError};
@@ -521,7 +522,17 @@ async fn verify_user_password(
     if should_use_ldap_for_email(state, &user.email) {
         if let Some(cfg) = &state.ldap_auth {
             match verify_ldap_password(cfg, &user.email, password).await {
-                Ok(()) => return true,
+                Ok(()) => {
+                    if let Err(err) = sync_ldap_roles_if_stale(state, user, &user.email).await {
+                        tracing::warn!(
+                            user_id = %user.id,
+                            username = %user.username,
+                            "LDAP role sync warning: {}",
+                            err
+                        );
+                    }
+                    return true;
+                }
                 Err(err) => {
                     tracing::warn!(
                         user_id = %user.id,
