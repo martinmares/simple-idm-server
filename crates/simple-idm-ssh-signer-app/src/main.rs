@@ -1,6 +1,6 @@
 use axum::{routing::{get, post}, Router};
 use clap::Parser;
-use simple_idm_server::ssh_signer::{
+use simple_idm_core::ssh_signer::{
     cert_signer::CertSigner,
     handlers::{handle_sign, AppState},
     jwt_validator::JwtValidator,

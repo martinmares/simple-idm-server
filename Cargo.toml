@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "crates/simple-idm-server",
+    "crates/simple-idm-core",
     "crates/simple-idm-common",
     "crates/simple-idm-ad-auth",
     "crates/simple-idm-ldap-sync",
-    "crates/simple-idm-server-app",
+    "crates/simple-idm-server",
     "crates/simple-idm-ctl-app",
     "crates/simple-idm-oauth2-proxy-app",
     "crates/simple-idm-ssh-login-app",

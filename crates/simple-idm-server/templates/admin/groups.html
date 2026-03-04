@@ -23,13 +23,16 @@
         <td>{% if let Some(d) = r.description %}{{ d }}{% endif %}</td>
         <td>{% if r.is_virtual %}yes{% else %}no{% endif %}</td>
         <td>
-          <form method="post" action="/admin/ui/groups/{{ r.id }}/update" class="d-flex gap-2">
+          <form method="post" action="/admin/ui/groups/{{ r.id }}/update" class="d-flex gap-2 mb-1">
             <input class="form-control form-control-sm" name="name" value="{{ r.name }}" required>
             <input class="form-control form-control-sm" name="description" value="{% if let Some(d) = r.description %}{{ d }}{% endif %}">
             <label class="form-check form-switch mt-1">
               <input class="form-check-input" type="checkbox" name="is_virtual" {% if r.is_virtual %}checked{% endif %}>
             </label>
             <button class="btn btn-sm btn-outline-primary" type="submit">Save</button>
+          </form>
+          <form method="post" action="/admin/ui/groups/{{ r.id }}/deactivate">
+            <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
           </form>
         </td>
       </tr>

@@ -514,6 +514,10 @@ async fn verify_user_password(
     user: &User,
     password: &str,
 ) -> bool {
+    if user.password_disabled || user.auth_mode.eq_ignore_ascii_case("federated") {
+        return false;
+    }
+
     if should_use_ldap_for_email(state, &user.email) {
         if let Some(cfg) = &state.ldap_auth {
             match verify_ldap_password(cfg, &user.email, password).await {
@@ -530,7 +534,10 @@ async fn verify_user_password(
             }
         }
     }
-    verify_password(password, &user.password_hash).unwrap_or(false)
+    match user.password_hash.as_deref() {
+        Some(hash) => verify_password(password, hash).unwrap_or(false),
+        None => false,
+    }
 }
 
 fn default_tenant_id() -> Uuid {

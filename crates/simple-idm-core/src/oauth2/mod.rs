@@ -9,7 +9,10 @@ mod throttle;
 mod utils;
 pub mod templates;
 
-pub use authorization_code::{handle_authorize, handle_login, handle_logout, handle_token};
+pub use authorization_code::{
+    handle_authorize, handle_federated_callback, handle_federated_start, handle_login,
+    handle_logout, handle_token,
+};
 pub use client_credentials::{handle_client_credentials, OAuth2State};
 pub use device_flow::{
     handle_device_authorization, handle_device_token, handle_device_verify, show_device_form,

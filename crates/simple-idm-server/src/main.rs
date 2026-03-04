@@ -1,14 +1,3 @@
-mod admin;
-mod auth;
-mod claim_map_patterns;
-mod client_group_filters;
-mod config;
-mod db;
-mod group_patterns;
-mod jwks;
-mod oauth2;
-mod oidc;
-mod password_reset;
 
 use axum::{
     middleware,
@@ -26,11 +15,19 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use simple_idm_core::{
+    admin, auth, config, db, group_patterns, jwks, oauth2, oidc, password_reset,
+    security_headers, soft_delete_cleanup,
+};
 use simple_idm_ad_auth::{LdapAuthConfig, LdapTlsMode};
+mod web_admin;
 
 #[derive(Parser, Debug)]
 #[command(name = "simple-idm-server")]
 struct CliArgs {
+    /// Explicit path to env file (has priority over ./.env and /app/.env)
+    #[arg(long)]
+    env_file: Option<String>,
     /// UI brand/company name shown on auth pages
     #[arg(long)]
     ui_brand_name: Option<String>,
@@ -56,10 +53,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    // Načti konfiguraci z .env (lokálně i v kontejneru/K8s mountu).
-    load_env_file();
-    let mut config = config::Config::from_env()?;
     let cli = CliArgs::parse();
+    // Načti konfiguraci z .env (lokálně i v kontejneru/K8s mountu).
+    load_env_file(cli.env_file.as_deref())?;
+    let mut config = config::Config::from_env()?;
     if let Some(brand_name) = cli.ui_brand_name {
         config.ui.brand_name = brand_name;
     }
@@ -259,8 +256,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    if config.soft_delete_purge.enabled && config.soft_delete_purge.interval_seconds > 0 {
+        let purge_pool = db_pool.clone();
+        let purge_interval_seconds = config.soft_delete_purge.interval_seconds;
+        let retention_days = config.soft_delete_purge.retention_days;
+        tokio::spawn(async move {
+            tracing::info!(
+                "Soft-delete purge scheduler enabled (interval {}s, retention {}d)",
+                purge_interval_seconds,
+                retention_days
+            );
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(purge_interval_seconds));
+            loop {
+                interval.tick().await;
+                tracing::info!("Running soft-delete purge");
+                soft_delete_cleanup::purge_soft_deleted(&purge_pool, retention_days).await;
+            }
+        });
+    }
+
     // Vytvoř Admin auth state
     let admin_auth = admin::AdminAuth::new(&config, jwt_service.clone(), db_pool.clone());
+    let web_admin_state = web_admin::WebAdminState {
+        db_pool: db_pool.clone(),
+        admin_auth: admin_auth.clone(),
+        secure_cookies: config.security.force_secure_cookies,
+    };
 
     // Admin API routes (protected by middleware)
     let admin_routes = Router::new()
@@ -461,6 +483,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .layer(GovernorLayer::new(governor_token))
         .with_state(oauth_state.clone());
 
+    let security_headers_state = security_headers::SecurityHeadersConfig {
+        app_env: config.security.app_env.clone(),
+        trust_proxy_headers: config.security.trust_proxy_headers,
+    };
+
     // Vytvoř routes
     let app = Router::new()
         // Health check
@@ -502,6 +529,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .merge(discovery_routes)
         // Merge admin routes
         .merge(admin_routes)
+        // Web admin UI
+        .merge(web_admin::router(web_admin_state))
+        .layer(middleware::from_fn_with_state(
+            security_headers_state,
+            security_headers::security_headers_middleware,
+        ))
         .layer(TraceLayer::new_for_http());
 
     // Spusť server
@@ -518,20 +551,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn load_env_file() {
+fn load_env_file(env_file: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(path) = env_file {
+        dotenvy::from_filename(path)?;
+        tracing::info!("Loaded env file from --env-file: {}", path);
+        return Ok(());
+    }
+
     // 1) Standard path from current working directory
     if let Ok(path) = dotenvy::dotenv() {
         tracing::info!("Loaded env file: {}", path.display());
-        return;
+        return Ok(());
     }
 
     // 2) Explicit container path used in Kubernetes manifests
     if dotenvy::from_filename("/app/.env").is_ok() {
         tracing::info!("Loaded env file: /app/.env");
-        return;
+        return Ok(());
     }
 
     tracing::warn!("No .env file loaded from CWD or /app/.env; using process environment only");
+    Ok(())
 }
 
 async fn health_check() -> &'static str {

@@ -1,11 +1,9 @@
 [package]
-name = "simple-idm-server-app"
-version = "0.3.5"
+name = "simple-idm-core"
+version = "0.4.0"
 edition = "2024"
-
-[[bin]]
-name = "simple-idm-server"
-path = "src/main.rs"
+authors = ["Martin Mareš <martin.mares@seznam.cz>"]
+autobins = false
 
 [dependencies]
 # Web framework
@@ -71,7 +69,14 @@ dirs = "6.0"
 urlencoding = "2.1"
 qrcode = "0.14"
 open = "5.3"
+chacha20poly1305 = "0.10"
 simple-idm-common = { path = "../simple-idm-common" }
 simple-idm-ad-auth = { path = "../simple-idm-ad-auth" }
-simple-idm-server = { path = "../simple-idm-server" }
-askama = "0.14"
+simple-idm-ldap-sync = { path = "../simple-idm-ldap-sync" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+reqwest = { version = "0.13", features = ["json", "form", "cookies"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+base64 = "0.22"

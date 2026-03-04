@@ -1,0 +1,248 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card mb-3">
+  <div class="card-header d-flex align-items-center justify-content-between">
+    <h3 class="card-title mb-0">Create user</h3>
+    <a class="btn btn-sm btn-outline-primary" href="/admin/ui/users/import">
+      <i class="ti ti-file-import me-1"></i> Import CSV
+    </a>
+  </div>
+  <div class="card-body">
+    <form method="post" action="/admin/ui/users/create" class="row g-2">
+      <div class="col-md-3"><input class="form-control" name="username" placeholder="username" required></div>
+      <div class="col-md-3"><input class="form-control" name="email" type="email" placeholder="email" required></div>
+      <div class="col-md-3"><input class="form-control" name="password" type="password" placeholder="password" required></div>
+      <div class="col-md-2 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked> <label class="form-check-label">active</label></div>
+      <div class="col-md-1"><button class="btn btn-primary w-100" type="submit">Create</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="card mb-3">
+  <div class="card-header"><h3 class="card-title mb-0">Filters</h3></div>
+  <div class="card-body">
+    <form method="get" action="/admin/ui/users" class="row g-2" id="users-filter-form">
+      <div class="col-md-5">
+        <input class="form-control" name="q" placeholder="search username, email, name" value="{{ filter_q }}">
+      </div>
+      <div class="col-md-3">
+        <select class="form-select" name="status">
+          <option value="all" {% if filter_status == "all" %}selected{% endif %}>all statuses</option>
+          <option value="active" {% if filter_status == "active" %}selected{% endif %}>active</option>
+          <option value="inactive" {% if filter_status == "inactive" %}selected{% endif %}>inactive</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <input class="form-control" name="note" placeholder="note contains..." value="{{ filter_note }}">
+      </div>
+      <div class="col-md-1 d-flex gap-1">
+        <button class="btn btn-primary w-100" type="submit">Apply</button>
+      </div>
+      <div class="col-12">
+        <input type="hidden" name="letters" id="letters-hidden">
+        <div class="d-flex flex-wrap gap-2 mt-2">
+          {% for l in letter_filters %}
+          {% if loop.index == 14 %}
+        </div>
+        <div class="d-flex flex-wrap gap-2 mt-2">
+          {% endif %}
+          <label class="form-check form-check-inline m-0">
+            <input class="form-check-input letter-filter" type="checkbox" value="{{ l.value }}" {% if l.selected %}checked{% endif %}>
+            <span class="form-check-label">{{ l.value }}</span>
+          </label>
+          {% endfor %}
+        </div>
+        <div class="form-text">Filter by first letter of last name (A-Z, multi-select).</div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Last sign-in</th><th>Actions</th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>
+          <div>{{ r.username }}</div>
+          {% if let Some(note) = r.note %}
+          <div class="small text-secondary mt-1">{{ note }}</div>
+          {% endif %}
+          {% if !r.is_active %}
+          <span class="badge bg-red-lt ms-2">inactive</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if let Some(first_name) = r.first_name %}
+            {% if let Some(last_name) = r.last_name %}
+              {{ first_name }} {{ last_name }}
+            {% else %}
+              {{ first_name }}
+            {% endif %}
+          {% else %}
+            {% if let Some(last_name) = r.last_name %}
+              {{ last_name }}
+            {% else %}
+              -
+            {% endif %}
+          {% endif %}
+        </td>
+        <td>{{ r.email }}</td>
+        <td class="text-nowrap">
+          {% if let Some(last_sign_in_at) = r.last_sign_in_at %}
+            {{ last_sign_in_at }}
+          {% else %}
+            -
+          {% endif %}
+        </td>
+        <td>
+          <div class="d-flex gap-2">
+            <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#user-edit-{{ r.id }}">
+              Edit
+            </button>
+            <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate">
+              <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="d-flex align-items-center justify-content-between mt-3">
+  <div class="text-secondary small">
+    {{ total_items }} users • page {{ current_page }} / {{ total_pages }}
+  </div>
+  <div class="btn-list">
+    {% if has_prev %}
+    <a class="btn btn-outline-secondary btn-sm" href="{{ prev_page_url }}">Previous</a>
+    {% else %}
+    <button class="btn btn-outline-secondary btn-sm" disabled>Previous</button>
+    {% endif %}
+    {% if has_next %}
+    <a class="btn btn-outline-secondary btn-sm" href="{{ next_page_url }}">Next</a>
+    {% else %}
+    <button class="btn btn-outline-secondary btn-sm" disabled>Next</button>
+    {% endif %}
+  </div>
+</div>
+
+{% for r in rows %}
+<div class="modal modal-blur fade" id="user-edit-{{ r.id }}" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-md modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Edit user: {{ r.username }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/users/{{ r.id }}/update">
+        <div class="modal-body">
+            <div class="row g-3">
+              <div class="col-md-12">
+                <label class="form-label">Email</label>
+                <input class="form-control" type="email" name="email" value="{{ r.email }}" required>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">First name</label>
+                <input class="form-control" value="{{ r.first_name.clone().unwrap_or("".to_string()) }}" disabled>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Last name</label>
+                <input class="form-control" value="{{ r.last_name.clone().unwrap_or("".to_string()) }}" disabled>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Recovery email</label>
+                <input class="form-control" value="{{ r.recovery_email.clone().unwrap_or("".to_string()) }}" disabled>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Phone</label>
+                <input class="form-control" value="{{ r.phone_e164.clone().unwrap_or("".to_string()) }}" disabled>
+              </div>
+              <div class="col-md-12">
+                <label class="form-label">Note</label>
+                <input class="form-control" value="{{ r.note.clone().unwrap_or("".to_string()) }}" disabled>
+              </div>
+              <div class="col-md-12">
+                <label class="form-label">New password (optional)</label>
+                <div class="input-group">
+                  <input class="form-control user-password-input" id="user-password-{{ r.id }}" type="password" name="password" placeholder="Leave empty to keep current password">
+                  <button class="btn btn-outline-secondary user-password-generate" type="button" data-target="user-password-{{ r.id }}" title="Generate password">
+                    <i class="ti ti-wand"></i>
+                  </button>
+                  <button class="btn btn-outline-secondary user-password-copy" type="button" data-target="user-password-{{ r.id }}" title="Copy to clipboard">
+                    <i class="ti ti-copy"></i>
+                  </button>
+                </div>
+                <div class="form-text">Generate password locally in browser, then save changes.</div>
+              </div>
+              <div class="col-md-12 d-flex justify-content-end mt-2">
+                <label class="form-check m-0">
+                  <input class="form-check-input" type="checkbox" name="is_active" {% if r.is_active %}checked{% endif %}>
+                <span class="form-check-label">active</span>
+              </label>
+            </div>
+            </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+<script>
+  document.addEventListener('DOMContentLoaded', function() {
+    const filterForm = document.getElementById('users-filter-form');
+    if (filterForm) {
+      filterForm.addEventListener('submit', function() {
+        const selected = Array.from(filterForm.querySelectorAll('.letter-filter:checked'))
+          .map(el => el.value)
+          .join(',');
+        const hidden = document.getElementById('letters-hidden');
+        if (hidden) hidden.value = selected;
+      });
+    }
+
+    function randomPassword(length) {
+      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=';
+      const bytes = new Uint32Array(length);
+      window.crypto.getRandomValues(bytes);
+      let out = '';
+      for (let i = 0; i < length; i++) out += alphabet[bytes[i] % alphabet.length];
+      return out;
+    }
+
+    document.querySelectorAll('.user-password-generate').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const targetId = btn.getAttribute('data-target');
+        const input = document.getElementById(targetId);
+        if (!input) return;
+        input.value = randomPassword(20);
+        input.type = 'text';
+      });
+    });
+
+    document.querySelectorAll('.user-password-copy').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const targetId = btn.getAttribute('data-target');
+        const input = document.getElementById(targetId);
+        if (!input || !input.value) return;
+        try {
+          await navigator.clipboard.writeText(input.value);
+        } catch (_) {
+          input.select();
+          document.execCommand('copy');
+        }
+      });
+    });
+  });
+</script>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card">
+  <div class="card-header">
+    <h3 class="card-title mb-0">Import users from Google CSV</h3>
+  </div>
+  <div class="card-body">
+    <form method="post" action="/admin/ui/users/import" enctype="multipart/form-data" class="row g-3">
+      <div class="col-md-8">
+        <label class="form-label">CSV file</label>
+        <input type="file" name="file" class="form-control" accept=".csv,text/csv" required>
+        <div class="form-text">
+          Expected columns: <code>Email Address [Required]</code>, <code>First Name [Required]</code>,
+          <code>Last Name [Required]</code>, <code>Status [READ ONLY]</code>,
+          <code>Last Sign In [READ ONLY]</code>, <code>Recovery Email</code>, <code>Mobile Phone</code>.
+        </div>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Import note (optional)</label>
+        <input type="text" name="note" class="form-control" placeholder="import z google 2026.01">
+        <div class="form-text">Stored to <code>users.note</code> for all imported rows.</div>
+      </div>
+      <div class="col-12 d-flex gap-2">
+        <button class="btn btn-primary" type="submit">
+          <i class="ti ti-upload me-1"></i> Import
+        </button>
+        <a class="btn btn-outline-secondary" href="/admin/ui/users">Back to users</a>
+      </div>
+    </form>
+  </div>
+</div>
+{% endblock %}

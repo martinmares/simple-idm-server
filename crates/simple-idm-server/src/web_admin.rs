@@ -1,15 +1,19 @@
 use askama::Template;
 use axum::{
-    extract::{Form, Path, Query, State},
+    extract::{Form, Multipart, Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Router,
 };
+use chrono::{DateTime, NaiveDateTime, Utc};
+use rand::RngExt;
 use serde::Deserialize;
-use simple_idm_server::{admin::middleware::AdminAuth, db::DbPool};
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use simple_idm_core::{admin::middleware::AdminAuth, db::DbPool};
 use sqlx::FromRow;
 use std::collections::BTreeMap;
+use std::fmt;
 use uuid::Uuid;
 
 const ADMIN_TOKEN_COOKIE: &str = "sidm_admin_token";
@@ -37,7 +41,19 @@ pub struct UserCreateForm {
 #[derive(Debug, Deserialize)]
 pub struct UserUpdateForm {
     email: String,
+    password: Option<String>,
     is_active: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ImportedCsvUser {
+    first_name: Option<String>,
+    last_name: Option<String>,
+    email: String,
+    recovery_email: Option<String>,
+    phone: Option<String>,
+    last_sign_in_at: Option<DateTime<Utc>>,
+    is_active: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,18 +75,45 @@ pub struct ClientCreateForm {
     client_id: String,
     name: String,
     redirect_uris: String,
-    grant_types: String,
-    scope: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
+    grant_types: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
+    scopes: Vec<String>,
+    grant_types_csv: Option<String>,
+    scope: Option<String>,
+    grant_authorization_code: Option<String>,
+    grant_refresh_token: Option<String>,
+    grant_client_credentials: Option<String>,
+    grant_device_code: Option<String>,
+    scope_openid: Option<String>,
+    scope_profile: Option<String>,
+    scope_email: Option<String>,
+    scope_groups: Option<String>,
+    scope_offline_access: Option<String>,
     is_public: Option<String>,
     is_active: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ClientUpdateForm {
+    client_id: String,
     name: String,
     redirect_uris: String,
-    grant_types: String,
-    scope: String,
+    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
+    grant_types: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_or_seq")]
+    scopes: Vec<String>,
+    grant_types_csv: Option<String>,
+    scope: Option<String>,
+    grant_authorization_code: Option<String>,
+    grant_refresh_token: Option<String>,
+    grant_client_credentials: Option<String>,
+    grant_device_code: Option<String>,
+    scope_openid: Option<String>,
+    scope_profile: Option<String>,
+    scope_email: Option<String>,
+    scope_groups: Option<String>,
+    scope_offline_access: Option<String>,
     is_active: Option<String>,
 }
 
@@ -87,6 +130,11 @@ pub struct ClaimMapCreateForm {
 struct PageQuery {
     message: Option<String>,
     error: Option<String>,
+    q: Option<String>,
+    status: Option<String>,
+    note: Option<String>,
+    letters: Option<String>,
+    page: Option<u32>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -94,6 +142,12 @@ struct UserRow {
     id: Uuid,
     username: String,
     email: String,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    recovery_email: Option<String>,
+    phone_e164: Option<String>,
+    last_sign_in_at: Option<DateTime<Utc>>,
+    note: Option<String>,
     is_active: bool,
 }
 
@@ -117,12 +171,22 @@ struct ClientRow {
     is_public: bool,
 }
 
+impl ClientRow {
+    fn has_grant(&self, grant: &str) -> bool {
+        self.grant_types.iter().any(|g| g == grant)
+    }
+
+    fn has_scope(&self, scope: &str) -> bool {
+        self.scope.split_whitespace().any(|s| s == scope)
+    }
+}
+
 #[derive(Debug, Clone, FromRow)]
 struct ClaimMapRow {
     client_name: String,
     group_name: Option<String>,
     claim_name: String,
-    claim_value: serde_json::Value,
+    claim_value: Option<serde_json::Value>,
     claim_value_kind: String,
 }
 
@@ -213,6 +277,31 @@ struct UsersTemplate {
     message: Option<String>,
     error: Option<String>,
     rows: Vec<UserRow>,
+    filter_q: String,
+    filter_status: String,
+    filter_note: String,
+    letter_filters: Vec<LetterFilter>,
+    current_page: u32,
+    total_pages: u32,
+    has_prev: bool,
+    has_next: bool,
+    prev_page_url: String,
+    next_page_url: String,
+    total_items: i64,
+}
+
+#[derive(Debug, Clone)]
+struct LetterFilter {
+    value: String,
+    selected: bool,
+}
+
+#[derive(Template)]
+#[template(path = "admin/users_import.html")]
+struct UsersImportTemplate {
+    sections: Vec<NavItem>,
+    message: Option<String>,
+    error: Option<String>,
 }
 
 #[derive(Template)]
@@ -285,11 +374,13 @@ pub fn router(state: WebAdminState) -> Router {
         .route("/admin/ui/logout", post(logout_submit))
         .route("/admin/ui/users", get(users_page))
         .route("/admin/ui/users/create", post(users_create))
+        .route("/admin/ui/users/import", get(users_import_page).post(users_import_submit))
         .route("/admin/ui/users/{id}/update", post(users_update))
         .route("/admin/ui/users/{id}/deactivate", post(users_deactivate))
         .route("/admin/ui/groups", get(groups_page))
         .route("/admin/ui/groups/create", post(groups_create))
         .route("/admin/ui/groups/{id}/update", post(groups_update))
+        .route("/admin/ui/groups/{id}/deactivate", post(groups_deactivate))
         .route("/admin/ui/user-groups", get(user_groups_page))
         .route("/admin/ui/group-users", get(group_users_page))
         .route("/admin/ui/clients", get(clients_page))
@@ -306,12 +397,208 @@ fn parse_checkbox(v: &Option<String>) -> bool {
     v.as_deref().is_some_and(|x| x == "on" || x == "true" || x == "1")
 }
 
+fn parse_google_signin_datetime(raw: &str) -> Option<DateTime<Utc>> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let formats = ["%Y/%m/%d %H:%M:%S", "%Y/%m/%d %-H:%M:%S"];
+    for fmt in formats {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(raw, fmt) {
+            return Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
+    }
+    None
+}
+
+fn normalize_opt(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+}
+
+fn username_from_email(email: &str) -> String {
+    email.trim().to_lowercase()
+}
+
+fn random_import_password() -> String {
+    rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(24)
+        .map(char::from)
+        .collect()
+}
+
+fn parse_google_users_csv(bytes: &[u8]) -> Result<Vec<ImportedCsvUser>, String> {
+    let mut rdr = csv::ReaderBuilder::new()
+        .has_headers(true)
+        .from_reader(bytes);
+    let headers = rdr
+        .headers()
+        .map_err(|e| format!("Failed to read CSV header: {e}"))?
+        .clone();
+
+    let idx = |name: &str| {
+        headers
+            .iter()
+            .position(|h| h.trim_start_matches('\u{feff}').trim() == name)
+    };
+    let email_idx = idx("Email Address [Required]")
+        .ok_or_else(|| "CSV missing 'Email Address [Required]' column".to_string())?;
+    let first_idx = idx("First Name [Required]");
+    let last_idx = idx("Last Name [Required]");
+    let status_idx = idx("Status [READ ONLY]");
+    let last_sign_in_idx = idx("Last Sign In [READ ONLY]");
+    let recovery_email_idx = idx("Recovery Email");
+    let mobile_phone_idx = idx("Mobile Phone");
+    let recovery_phone_idx = idx("Recovery Phone [MUST BE IN THE E.164 FORMAT]");
+
+    let mut out = Vec::new();
+    for rec in rdr.records() {
+        let rec = rec.map_err(|e| format!("Invalid CSV row: {e}"))?;
+        let email = rec.get(email_idx).unwrap_or_default().trim().to_lowercase();
+        if email.is_empty() {
+            continue;
+        }
+        let is_active = rec
+            .get(status_idx.unwrap_or(usize::MAX))
+            .map(|s| s.trim().eq_ignore_ascii_case("active"))
+            .unwrap_or(true);
+
+        let mobile_phone = normalize_opt(rec.get(mobile_phone_idx.unwrap_or(usize::MAX)));
+        let recovery_phone = normalize_opt(rec.get(recovery_phone_idx.unwrap_or(usize::MAX)));
+        let phone = mobile_phone.or(recovery_phone);
+        let last_sign_in_at = rec
+            .get(last_sign_in_idx.unwrap_or(usize::MAX))
+            .and_then(parse_google_signin_datetime);
+
+        out.push(ImportedCsvUser {
+            first_name: normalize_opt(rec.get(first_idx.unwrap_or(usize::MAX))),
+            last_name: normalize_opt(rec.get(last_idx.unwrap_or(usize::MAX))),
+            email,
+            recovery_email: normalize_opt(rec.get(recovery_email_idx.unwrap_or(usize::MAX))),
+            phone,
+            last_sign_in_at,
+            is_active,
+        });
+    }
+    Ok(out)
+}
+
 fn split_csv(v: &str) -> Vec<String> {
     v.split(',')
         .map(|x| x.trim())
         .filter(|x| !x.is_empty())
         .map(|x| x.to_string())
         .collect()
+}
+
+fn selected_grant_types(form_values: &[String], fallback_csv: Option<&str>) -> Vec<String> {
+    if !form_values.is_empty() {
+        return form_values.to_vec();
+    }
+    fallback_csv.map(split_csv).unwrap_or_default()
+}
+
+fn selected_scope_string(form_values: &[String], fallback_scope: Option<&str>) -> String {
+    if !form_values.is_empty() {
+        return form_values.join(" ");
+    }
+    fallback_scope
+        .unwrap_or_default()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn selected_grant_types_from_flags(
+    authorization_code: &Option<String>,
+    refresh_token: &Option<String>,
+    client_credentials: &Option<String>,
+    device_code: &Option<String>,
+) -> Vec<String> {
+    let mut v = Vec::new();
+    if parse_checkbox(authorization_code) {
+        v.push("authorization_code".to_string());
+    }
+    if parse_checkbox(refresh_token) {
+        v.push("refresh_token".to_string());
+    }
+    if parse_checkbox(client_credentials) {
+        v.push("client_credentials".to_string());
+    }
+    if parse_checkbox(device_code) {
+        v.push("urn:ietf:params:oauth:grant-type:device_code".to_string());
+    }
+    v
+}
+
+fn selected_scopes_from_flags(
+    openid: &Option<String>,
+    profile: &Option<String>,
+    email: &Option<String>,
+    groups: &Option<String>,
+    offline_access: &Option<String>,
+) -> Vec<String> {
+    let mut v = Vec::new();
+    if parse_checkbox(openid) {
+        v.push("openid".to_string());
+    }
+    if parse_checkbox(profile) {
+        v.push("profile".to_string());
+    }
+    if parse_checkbox(email) {
+        v.push("email".to_string());
+    }
+    if parse_checkbox(groups) {
+        v.push("groups".to_string());
+    }
+    if parse_checkbox(offline_access) {
+        v.push("offline_access".to_string());
+    }
+    v
+}
+
+fn deserialize_string_or_seq<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    struct StringOrSeqVisitor;
+
+    impl<'de> Visitor<'de> for StringOrSeqVisitor {
+        type Value = Vec<String>;
+
+        fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+            formatter.write_str("a string or a sequence of strings")
+        }
+
+        fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(vec![value.to_string()])
+        }
+
+        fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            Ok(vec![value])
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let mut values = Vec::new();
+            while let Some(item) = seq.next_element::<String>()? {
+                values.push(item);
+            }
+            Ok(values)
+        }
+    }
+
+    deserializer.deserialize_any(StringOrSeqVisitor)
 }
 
 fn nav_items(active: AdminSection) -> Vec<NavItem> {
@@ -450,9 +737,86 @@ async fn users_page(
         return redir.into_response();
     }
 
-    let rows = match sqlx::query_as::<_, UserRow>(
-        r#"SELECT id, username, email, is_active FROM users WHERE deleted_at IS NULL ORDER BY username ASC"#,
+    let filter_q = query.q.unwrap_or_default();
+    let filter_note = query.note.unwrap_or_default();
+    let filter_status = query.status.unwrap_or_else(|| "all".to_string());
+    let page = query.page.unwrap_or(1).max(1);
+    let per_page: i64 = 25;
+    let selected_letters = query
+        .letters
+        .as_deref()
+        .unwrap_or_default()
+        .split(',')
+        .map(|v| v.trim().to_uppercase())
+        .filter(|v| v.len() == 1 && v.chars().all(|c| c.is_ascii_alphabetic()))
+        .collect::<Vec<_>>();
+    let active_filter = match filter_status.as_str() {
+        "active" => Some(true),
+        "inactive" => Some(false),
+        _ => None,
+    };
+
+    let total_items = match sqlx::query_scalar::<_, i64>(
+        r#"SELECT COUNT(*)
+           FROM users
+           WHERE deleted_at IS NULL
+             AND (
+               $1::text IS NULL OR $1 = '' OR
+               username ILIKE '%' || $1 || '%' OR
+               email ILIKE '%' || $1 || '%' OR
+               COALESCE(first_name, '') ILIKE '%' || $1 || '%' OR
+               COALESCE(last_name, '') ILIKE '%' || $1 || '%'
+             )
+             AND ($2::boolean IS NULL OR is_active = $2)
+             AND ($3::text IS NULL OR $3 = '' OR COALESCE(note, '') ILIKE '%' || $3 || '%')
+             AND (
+               cardinality($4::text[]) = 0 OR
+               UPPER(LEFT(COALESCE(last_name, ''), 1)) = ANY($4::text[])
+             )"#,
     )
+    .bind(filter_q.trim())
+    .bind(active_filter)
+    .bind(filter_note.trim())
+    .bind(&selected_letters)
+    .fetch_one(&state.db_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/admin/ui/users", "error", &format!("DB error: {e}")).into_response();
+        }
+    };
+
+    let total_pages = ((total_items + per_page - 1) / per_page).max(1) as u32;
+    let page = page.min(total_pages);
+    let offset = ((page - 1) as i64) * per_page;
+
+    let rows = match sqlx::query_as::<_, UserRow>(
+        r#"SELECT id, username, email, first_name, last_name, recovery_email, phone_e164, last_sign_in_at, note, is_active
+           FROM users
+           WHERE deleted_at IS NULL
+             AND (
+               $1::text IS NULL OR $1 = '' OR
+               username ILIKE '%' || $1 || '%' OR
+               email ILIKE '%' || $1 || '%' OR
+               COALESCE(first_name, '') ILIKE '%' || $1 || '%' OR
+               COALESCE(last_name, '') ILIKE '%' || $1 || '%'
+             )
+             AND ($2::boolean IS NULL OR is_active = $2)
+             AND ($3::text IS NULL OR $3 = '' OR COALESCE(note, '') ILIKE '%' || $3 || '%')
+             AND (
+               cardinality($4::text[]) = 0 OR
+               UPPER(LEFT(COALESCE(last_name, ''), 1)) = ANY($4::text[])
+             )
+           ORDER BY username ASC
+           LIMIT $5 OFFSET $6"#,
+    )
+    .bind(filter_q.trim())
+    .bind(active_filter)
+    .bind(filter_note.trim())
+    .bind(&selected_letters)
+    .bind(per_page)
+    .bind(offset)
     .fetch_all(&state.db_pool)
     .await
     {
@@ -462,11 +826,62 @@ async fn users_page(
         }
     };
 
+    let letter_filters = ('A'..='Z')
+        .map(|ch| {
+            let v = ch.to_string();
+            LetterFilter {
+                selected: selected_letters.contains(&v),
+                value: v,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    let letters_csv = selected_letters.join(",");
+    let common_qs = format!(
+        "q={}&status={}&note={}",
+        urlencoding::encode(filter_q.trim()),
+        urlencoding::encode(&filter_status),
+        urlencoding::encode(filter_note.trim())
+    );
+    let prev_page = page.saturating_sub(1).max(1);
+    let next_page = (page + 1).min(total_pages.max(1));
+    let prev_page_url = if letters_csv.is_empty() {
+        format!("/admin/ui/users?{}&page={}", common_qs, prev_page)
+    } else {
+        format!(
+            "/admin/ui/users?{}&letters={}&page={}",
+            common_qs,
+            urlencoding::encode(&letters_csv),
+            prev_page
+        )
+    };
+    let next_page_url = if letters_csv.is_empty() {
+        format!("/admin/ui/users?{}&page={}", common_qs, next_page)
+    } else {
+        format!(
+            "/admin/ui/users?{}&letters={}&page={}",
+            common_qs,
+            urlencoding::encode(&letters_csv),
+            next_page
+        )
+    };
+
     render_template(UsersTemplate {
         sections: nav_items(AdminSection::Users),
         message: query.message,
         error: query.error,
         rows,
+        filter_q,
+        filter_status,
+        filter_note,
+        letter_filters,
+        current_page: page,
+        total_pages,
+        has_prev: page > 1,
+        has_next: page < total_pages,
+        prev_page_url,
+        next_page_url,
+        total_items,
     })
 }
 
@@ -479,7 +894,7 @@ async fn users_create(
         return redir.into_response();
     }
 
-    let password_hash = match simple_idm_server::auth::password::hash_password(&form.password) {
+    let password_hash = match simple_idm_core::auth::password::hash_password(&form.password) {
         Ok(h) => h,
         Err(e) => {
             return redirect_with("/admin/ui/users", "error", &format!("Password hash failed: {e}"))
@@ -490,8 +905,8 @@ async fn users_create(
     let is_active = parse_checkbox(&form.is_active);
 
     let result = sqlx::query(
-        r#"INSERT INTO users (tenant_id, username, email, password_hash, is_active)
-           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4)"#,
+        r#"INSERT INTO users (tenant_id, username, email, password_hash, is_active, first_name, last_name)
+           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, NULL, NULL)"#,
     )
     .bind(form.username.trim())
     .bind(form.email.trim().to_lowercase())
@@ -519,20 +934,186 @@ async fn users_update(
 
     let is_active = parse_checkbox(&form.is_active);
 
-    let result = sqlx::query(
-        r#"UPDATE users SET email = $2, is_active = $3, updated_at = NOW() WHERE id = $1"#,
-    )
-    .bind(id)
-    .bind(form.email.trim().to_lowercase())
-    .bind(is_active)
-    .execute(&state.db_pool)
-    .await;
+    let new_password = form
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let result = if let Some(password) = new_password {
+        match simple_idm_core::auth::password::hash_password(password) {
+            Ok(hash) => {
+                sqlx::query(
+                    r#"UPDATE users SET email = $2, password_hash = $3, is_active = $4, updated_at = NOW() WHERE id = $1"#,
+                )
+                .bind(id)
+                .bind(form.email.trim().to_lowercase())
+                .bind(hash)
+                .bind(is_active)
+                .execute(&state.db_pool)
+                .await
+            }
+            Err(e) => {
+                return redirect_with("/admin/ui/users", "error", &format!("Hash failed: {e}"))
+                    .into_response();
+            }
+        }
+    } else {
+        sqlx::query(
+            r#"UPDATE users SET email = $2, is_active = $3, updated_at = NOW() WHERE id = $1"#,
+        )
+        .bind(id)
+        .bind(form.email.trim().to_lowercase())
+        .bind(is_active)
+        .execute(&state.db_pool)
+        .await
+    };
 
     match result {
         Ok(_) => redirect_with("/admin/ui/users", "message", "User updated").into_response(),
         Err(e) => redirect_with("/admin/ui/users", "error", &format!("Update failed: {e}"))
             .into_response(),
     }
+}
+
+async fn users_import_page(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    render_template(UsersImportTemplate {
+        sections: nav_items(AdminSection::Users),
+        message: query.message,
+        error: query.error,
+    })
+}
+
+async fn users_import_submit(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    mut multipart: Multipart,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let mut note: Option<String> = None;
+    let mut file_bytes: Option<Vec<u8>> = None;
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let Some(name) = field.name().map(|s| s.to_string()) else {
+            continue;
+        };
+        if name == "note" {
+            note = field
+                .text()
+                .await
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
+        } else if name == "file" {
+            file_bytes = field.bytes().await.ok().map(|b| b.to_vec());
+        }
+    }
+
+    let Some(bytes) = file_bytes else {
+        return redirect_with("/admin/ui/users/import", "error", "Missing CSV file").into_response();
+    };
+
+    let imported = match parse_google_users_csv(&bytes) {
+        Ok(v) if !v.is_empty() => v,
+        Ok(_) => {
+            return redirect_with("/admin/ui/users/import", "error", "CSV has no importable users")
+                .into_response()
+        }
+        Err(e) => return redirect_with("/admin/ui/users/import", "error", &e).into_response(),
+    };
+
+    let mut created = 0usize;
+    let mut updated = 0usize;
+    let mut failed = 0usize;
+    for item in imported {
+        let existing = sqlx::query_scalar::<_, Uuid>(
+            r#"SELECT id FROM users WHERE tenant_id = '11111111-1111-1111-1111-111111111111' AND email = $1 AND deleted_at IS NULL LIMIT 1"#,
+        )
+        .bind(&item.email)
+        .fetch_optional(&state.db_pool)
+        .await;
+
+        let result = match existing {
+            Ok(Some(user_id)) => {
+                sqlx::query(
+                    r#"UPDATE users
+                       SET first_name = $2,
+                           last_name = $3,
+                           recovery_email = $4,
+                           phone_e164 = $5,
+                           last_sign_in_at = $6,
+                           note = $7,
+                           is_active = $8,
+                           updated_at = NOW()
+                       WHERE id = $1"#,
+                )
+                .bind(user_id)
+                .bind(item.first_name.as_deref())
+                .bind(item.last_name.as_deref())
+                .bind(item.recovery_email.as_deref())
+                .bind(item.phone.as_deref())
+                .bind(item.last_sign_in_at)
+                .bind(note.as_deref())
+                .bind(item.is_active)
+                .execute(&state.db_pool)
+                .await
+                .map(|_| {
+                    updated += 1;
+                })
+            }
+            Ok(None) => {
+                let generated_password = random_import_password();
+                let password_hash = match simple_idm_core::auth::password::hash_password(&generated_password) {
+                    Ok(h) => h,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
+                sqlx::query(
+                    r#"INSERT INTO users (
+                           tenant_id, username, email, password_hash, is_active,
+                           first_name, last_name, recovery_email, phone_e164, last_sign_in_at, note
+                       )
+                       VALUES (
+                           '11111111-1111-1111-1111-111111111111', $1, $2, $3, $4,
+                           $5, $6, $7, $8, $9, $10
+                       )"#,
+                )
+                .bind(username_from_email(&item.email))
+                .bind(&item.email)
+                .bind(password_hash)
+                .bind(item.is_active)
+                .bind(item.first_name.as_deref())
+                .bind(item.last_name.as_deref())
+                .bind(item.recovery_email.as_deref())
+                .bind(item.phone.as_deref())
+                .bind(item.last_sign_in_at)
+                .bind(note.as_deref())
+                .execute(&state.db_pool)
+                .await
+                .map(|_| {
+                    created += 1;
+                })
+            }
+            Err(e) => Err(e),
+        };
+
+        if result.is_err() {
+            failed += 1;
+        }
+    }
+
+    let msg = format!("Import completed: created={created}, updated={updated}, failed={failed}");
+    redirect_with("/admin/ui/users", "message", &msg).into_response()
 }
 
 async fn users_deactivate(
@@ -632,6 +1213,30 @@ async fn groups_update(
     match result {
         Ok(_) => redirect_with("/admin/ui/groups", "message", "Group updated").into_response(),
         Err(e) => redirect_with("/admin/ui/groups", "error", &format!("Update failed: {e}"))
+            .into_response(),
+    }
+}
+
+async fn groups_deactivate(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let result = sqlx::query(
+        r#"UPDATE groups SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1"#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => redirect_with("/admin/ui/groups", "message", "Group deactivated (safe delete)")
+            .into_response(),
+        Err(e) => redirect_with("/admin/ui/groups", "error", &format!("Deactivate failed: {e}"))
             .into_response(),
     }
 }
@@ -767,12 +1372,40 @@ async fn clients_create(
     let client_secret_hash = if is_public {
         None
     } else {
-        match simple_idm_server::auth::password::hash_password("change-me") {
+        match simple_idm_core::auth::password::hash_password("change-me") {
             Ok(v) => Some(v),
             Err(e) => {
                 return redirect_with("/admin/ui/clients", "error", &format!("Hash failed: {e}"))
                     .into_response();
             }
+        }
+    };
+
+    let grants = {
+        let from_flags = selected_grant_types_from_flags(
+            &form.grant_authorization_code,
+            &form.grant_refresh_token,
+            &form.grant_client_credentials,
+            &form.grant_device_code,
+        );
+        if from_flags.is_empty() {
+            selected_grant_types(&form.grant_types, form.grant_types_csv.as_deref())
+        } else {
+            from_flags
+        }
+    };
+    let scopes = {
+        let from_flags = selected_scopes_from_flags(
+            &form.scope_openid,
+            &form.scope_profile,
+            &form.scope_email,
+            &form.scope_groups,
+            &form.scope_offline_access,
+        );
+        if from_flags.is_empty() {
+            selected_scope_string(&form.scopes, form.scope.as_deref())
+        } else {
+            from_flags.join(" ")
         }
     };
 
@@ -786,8 +1419,8 @@ async fn clients_create(
     .bind(client_secret_hash)
     .bind(form.name.trim())
     .bind(split_csv(&form.redirect_uris))
-    .bind(split_csv(&form.grant_types))
-    .bind(form.scope.trim())
+    .bind(grants)
+    .bind(scopes)
     .bind(is_active)
     .bind(is_public)
     .execute(&state.db_pool)
@@ -812,16 +1445,45 @@ async fn clients_update(
 
     let is_active = parse_checkbox(&form.is_active);
 
+    let grants = {
+        let from_flags = selected_grant_types_from_flags(
+            &form.grant_authorization_code,
+            &form.grant_refresh_token,
+            &form.grant_client_credentials,
+            &form.grant_device_code,
+        );
+        if from_flags.is_empty() {
+            selected_grant_types(&form.grant_types, form.grant_types_csv.as_deref())
+        } else {
+            from_flags
+        }
+    };
+    let scopes = {
+        let from_flags = selected_scopes_from_flags(
+            &form.scope_openid,
+            &form.scope_profile,
+            &form.scope_email,
+            &form.scope_groups,
+            &form.scope_offline_access,
+        );
+        if from_flags.is_empty() {
+            selected_scope_string(&form.scopes, form.scope.as_deref())
+        } else {
+            from_flags.join(" ")
+        }
+    };
+
     let result = sqlx::query(
         r#"UPDATE oauth_clients
-           SET name=$2, redirect_uris=$3, grant_types=$4, scope=$5, is_active=$6, updated_at=NOW()
+           SET client_id=$2, name=$3, redirect_uris=$4, grant_types=$5, scope=$6, is_active=$7, updated_at=NOW()
            WHERE id=$1"#,
     )
     .bind(id)
+    .bind(form.client_id.trim())
     .bind(form.name.trim())
     .bind(split_csv(&form.redirect_uris))
-    .bind(split_csv(&form.grant_types))
-    .bind(form.scope.trim())
+    .bind(grants)
+    .bind(scopes)
     .bind(is_active)
     .execute(&state.db_pool)
     .await;
@@ -892,10 +1554,14 @@ async fn client_claims_page(
 
     let mut client_claims: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for row in rows {
+        let claim_value = row
+            .claim_value
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string());
         client_claims.entry(row.client_name).or_default().push(format!(
             "{}={} ({}, group={})",
             row.claim_name,
-            row.claim_value,
+            claim_value,
             row.claim_value_kind,
             row.group_name.unwrap_or_else(|| "*".to_string())
         ));
@@ -1010,9 +1676,13 @@ async fn group_claims_page(
     let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for row in rows {
         let g = row.group_name.unwrap_or_else(|| "*".to_string());
+        let claim_value = row
+            .claim_value
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "null".to_string());
         grouped.entry(g).or_default().push(format!(
             "{}: {}={} ({})",
-            row.client_name, row.claim_name, row.claim_value, row.claim_value_kind
+            row.client_name, row.claim_name, claim_value, row.claim_value_kind
         ));
     }
 

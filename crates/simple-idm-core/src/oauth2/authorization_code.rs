@@ -5,15 +5,18 @@ use crate::auth::{
 use crate::audit;
 use crate::client_group_filters::apply_client_group_filters;
 use crate::db::models::{AuthenticationSession, AuthorizationCode, OAuthClient, OAuthClientGroupPattern, RefreshToken, UsedRefreshToken, User};
+use crate::secret_crypto::decrypt_secret;
 use axum::{
     body::Bytes,
-    extract::{Query, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
     Form, Json,
 };
 use axum::http::header::SET_COOKIE;
 use chrono::{Duration, Utc};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine;
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sqlx;
@@ -32,6 +35,52 @@ use super::throttle;
 use super::templates;
 use super::utils::{apply_client_auth, resolve_oauth_client, ClientLookupError};
 use simple_idm_ad_auth::verify_ldap_password;
+
+#[derive(Debug, Deserialize, Serialize)]
+struct FederatedStatePayload {
+    csrf: String,
+    client_id: String,
+    redirect_uri: String,
+    tenant: Option<String>,
+    scope: Option<String>,
+    state: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    nonce: Option<String>,
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct IdentityProviderRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    slug: String,
+    issuer: String,
+    client_id: String,
+    client_secret_encrypted: String,
+    auth_url: Option<String>,
+    token_url: Option<String>,
+    scopes: Vec<String>,
+    hd_domain: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcDiscoveryResponse {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    userinfo_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcTokenResponse {
+    access_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct OidcUserInfoResponse {
+    sub: String,
+    email: Option<String>,
+    email_verified: Option<bool>,
+}
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
@@ -383,6 +432,461 @@ async fn create_auth_session(
     .await?;
 
     Ok(session_token)
+}
+
+async fn resolve_identity_provider_for_client(
+    db_pool: &sqlx::PgPool,
+    slug: &str,
+    oauth_client_id: Uuid,
+) -> Result<Option<IdentityProviderRow>, sqlx::Error> {
+    sqlx::query_as::<_, IdentityProviderRow>(
+        r#"
+        SELECT ip.id, ip.tenant_id, ip.slug, ip.issuer, ip.client_id, ip.client_secret_encrypted,
+               ip.auth_url, ip.token_url, ip.scopes, ip.hd_domain
+        FROM identity_providers ip
+        JOIN oauth_clients oc ON oc.tenant_id = ip.tenant_id
+        WHERE oc.id = $1
+          AND ip.slug = $2
+          AND ip.is_active = true
+          AND ip.deleted_at IS NULL
+        LIMIT 1
+        "#,
+    )
+    .bind(oauth_client_id)
+    .bind(slug)
+    .fetch_optional(db_pool)
+    .await
+}
+
+async fn resolve_discovery(idp: &IdentityProviderRow) -> Result<OidcDiscoveryResponse, String> {
+    if let (Some(auth), Some(token)) = (&idp.auth_url, &idp.token_url) {
+        return Ok(OidcDiscoveryResponse {
+            authorization_endpoint: auth.clone(),
+            token_endpoint: token.clone(),
+            userinfo_endpoint: None,
+        });
+    }
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        idp.issuer.trim_end_matches('/')
+    );
+    let resp = reqwest::Client::new()
+        .get(discovery_url)
+        .send()
+        .await
+        .map_err(|e| format!("OIDC discovery request failed: {e}"))?;
+    let resp = resp
+        .error_for_status()
+        .map_err(|e| format!("OIDC discovery non-success response: {e}"))?;
+    resp.json::<OidcDiscoveryResponse>()
+        .await
+        .map_err(|e| format!("OIDC discovery parse failed: {e}"))
+}
+
+fn build_federated_csrf_cookie(token: Option<&str>, secure: bool) -> String {
+    let value = token.unwrap_or("");
+    let mut cookie = format!(
+        "federated_csrf={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        value,
+        if token.is_some() { 600 } else { 0 }
+    );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+pub async fn handle_federated_start(
+    State(state): State<Arc<OAuth2State>>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let client_id = match params.get("client_id") {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "Missing required parameter: client_id",
+            ))
+            .into_response();
+        }
+    };
+    let redirect_uri = match params.get("redirect_uri") {
+        Some(v) if !v.trim().is_empty() => v,
+        _ => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "Missing required parameter: redirect_uri",
+            ))
+            .into_response();
+        }
+    };
+
+    let client = match resolve_oauth_client(
+        &state.db_pool,
+        client_id,
+        params.get("tenant").map(|s| s.as_str()),
+    )
+    .await
+    {
+        Ok(Some(c)) => c,
+        _ => return Html(templates::error_page("invalid_client", "OAuth client not found")).into_response(),
+    };
+    if !is_redirect_uri_allowed(&client, redirect_uri) {
+        return Html(templates::error_page("invalid_request", "Invalid redirect_uri for this client")).into_response();
+    }
+
+    let idp =
+        match resolve_identity_provider_for_client(&state.db_pool, provider.trim(), client.id).await
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return Html(templates::error_page(
+                    "invalid_request",
+                    "Identity provider not found for this client tenant",
+                ))
+                .into_response();
+            }
+            Err(_) => {
+                return Html(templates::error_page(
+                    "server_error",
+                    "Database error while loading identity provider",
+                ))
+                .into_response();
+            }
+        };
+
+    let discovery = match resolve_discovery(&idp).await {
+        Ok(v) => v,
+        Err(e) => return Html(templates::error_page("server_error", &e)).into_response(),
+    };
+
+    let csrf: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+
+    let payload = FederatedStatePayload {
+        csrf: csrf.clone(),
+        client_id: client_id.to_string(),
+        redirect_uri: redirect_uri.to_string(),
+        tenant: params.get("tenant").cloned().filter(|v| !v.trim().is_empty()),
+        scope: params.get("scope").cloned().filter(|v| !v.trim().is_empty()),
+        state: params.get("state").cloned().filter(|v| !v.trim().is_empty()),
+        code_challenge: params.get("code_challenge").cloned().filter(|v| !v.trim().is_empty()),
+        code_challenge_method: params
+            .get("code_challenge_method")
+            .cloned()
+            .filter(|v| !v.trim().is_empty()),
+        nonce: params.get("nonce").cloned().filter(|v| !v.trim().is_empty()),
+    };
+    let state_token = match serde_json::to_vec(&payload) {
+        Ok(v) => URL_SAFE_NO_PAD.encode(v),
+        Err(_) => {
+            return Html(templates::error_page("server_error", "Failed to prepare federated state"))
+                .into_response()
+        }
+    };
+
+    let issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let callback = format!(
+        "{}/oauth2/federated/{}/callback",
+        issuer.trim_end_matches('/'),
+        provider.trim()
+    );
+    let mut auth_url = match Url::parse(&discovery.authorization_endpoint) {
+        Ok(v) => v,
+        Err(_) => {
+            return Html(templates::error_page(
+                "server_error",
+                "Invalid upstream authorization endpoint",
+            ))
+            .into_response()
+        }
+    };
+    let scope = if idp.scopes.is_empty() {
+        "openid profile email".to_string()
+    } else {
+        idp.scopes.join(" ")
+    };
+    auth_url
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &idp.client_id)
+        .append_pair("redirect_uri", &callback)
+        .append_pair("scope", &scope)
+        .append_pair("state", &state_token);
+    if let Some(domain) = &idp.hd_domain {
+        auth_url.query_pairs_mut().append_pair("hd", domain);
+    }
+
+    let secure = state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+    let cookie = build_federated_csrf_cookie(Some(&csrf), secure);
+    ([(SET_COOKIE, cookie)], Redirect::to(auth_url.as_ref())).into_response()
+}
+
+pub async fn handle_federated_callback(
+    State(state): State<Arc<OAuth2State>>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
+    let code = match params.get("code") {
+        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
+        _ => return Html(templates::error_page("invalid_request", "Missing code parameter")).into_response(),
+    };
+    let state_token = match params.get("state") {
+        Some(v) if !v.trim().is_empty() => v.trim(),
+        _ => return Html(templates::error_page("invalid_request", "Missing state parameter")).into_response(),
+    };
+
+    let payload: FederatedStatePayload = match URL_SAFE_NO_PAD
+        .decode(state_token)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(v) => v,
+        None => return Html(templates::error_page("invalid_request", "Invalid state parameter")).into_response(),
+    };
+
+    let cookie_csrf = cookie_value(&headers, "federated_csrf").unwrap_or_default();
+    if cookie_csrf.is_empty() || cookie_csrf != payload.csrf {
+        return Html(templates::error_page("invalid_request", "CSRF verification failed")).into_response();
+    }
+
+    let local_client = match resolve_oauth_client(&state.db_pool, &payload.client_id, payload.tenant.as_deref()).await {
+        Ok(Some(c)) => c,
+        _ => return Html(templates::error_page("invalid_client", "OAuth client not found")).into_response(),
+    };
+    if !is_redirect_uri_allowed(&local_client, &payload.redirect_uri) {
+        return Html(templates::error_page("invalid_request", "Invalid redirect_uri")).into_response();
+    }
+
+    let idp = match resolve_identity_provider_for_client(&state.db_pool, provider.trim(), local_client.id).await {
+        Ok(Some(v)) => v,
+        _ => return Html(templates::error_page("invalid_request", "Identity provider not found")).into_response(),
+    };
+    let discovery = match resolve_discovery(&idp).await {
+        Ok(v) => v,
+        Err(e) => return Html(templates::error_page("server_error", &e)).into_response(),
+    };
+
+    let issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let callback = format!(
+        "{}/oauth2/federated/{}/callback",
+        issuer.trim_end_matches('/'),
+        provider.trim()
+    );
+
+    let client_secret = match decrypt_secret(&idp.client_secret_encrypted) {
+        Ok(v) => v,
+        Err(_) => {
+            return Html(templates::error_page(
+                "server_error",
+                "Failed to decrypt upstream client secret",
+            ))
+            .into_response()
+        }
+    };
+
+    let token_resp = {
+        let resp = match reqwest::Client::new()
+            .post(&discovery.token_endpoint)
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("redirect_uri", callback.as_str()),
+                ("client_id", idp.client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
+            ])
+            .send()
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => return Html(templates::error_page("server_error", "Failed to exchange code with upstream IdP")).into_response(),
+        };
+        let resp = match resp.error_for_status() {
+            Ok(v) => v,
+            Err(_) => return Html(templates::error_page("server_error", "Upstream IdP rejected token request")).into_response(),
+        };
+        match resp.json::<OidcTokenResponse>().await {
+            Ok(v) => v,
+            Err(_) => return Html(templates::error_page("server_error", "Failed to parse token response from upstream IdP")).into_response(),
+        }
+    };
+
+    let userinfo_endpoint = match discovery.userinfo_endpoint {
+        Some(v) => v,
+        None => return Html(templates::error_page("server_error", "Upstream IdP userinfo endpoint is missing")).into_response(),
+    };
+    let userinfo = {
+        let resp = match reqwest::Client::new()
+            .get(&userinfo_endpoint)
+            .bearer_auth(&token_resp.access_token)
+            .send()
+            .await
+        {
+            Ok(v) => v,
+            Err(_) => return Html(templates::error_page("server_error", "Failed to load userinfo from upstream IdP")).into_response(),
+        };
+        let resp = match resp.error_for_status() {
+            Ok(v) => v,
+            Err(_) => return Html(templates::error_page("server_error", "Upstream IdP rejected userinfo request")).into_response(),
+        };
+        match resp.json::<OidcUserInfoResponse>().await {
+            Ok(v) => v,
+            Err(_) => return Html(templates::error_page("server_error", "Failed to parse userinfo from upstream IdP")).into_response(),
+        }
+    };
+
+    let user = match sqlx::query_as::<_, User>(
+        r#"
+        SELECT u.*
+        FROM user_identities ui
+        JOIN users u ON u.id = ui.user_id
+        WHERE ui.tenant_id = $1
+          AND ui.idp_id = $2
+          AND ui.subject = $3
+          AND ui.deleted_at IS NULL
+          AND u.deleted_at IS NULL
+          AND u.is_active = true
+        LIMIT 1
+        "#,
+    )
+    .bind(idp.tenant_id)
+    .bind(idp.id)
+    .bind(&userinfo.sub)
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(u)) => u,
+        Ok(None) => {
+            let email = userinfo.email.clone().unwrap_or_default().to_lowercase();
+            if email.is_empty() || !userinfo.email_verified.unwrap_or(false) {
+                return Html(templates::error_page("access_denied", "User not linked and verified email is missing")).into_response();
+            }
+            let existing = match sqlx::query_as::<_, User>(
+                r#"
+                SELECT * FROM users
+                WHERE tenant_id = $1 AND email = $2 AND deleted_at IS NULL AND is_active = true
+                LIMIT 1
+                "#,
+            )
+            .bind(idp.tenant_id)
+            .bind(&email)
+            .fetch_optional(&state.db_pool)
+            .await
+            {
+                Ok(Some(u)) => u,
+                _ => return Html(templates::error_page("access_denied", "User is not provisioned in Simple IDM")).into_response(),
+            };
+            let _ = sqlx::query(
+                r#"
+                INSERT INTO user_identities (tenant_id, user_id, idp_id, issuer, subject, email_at_link, email_verified, last_login_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+                ON CONFLICT DO NOTHING
+                "#,
+            )
+            .bind(idp.tenant_id)
+            .bind(existing.id)
+            .bind(idp.id)
+            .bind(&idp.issuer)
+            .bind(&userinfo.sub)
+            .bind(userinfo.email.clone())
+            .bind(userinfo.email_verified)
+            .execute(&state.db_pool)
+            .await;
+            existing
+        }
+        Err(_) => return Html(templates::error_page("server_error", "Database error while resolving federated identity")).into_response(),
+    };
+
+    let _ = sqlx::query(
+        r#"
+        UPDATE user_identities
+        SET last_login_at = NOW(), updated_at = NOW()
+        WHERE tenant_id = $1 AND idp_id = $2 AND subject = $3 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(idp.tenant_id)
+    .bind(idp.id)
+    .bind(&userinfo.sub)
+    .execute(&state.db_pool)
+    .await;
+
+    let code_out: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    let expires_at = Utc::now() + Duration::minutes(10);
+    let scope = payload.scope.unwrap_or_else(|| local_client.scope.clone());
+    let nonce = payload.nonce.as_deref().and_then(non_empty);
+    let code_challenge = payload.code_challenge.as_deref().and_then(non_empty);
+    let code_challenge_method = payload.code_challenge_method.as_deref().and_then(non_empty);
+
+    if sqlx::query(
+        r#"
+        INSERT INTO authorization_codes
+        (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        "#,
+    )
+    .bind(&code_out)
+    .bind(local_client.id)
+    .bind(user.id)
+    .bind(&payload.redirect_uri)
+    .bind(&scope)
+    .bind(code_challenge)
+    .bind(code_challenge_method)
+    .bind(nonce)
+    .bind(expires_at)
+    .execute(&state.db_pool)
+    .await
+    .is_err()
+    {
+        return Html(templates::error_page("server_error", "Failed to store authorization code")).into_response();
+    }
+
+    let secure = state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+    let session_token = create_auth_session(
+        &state.db_pool,
+        user.id,
+        Some(local_client.id),
+        state.auth_session_expiry,
+    )
+    .await
+    .ok();
+    let auth_cookie = build_auth_session_cookie(session_token.as_deref(), state.auth_session_expiry, secure);
+    let federated_cookie = build_federated_csrf_cookie(None, secure);
+
+    let mut redirect = match Url::parse(&payload.redirect_uri) {
+        Ok(v) => v,
+        Err(_) => return Html(templates::error_page("invalid_request", "Invalid redirect URI")).into_response(),
+    };
+    redirect.query_pairs_mut().append_pair("code", &code_out);
+    if let Some(state_param) = payload.state {
+        redirect.query_pairs_mut().append_pair("state", &state_param);
+    }
+
+    audit::emit_event(
+        &state.db_pool,
+        "auth.login.federated",
+        "session",
+        Some(user.id),
+        "success",
+        Some(serde_json::json!({
+            "provider": idp.slug,
+            "issuer": idp.issuer,
+            "subject": userinfo.sub,
+            "client_id": payload.client_id
+        })),
+    )
+    .await;
+
+    ([(SET_COOKIE, auth_cookie), (SET_COOKIE, federated_cookie)], Redirect::to(redirect.as_ref())).into_response()
 }
 
 /// Endpoint pro login a vygenerování authorization code
@@ -879,6 +1383,10 @@ async fn verify_user_password(
     user: &User,
     password: &str,
 ) -> bool {
+    if user.password_disabled || user.auth_mode.eq_ignore_ascii_case("federated") {
+        return false;
+    }
+
     if should_use_ldap_for_email(state, &user.email) {
         if let Some(cfg) = &state.ldap_auth {
             match verify_ldap_password(cfg, &user.email, password).await {
@@ -895,7 +1403,10 @@ async fn verify_user_password(
             }
         }
     }
-    verify_password(password, &user.password_hash).unwrap_or(false)
+    match user.password_hash.as_deref() {
+        Some(hash) => verify_password(password, hash).unwrap_or(false),
+        None => false,
+    }
 }
 
 fn default_tenant_id() -> Uuid {

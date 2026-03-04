@@ -10,9 +10,9 @@ use base64::Engine;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use simple_idm_server::proxy::config::Config;
-use simple_idm_server::proxy::oidc::OidcClient;
-use simple_idm_server::proxy::session::SessionStore;
+use simple_idm_core::proxy::config::Config;
+use simple_idm_core::proxy::oidc::OidcClient;
+use simple_idm_core::proxy::session::SessionStore;
 
 #[derive(Clone)]
 struct AppState {

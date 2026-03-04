@@ -1,5 +1,6 @@
 use crate::auth::password::hash_password;
 use crate::password_reset::{create_reset_token_for_user, PasswordResetTokenInfo};
+use crate::secret_crypto::encrypt_secret;
 use crate::audit;
 use crate::db::{models::OAuthClient, DbPool};
 use axum::{
@@ -227,6 +228,54 @@ pub struct TenantDomainResponse {
     pub tenant_id: Uuid,
     pub domain: String,
     pub is_primary: bool,
+    pub is_active: bool,
+}
+
+// Federated Identity Provider types
+#[derive(Debug, Deserialize)]
+pub struct CreateIdentityProviderRequest {
+    pub tenant_id: Option<Uuid>,
+    pub slug: String,
+    pub provider_type: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub client_secret: String,
+    pub auth_url: Option<String>,
+    pub token_url: Option<String>,
+    pub jwks_url: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub hd_domain: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateIdentityProviderRequest {
+    pub slug: Option<String>,
+    pub provider_type: Option<String>,
+    pub issuer: Option<String>,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub auth_url: Option<String>,
+    pub token_url: Option<String>,
+    pub jwks_url: Option<String>,
+    pub scopes: Option<Vec<String>>,
+    pub hd_domain: Option<String>,
+    pub is_active: Option<bool>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct IdentityProviderResponse {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub slug: String,
+    pub provider_type: String,
+    pub issuer: String,
+    pub client_id: String,
+    pub auth_url: Option<String>,
+    pub token_url: Option<String>,
+    pub jwks_url: Option<String>,
+    pub scopes: Vec<String>,
+    pub hd_domain: Option<String>,
     pub is_active: bool,
 }
 
@@ -3875,6 +3924,243 @@ pub async fn delete_tenant_domain(
                 Json(ErrorResponse {
                     error: "bad_request".to_string(),
                     error_description: format!("Failed to delete tenant domain: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ============================================================================
+// Federated Identity Providers
+// ============================================================================
+
+pub async fn create_identity_provider(
+    State(db_pool): State<DbPool>,
+    Json(req): Json<CreateIdentityProviderRequest>,
+) -> impl IntoResponse {
+    let tenant_id = req.tenant_id.unwrap_or_else(default_tenant_id);
+    let scopes = req
+        .scopes
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| vec!["openid".to_string(), "profile".to_string(), "email".to_string()]);
+    let encrypted_secret = match encrypt_secret(req.client_secret.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to encrypt identity provider secret: {}", e),
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let result = sqlx::query_as::<_, IdentityProviderResponse>(
+        r#"
+        INSERT INTO identity_providers (
+            tenant_id, slug, provider_type, issuer, client_id, client_secret_encrypted,
+            auth_url, token_url, jwks_url, scopes, hd_domain, is_active
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING
+            id, tenant_id, slug, provider_type, issuer, client_id,
+            auth_url, token_url, jwks_url, scopes, hd_domain, is_active
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(req.slug.trim())
+    .bind(req.provider_type.trim())
+    .bind(req.issuer.trim())
+    .bind(req.client_id.trim())
+    .bind(encrypted_secret)
+    .bind(req.auth_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(req.token_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(req.jwks_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(scopes)
+    .bind(req.hd_domain.map(|v| v.trim().to_lowercase()).filter(|v| !v.is_empty()))
+    .bind(req.is_active.unwrap_or(true))
+    .fetch_one(&db_pool)
+    .await;
+
+    match result {
+        Ok(provider) => (StatusCode::CREATED, Json(provider)).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to create identity provider: {:?}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to create identity provider: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn list_identity_providers(
+    State(db_pool): State<DbPool>,
+    Query(pagination): Query<PaginationParams>,
+) -> impl IntoResponse {
+    let tenant_id = default_tenant_id();
+    let (limit, offset) = match pagination_limit_offset(&pagination) {
+        Ok(v) => v,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
+    };
+
+    let result = sqlx::query_as::<_, IdentityProviderResponse>(
+        r#"
+        SELECT
+            id, tenant_id, slug, provider_type, issuer, client_id,
+            auth_url, token_url, jwks_url, scopes, hd_domain, is_active
+        FROM identity_providers
+        WHERE tenant_id = $1 AND deleted_at IS NULL
+        ORDER BY slug
+        LIMIT $2 OFFSET $3
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&db_pool)
+    .await;
+
+    match result {
+        Ok(rows) => (StatusCode::OK, Json(rows)).into_response(),
+        Err(e) => {
+            tracing::error!("Failed to list identity providers: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Failed to list identity providers".to_string(),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn update_identity_provider(
+    State(db_pool): State<DbPool>,
+    Path(id): Path<Uuid>,
+    Json(req): Json<UpdateIdentityProviderRequest>,
+) -> impl IntoResponse {
+    let encrypted_secret_update = match req.client_secret.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        Some(secret) => match encrypt_secret(secret) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: format!("Failed to encrypt identity provider secret: {}", e),
+                    }),
+                )
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+
+    let result = sqlx::query_as::<_, IdentityProviderResponse>(
+        r#"
+        UPDATE identity_providers
+        SET
+            slug = COALESCE($2, slug),
+            provider_type = COALESCE($3, provider_type),
+            issuer = COALESCE($4, issuer),
+            client_id = COALESCE($5, client_id),
+            client_secret_encrypted = COALESCE($6, client_secret_encrypted),
+            auth_url = COALESCE($7, auth_url),
+            token_url = COALESCE($8, token_url),
+            jwks_url = COALESCE($9, jwks_url),
+            scopes = COALESCE($10, scopes),
+            hd_domain = COALESCE($11, hd_domain),
+            is_active = COALESCE($12, is_active),
+            updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NULL
+        RETURNING
+            id, tenant_id, slug, provider_type, issuer, client_id,
+            auth_url, token_url, jwks_url, scopes, hd_domain, is_active
+        "#,
+    )
+    .bind(id)
+    .bind(req.slug.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(req.provider_type.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(req.issuer.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(req.client_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(encrypted_secret_update)
+    .bind(req.auth_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(req.token_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(req.jwks_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(req.scopes.filter(|v| !v.is_empty()))
+    .bind(req.hd_domain.map(|v| v.trim().to_lowercase()).filter(|v| !v.is_empty()))
+    .bind(req.is_active)
+    .fetch_optional(&db_pool)
+    .await;
+
+    match result {
+        Ok(Some(provider)) => (StatusCode::OK, Json(provider)).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".to_string(),
+                error_description: "Identity provider not found".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to update identity provider: {:?}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to update identity provider: {}", e),
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+pub async fn delete_identity_provider(
+    State(db_pool): State<DbPool>,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let result = sqlx::query(
+        "UPDATE identity_providers SET is_active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .execute(&db_pool)
+    .await;
+
+    match result {
+        Ok(result) if result.rows_affected() > 0 => (
+            StatusCode::OK,
+            Json(SuccessResponse {
+                message: "Identity provider soft-deleted successfully".to_string(),
+            }),
+        )
+            .into_response(),
+        Ok(_) => (
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "not_found".to_string(),
+                error_description: "Identity provider not found".to_string(),
+            }),
+        )
+            .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to delete identity provider: {:?}", e);
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".to_string(),
+                    error_description: format!("Failed to delete identity provider: {}", e),
                 }),
             )
                 .into_response()

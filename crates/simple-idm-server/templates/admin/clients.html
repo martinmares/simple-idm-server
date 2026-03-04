@@ -1,0 +1,133 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card mb-3">
+  <div class="card-header">
+    <h3 class="card-title">Create client</h3>
+  </div>
+  <div class="card-body">
+    <form method="post" action="/admin/ui/clients/create" class="row g-2">
+      <div class="col-md-3"><input class="form-control" name="client_id" placeholder="client_id" required></div>
+      <div class="col-md-3"><input class="form-control" name="name" placeholder="name" required></div>
+      <div class="col-md-6"><input class="form-control" name="redirect_uris" placeholder="uri1, uri2"></div>
+      <div class="col-md-12">
+        <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. For CLI/public localhost clients, wildcard port is allowed only for client_id=cli-tools.</div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Grant types</label>
+        <div class="d-flex flex-wrap gap-2">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_authorization_code" value="on" checked><span class="form-check-label">authorization_code</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_refresh_token" value="on" checked><span class="form-check-label">refresh_token</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_client_credentials" value="on"><span class="form-check-label">client_credentials</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_device_code" value="on"><span class="form-check-label">device_code</span></label>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Scope</label>
+        <div class="d-flex flex-wrap gap-2">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" checked><span class="form-check-label">openid</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_profile" value="on" checked><span class="form-check-label">profile</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_email" value="on" checked><span class="form-check-label">email</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_groups" value="on" checked><span class="form-check-label">groups</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_offline_access" value="on"><span class="form-check-label">offline_access</span></label>
+        </div>
+      </div>
+      <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_public" type="checkbox" checked><label class="form-check-label">public</label></div>
+      <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked><label class="form-check-label">active</label></div>
+      <div class="col-md-12"><button class="btn btn-primary" type="submit">Create</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="row row-cards">
+  {% for r in rows %}
+  <div class="col-12 col-lg-6">
+    <div class="card mb-3">
+      <div class="card-header">
+        <h3 class="card-title">{{ r.name }}</h3>
+        <div class="card-actions">
+          <span class="badge {% if r.is_active %}bg-green-lt{% else %}bg-red-lt{% endif %} me-1">
+            {% if r.is_active %}active{% else %}inactive{% endif %}
+          </span>
+          <span class="badge {% if r.is_public %}bg-blue-lt{% else %}bg-orange-lt{% endif %}">
+            {% if r.is_public %}public{% else %}confidential{% endif %}
+          </span>
+        </div>
+      </div>
+      <div class="card-body">
+        <div class="mb-2"><span class="text-muted">client_id:</span> <code>{{ r.client_id }}</code></div>
+        <div class="mb-2"><span class="text-muted">redirect_uris:</span> {{ r.redirect_uris | join(", ") }}</div>
+        <div class="mb-2"><span class="text-muted">grant_types:</span> {{ r.grant_types | join(", ") }}</div>
+        <div class="mb-3"><span class="text-muted">scope:</span> {{ r.scope }}</div>
+        <div class="d-flex gap-2">
+          <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#client-edit-{{ r.id }}">
+            Edit
+          </button>
+          <form method="post" action="/admin/ui/clients/{{ r.id }}/deactivate">
+            <button class="btn btn-outline-danger btn-sm" type="submit">Safe delete</button>
+          </form>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal modal-blur fade" id="client-edit-{{ r.id }}" tabindex="-1" role="dialog" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title">Edit client: {{ r.client_id }}</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <form method="post" action="/admin/ui/clients/{{ r.id }}/update">
+          <div class="modal-body">
+            <div class="row g-3">
+              <div class="col-md-6">
+                <label class="form-label">client_id</label>
+                <input class="form-control" name="client_id" value="{{ r.client_id }}" required>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Name</label>
+                <input class="form-control" name="name" value="{{ r.name }}" required>
+              </div>
+              <div class="col-md-6">
+                <label class="form-label">Scope</label>
+                <div class="d-flex flex-wrap gap-2">
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" {% if r.has_scope("openid") %}checked{% endif %}><span class="form-check-label">openid</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_profile" value="on" {% if r.has_scope("profile") %}checked{% endif %}><span class="form-check-label">profile</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_email" value="on" {% if r.has_scope("email") %}checked{% endif %}><span class="form-check-label">email</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_groups" value="on" {% if r.has_scope("groups") %}checked{% endif %}><span class="form-check-label">groups</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_offline_access" value="on" {% if r.has_scope("offline_access") %}checked{% endif %}><span class="form-check-label">offline_access</span></label>
+                </div>
+              </div>
+              <div class="col-md-12">
+                <label class="form-label">Redirect URIs (comma separated)</label>
+                <input class="form-control" name="redirect_uris" value="{{ r.redirect_uris | join(", ") }}">
+                <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. For CLI/public localhost clients, wildcard port is allowed only for client_id=cli-tools.</div>
+              </div>
+              <div class="col-md-12">
+                <label class="form-label">Grant types</label>
+                <div class="d-flex flex-wrap gap-2">
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_authorization_code" value="on" {% if r.has_grant("authorization_code") %}checked{% endif %}><span class="form-check-label">authorization_code</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_refresh_token" value="on" {% if r.has_grant("refresh_token") %}checked{% endif %}><span class="form-check-label">refresh_token</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_client_credentials" value="on" {% if r.has_grant("client_credentials") %}checked{% endif %}><span class="form-check-label">client_credentials</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_device_code" value="on" {% if r.has_grant("urn:ietf:params:oauth:grant-type:device_code") %}checked{% endif %}><span class="form-check-label">device_code</span></label>
+                </div>
+              </div>
+              <div class="col-md-12 d-flex justify-content-end mt-2">
+                <label class="form-check m-0">
+                  <input class="form-check-input" type="checkbox" name="is_active" {% if r.is_active %}checked{% endif %}>
+                  <span class="form-check-label">active</span>
+                </label>
+              </div>
+            </div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+            <button class="btn btn-primary" type="submit">Save changes</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% endblock %}

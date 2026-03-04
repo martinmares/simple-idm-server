@@ -6,13 +6,60 @@ use uuid::Uuid;
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct User {
     pub id: Uuid,
+    pub tenant_id: Uuid,
     pub username: String,
     pub email: String,
     #[serde(skip_serializing)]
-    pub password_hash: String,
+    pub password_hash: Option<String>,
+    pub is_active: bool,
+    pub auth_mode: String,        // local|federated|mixed
+    pub password_disabled: bool,  // disable local password login
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub recovery_email: Option<String>,
+    pub phone_e164: Option<String>,
+    pub last_sign_in_at: Option<DateTime<Utc>>,
+    pub note: Option<String>,
+    pub deleted_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct IdentityProvider {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub slug: String,
+    pub provider_type: String,
+    pub issuer: String,
+    pub client_id: String,
+    #[serde(skip_serializing)]
+    pub client_secret_encrypted: String,
+    pub auth_url: Option<String>,
+    pub token_url: Option<String>,
+    pub jwks_url: Option<String>,
+    pub scopes: Vec<String>,
+    pub hd_domain: Option<String>,
     pub is_active: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct UserIdentity {
+    pub id: Uuid,
+    pub tenant_id: Uuid,
+    pub user_id: Uuid,
+    pub idp_id: Uuid,
+    pub issuer: String,
+    pub subject: String,
+    pub email_at_link: Option<String>,
+    pub email_verified: Option<bool>,
+    pub last_login_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub deleted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use simple_idm_server::ssh_login::{commands, SshLoginConfig};
+use simple_idm_core::ssh_login::{commands, SshLoginConfig};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
