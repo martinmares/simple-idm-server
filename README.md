@@ -16,6 +16,7 @@ A simple OAuth2/OIDC Identity Provider Server written in Rust.
 - **JWKS Endpoint** - `/.well-known/jwks.json`
 - **Admin API** - Complete REST API for managing users, groups, clients, and claim maps
 - **TUI Client** - Terminal UI for administration (`simple-idm-ctl tui`)
+- **Admin Web UI** - Browser-based admin interface (`/admin/ui/*`)
 
 ## Requirements
 
@@ -150,6 +151,7 @@ The `/oauth2/token` endpoint has stricter rate limiting by default to prevent br
 - `UI_BRAND_DOMAIN` - Optional domain/tenant hint for login page subtitle (default: empty)
 - `UI_THEME` - UI theme preset for auth pages (`blue`, `red`, `white`, `green`, `gold`; default: `blue`)
 - `UI_CUSTOM_CSS_PATH` - Optional path to CSS file injected into auth pages at runtime (default: empty)
+- `IDP_SECRETS_MASTER_KEY` - Master key for encrypting federated IdP client secrets in DB (`identity_providers.client_secret_encrypted`)
 
 CLI overrides for branding are also available:
 
@@ -157,6 +159,27 @@ CLI overrides for branding are also available:
 - `--ui-brand-domain`
 - `--ui-theme`
 - `--ui-custom-css-path`
+
+### Federated IdP Secret Encryption
+
+If you use federated login via `identity_providers` (Google/Entra/GitLab OIDC upstream), set:
+
+```bash
+IDP_SECRETS_MASTER_KEY=<base64_32B_key>
+```
+
+Generate key:
+
+```bash
+openssl rand -base64 32
+```
+
+Notes:
+
+- New/updated identity provider secrets are stored as:
+  `EncSimple[@api=2.0:@box=<base64(nonce||ciphertext||tag)>]`
+- Only `EncSimple[...]` format is accepted.
+- **Do not rotate `IDP_SECRETS_MASTER_KEY` without re-encrypting existing records**, otherwise decryption fails.
 
 ---
 
@@ -681,61 +704,6 @@ SOFT_DELETE_RETENTION_DAYS=30
 - **e** - Edit pattern
 - **d** - Delete pattern
 - **Enter/Esc** - Close manager
-
-## TODO
-
-### Core Features
-- [x] Admin API for managing users, groups and clients
-- [x] Web UI for login flow
-- [x] OIDC Discovery endpoint
-- [x] UserInfo endpoint
-- [x] Validate redirect_uri and client_id during auth code exchange
-- [x] Refresh token rotation + configurable expiry
-- [x] JWT audience validation
-- [x] Introspection endpoint
-- [x] Revocation endpoint
-- [x] Admin-initiated password reset flow
-- [x] Admin TUI for management workflows
-- [x] CLI tool OAuth2 login flow (authorization code + PKCE)
-
-### Critical (In Progress)
-- [x] **Fix CLI tool authorization** (Contract 2026-01-19.01)
-  - [x] Change OAuth client from `simple-idm-ctl` to `cli-tools`
-  - [x] Create `simple-idm:role:admin` group and seed admin user
-  - [x] Update middleware to check `simple-idm:role:admin` group
-  - [x] Implement multi-server support in CLI
-  - [x] Make `--url` required parameter (no hardcoded defaults)
-
-### Important (CODEX - Big Changes)
-See `.tmp/CODEX_INSTRUCTIONS_BIG_simple-idm-server.md` for details:
-- [x] **Nested groups** - groups can contain other groups
-  - [x] Add `group_groups` table
-  - [x] Implement cycle detection
-  - [x] Transitive membership expansion
-  - [x] CLI commands: `groups add-child`, `groups remove-child`, `groups list-children`
-  - [x] API endpoints for nested groups management
-  - [x] Integrate into token generation (effective groups)
-- [x] **Array claim values** - explicit single vs array in JWT
-  - [x] Add `claim_value_kind` and `claim_value_json` to `claim_maps`
-  - [x] Migration for existing data
-  - [x] Update token generation logic
-  - [x] API supports array input (backward compatible)
-  - [ ] Update CLI to support array claims (optional - API funguje)
-- [ ] **Naming conventions** - enforce `app:ns:X`, `app:role:Y`, `team:Z` pattern
-
-### Nice to have
-- [x] Web UI for device verification (`GET /device` + `POST /device`)
-- [ ] Publish Docker image
-- [ ] Expand integration documentation
-- [ ] Export/Import feature (backup/restore)
-- [ ] Enrich `user-groups` output with user and group names
-- [ ] Enrich `claim-maps` output with client and group names
-
-### Security & Standards
-- [x] Enforce `openid` (and optional `email`/`profile`) scopes on `/oauth2/userinfo`
-- [x] Validate `aud` in all access-token protected endpoints (not just userinfo)
-- [x] Add per-endpoint rate limit tuning (stricter for `/oauth2/token`)
-- [x] Add `kid` support + JWKS key rotation strategy
 
 ## License
 
