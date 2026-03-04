@@ -25,6 +25,7 @@ serde_urlencoded = "0.7"
 
 # JWT & Crypto
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 argon2 = "0.5"
 uuid = { version = "1.21", features = ["v4", "serde"] }
 rand = "0.10"

@@ -27,6 +27,12 @@ use std::sync::Arc;
 use std::time::Duration;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+fn install_rustls_provider() {
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    }
+}
 use simple_idm_ad_auth::{LdapAuthConfig, LdapTlsMode};
 
 #[derive(Parser, Debug)]
@@ -51,6 +57,8 @@ struct CliArgs {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    install_rustls_provider();
+
     // Inicializace loggingu
     tracing_subscriber::registry()
         .with(
@@ -185,6 +193,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         allowed_email_domains: config.identity.allowed_email_domains.clone(),
         ldap_auth,
         ldap_auth_domains: config.ad_auth.domains.clone(),
+        ldap_role_sync_enabled: config.ad_auth.role_sync_enabled,
+        ldap_role_sync_ttl_seconds: config.ad_auth.role_sync_ttl_seconds,
+        ldap_role_sync_timeout_seconds: config.ad_auth.role_sync_timeout_seconds,
         trust_proxy_headers: config.security.trust_proxy_headers,
         force_secure_cookies: config.security.force_secure_cookies,
         auth_protection: config.auth_protection.clone(),
