@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en" data-bs-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AD Onboarding</title>
+  <link href="https://cdn.jsdelivr.net/npm/@tabler/core@1.4.0/dist/css/tabler.min.css" rel="stylesheet">
+</head>
+<body class="d-flex align-items-center justify-content-center min-vh-100">
+  <div class="container container-tight py-4">
+    <div class="card card-md">
+      <div class="card-body">
+        <h2 class="h2 text-center mb-2">Simple IDM AD Onboarding</h2>
+        <p class="text-secondary text-center mb-4">Confirm your AD credentials to initialize role sync.</p>
+
+        {% if let Some(msg) = message %}
+        <div class="alert alert-success">{{ msg }}</div>
+        {% endif %}
+        {% if let Some(err) = error %}
+        <div class="alert alert-danger">{{ err }}</div>
+        {% endif %}
+
+        <form method="post" action="/ad/onboarding">
+          <input type="hidden" name="token" value="{{ token }}">
+          <div class="mb-3">
+            <label class="form-label">AD login</label>
+            <input class="form-control" type="text" name="login" placeholder="username or email" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">AD password</label>
+            <input class="form-control" type="password" name="password" required>
+          </div>
+          <button type="submit" class="btn btn-primary w-100">Verify and sync roles</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,50 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h3 class="card-title mb-0">AD onboarding tokens</h3>
+    <a class="btn btn-sm btn-outline-secondary" href="/admin/ui/users">Back to users</a>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Created</th>
+          <th>Expires</th>
+          <th>Used</th>
+          <th>Status</th>
+          <th>Token hash</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td>
+            <div>{{ r.username }}</div>
+            <div class="small text-secondary">{{ r.email }}</div>
+          </td>
+          <td class="text-nowrap">{{ r.created_at }}</td>
+          <td class="text-nowrap">{{ r.expires_at }}</td>
+          <td class="text-nowrap">
+            {% if let Some(used) = r.used_at %}
+              {{ used }}
+            {% else %}
+              -
+            {% endif %}
+          </td>
+          <td>
+            {% if let Some(_used) = r.used_at %}
+              <span class="badge bg-green-lt">used</span>
+            {% else %}
+              <span class="badge bg-yellow-lt">pending</span>
+            {% endif %}
+          </td>
+          <td><code class="small">{{ r.token_hash }}</code></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

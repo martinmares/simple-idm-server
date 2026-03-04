@@ -1,18 +1,41 @@
 {% extends "admin/base.html" %}
 {% block content %}
+{% if let Some(link) = ad_link %}
+<div class="alert alert-info d-flex align-items-center justify-content-between">
+  <div>
+    <strong>AD onboarding link ready.</strong>
+    <span class="text-secondary ms-2">{{ link }}</span>
+  </div>
+  <div class="btn-list">
+    <a class="btn btn-sm btn-primary" href="{{ link }}" target="_blank" rel="noopener">Open onboarding</a>
+  </div>
+</div>
+{% endif %}
 <div class="card mb-3">
   <div class="card-header d-flex align-items-center justify-content-between">
     <h3 class="card-title mb-0">Create user</h3>
-    <a class="btn btn-sm btn-outline-primary" href="/admin/ui/users/import">
-      <i class="ti ti-file-import me-1"></i> Import CSV
-    </a>
+    <div class="d-flex gap-2">
+      <a class="btn btn-sm btn-outline-secondary" href="/admin/ui/ad-onboarding">
+        <i class="ti ti-list-details me-1"></i> AD onboarding tokens
+      </a>
+      <a class="btn btn-sm btn-outline-primary" href="/admin/ui/users/import">
+        <i class="ti ti-file-import me-1"></i> Import CSV
+      </a>
+    </div>
   </div>
   <div class="card-body">
     <form method="post" action="/admin/ui/users/create" class="row g-2">
-      <div class="col-md-3"><input class="form-control" name="username" placeholder="username" required></div>
+      <div class="col-md-2"><input class="form-control" name="username" placeholder="username" required></div>
       <div class="col-md-3"><input class="form-control" name="email" type="email" placeholder="email" required></div>
-      <div class="col-md-3"><input class="form-control" name="password" type="password" placeholder="password" required></div>
-      <div class="col-md-2 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked> <label class="form-check-label">active</label></div>
+      <div class="col-md-2">
+        <select class="form-select" name="auth_mode">
+          <option value="local" selected>local</option>
+          <option value="ad">ad</option>
+          <option value="federated">federated</option>
+        </select>
+      </div>
+      <div class="col-md-3"><input class="form-control" name="password" type="password" placeholder="password (optional for ad/federated)"></div>
+      <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked> <label class="form-check-label">active</label></div>
       <div class="col-md-1"><button class="btn btn-primary w-100" type="submit">Create</button></div>
     </form>
   </div>
@@ -102,6 +125,9 @@
             <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#user-edit-{{ r.id }}">
               Edit
             </button>
+            <form method="post" action="/admin/ui/users/{{ r.id }}/ad-onboarding-link">
+              <button class="btn btn-sm btn-outline-secondary" type="submit">AD onboarding link</button>
+            </form>
             <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate">
               <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
             </form>
@@ -147,6 +173,14 @@
               <div class="col-md-12">
                 <label class="form-label">Email</label>
                 <input class="form-control" type="email" name="email" value="{{ r.email }}" required>
+              </div>
+              <div class="col-md-12">
+                <label class="form-label">Auth type</label>
+                <select class="form-select" name="auth_mode">
+                  <option value="local" {% if r.auth_mode == "local" %}selected{% endif %}>local</option>
+                  <option value="ad" {% if r.auth_mode == "mixed" %}selected{% endif %}>ad</option>
+                  <option value="federated" {% if r.auth_mode == "federated" %}selected{% endif %}>federated</option>
+                </select>
               </div>
               <div class="col-md-6">
                 <label class="form-label">First name</label>

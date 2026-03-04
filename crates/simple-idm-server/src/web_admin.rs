@@ -10,10 +10,16 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use rand::RngExt;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
-use simple_idm_core::{admin::middleware::AdminAuth, db::DbPool};
-use sqlx::FromRow;
+use simple_idm_core::{
+    admin::middleware::AdminAuth,
+    db::{DbPool, models::User},
+    oauth2::{self, OAuth2State},
+};
+use sha2::Digest;
+use sqlx::{FromRow, Row};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 use uuid::Uuid;
 
 const ADMIN_TOKEN_COOKIE: &str = "sidm_admin_token";
@@ -21,8 +27,10 @@ const ADMIN_TOKEN_COOKIE: &str = "sidm_admin_token";
 #[derive(Clone)]
 pub struct WebAdminState {
     pub db_pool: DbPool,
+    pub oauth_state: Arc<OAuth2State>,
     pub admin_auth: AdminAuth,
     pub secure_cookies: bool,
+    pub ad_onboarding_token_ttl_seconds: i64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -34,7 +42,8 @@ pub struct LoginForm {
 pub struct UserCreateForm {
     username: String,
     email: String,
-    password: String,
+    password: Option<String>,
+    auth_mode: Option<String>,
     is_active: Option<String>,
 }
 
@@ -42,6 +51,7 @@ pub struct UserCreateForm {
 pub struct UserUpdateForm {
     email: String,
     password: Option<String>,
+    auth_mode: Option<String>,
     is_active: Option<String>,
 }
 
@@ -127,14 +137,39 @@ pub struct ClaimMapCreateForm {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct AdOnboardingForm {
+    token: String,
+    login: String,
+    password: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct PageQuery {
     message: Option<String>,
     error: Option<String>,
+    ad_link: Option<String>,
     q: Option<String>,
     status: Option<String>,
     note: Option<String>,
     letters: Option<String>,
     page: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdOnboardingQuery {
+    token: Option<String>,
+    message: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct AdOnboardingTokenRow {
+    token_hash: String,
+    username: String,
+    email: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    used_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -148,6 +183,7 @@ struct UserRow {
     phone_e164: Option<String>,
     last_sign_in_at: Option<DateTime<Utc>>,
     note: Option<String>,
+    auth_mode: String,
     is_active: bool,
 }
 
@@ -276,6 +312,7 @@ struct UsersTemplate {
     sections: Vec<NavItem>,
     message: Option<String>,
     error: Option<String>,
+    ad_link: Option<String>,
     rows: Vec<UserRow>,
     filter_q: String,
     filter_status: String,
@@ -367,16 +404,39 @@ struct NavItem {
     active: bool,
 }
 
+#[derive(Template)]
+#[template(path = "admin/ad_onboarding.html")]
+struct AdOnboardingTemplate {
+    message: Option<String>,
+    error: Option<String>,
+    token: String,
+}
+
+#[derive(Template)]
+#[template(path = "admin/ad_onboarding_tokens.html")]
+struct AdOnboardingTokensTemplate {
+    sections: Vec<NavItem>,
+    message: Option<String>,
+    error: Option<String>,
+    rows: Vec<AdOnboardingTokenRow>,
+}
+
 pub fn router(state: WebAdminState) -> Router {
     Router::new()
+        .route("/ad/onboarding", get(ad_onboarding_page).post(ad_onboarding_submit))
         .route("/admin/ui", get(ui_root))
         .route("/admin/ui/login", get(login_page).post(login_submit))
         .route("/admin/ui/logout", post(logout_submit))
         .route("/admin/ui/users", get(users_page))
+        .route("/admin/ui/ad-onboarding", get(ad_onboarding_tokens_page))
         .route("/admin/ui/users/create", post(users_create))
         .route("/admin/ui/users/import", get(users_import_page).post(users_import_submit))
         .route("/admin/ui/users/{id}/update", post(users_update))
         .route("/admin/ui/users/{id}/deactivate", post(users_deactivate))
+        .route(
+            "/admin/ui/users/{id}/ad-onboarding-link",
+            post(users_ad_onboarding_link),
+        )
         .route("/admin/ui/groups", get(groups_page))
         .route("/admin/ui/groups/create", post(groups_create))
         .route("/admin/ui/groups/{id}/update", post(groups_update))
@@ -427,6 +487,15 @@ fn random_import_password() -> String {
         .take(24)
         .map(char::from)
         .collect()
+}
+
+fn normalize_auth_mode(raw: Option<&str>) -> String {
+    match raw.unwrap_or("local").trim().to_lowercase().as_str() {
+        "federated" => "federated".to_string(),
+        "mixed" => "mixed".to_string(),
+        "ad" => "mixed".to_string(),
+        _ => "local".to_string(),
+    }
 }
 
 fn parse_google_users_csv(bytes: &[u8]) -> Result<Vec<ImportedCsvUser>, String> {
@@ -614,7 +683,8 @@ fn nav_items(active: AdminSection) -> Vec<NavItem> {
 
 fn redirect_with(path: &str, key: &str, value: &str) -> Redirect {
     let encoded = urlencoding::encode(value);
-    Redirect::to(&format!("{path}?{key}={encoded}"))
+    let sep = if path.contains('?') { '&' } else { '?' };
+    Redirect::to(&format!("{path}{sep}{key}={encoded}"))
 }
 
 fn render_template<T: Template>(tmpl: T) -> Response {
@@ -626,6 +696,22 @@ fn render_template<T: Template>(tmpl: T) -> Response {
         )
             .into_response(),
     }
+}
+
+fn random_onboarding_token() -> String {
+    rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(48)
+        .map(char::from)
+        .collect()
+}
+
+fn onboarding_token_hash(token: &str) -> String {
+    use base64::Engine as _;
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(token.as_bytes());
+    let digest = hasher.finalize();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
 fn token_from_cookie(headers: &HeaderMap) -> Option<String> {
@@ -728,6 +814,229 @@ async fn logout_submit(State(state): State<WebAdminState>) -> Response {
     ([(header::SET_COOKIE, cookie)], Redirect::to("/admin/ui/login")).into_response()
 }
 
+async fn ad_onboarding_page(Query(query): Query<AdOnboardingQuery>) -> Response {
+    let token = query.token.unwrap_or_default();
+    render_template(AdOnboardingTemplate {
+        message: query.message,
+        error: query.error,
+        token,
+    })
+}
+
+async fn ad_onboarding_submit(
+    State(state): State<WebAdminState>,
+    Form(form): Form<AdOnboardingForm>,
+) -> Response {
+    if form.token.trim().is_empty() {
+        simple_idm_core::audit::emit_event(
+            &state.db_pool,
+            "ad.onboarding.submit",
+            "ad_onboarding",
+            None,
+            "failure",
+            Some(serde_json::json!({"reason":"missing_token"})),
+        )
+        .await;
+        return redirect_with("/ad/onboarding", "error", "Missing onboarding token").into_response();
+    }
+    if form.login.trim().is_empty() {
+        return redirect_with(
+            &format!("/ad/onboarding?token={}", urlencoding::encode(form.token.trim())),
+            "error",
+            "Missing AD login",
+        )
+        .into_response();
+    }
+    if form.password.is_empty() {
+        return redirect_with(
+            &format!("/ad/onboarding?token={}", urlencoding::encode(form.token.trim())),
+            "error",
+            "Missing AD password",
+        )
+        .into_response();
+    }
+
+    let token_hash = onboarding_token_hash(form.token.trim());
+    let row = match sqlx::query(
+        r#"
+        SELECT t.user_id, u.id, u.username, u.tenant_id, t.expires_at, t.used_at
+        FROM ad_onboarding_tokens t
+        JOIN users u ON u.id = t.user_id
+        WHERE t.token_hash = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(token_hash)
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "ad.onboarding.submit",
+                "ad_onboarding",
+                None,
+                "failure",
+                Some(serde_json::json!({"reason":"invalid_token"})),
+            )
+            .await;
+            return redirect_with("/ad/onboarding", "error", "Invalid onboarding token")
+                .into_response()
+        }
+        Err(e) => {
+            return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
+                .into_response()
+        }
+    };
+
+    let expires_at = match row.try_get::<DateTime<Utc>, _>("expires_at") {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
+                .into_response()
+        }
+    };
+    let used_at = match row.try_get::<Option<DateTime<Utc>>, _>("used_at") {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
+                .into_response()
+        }
+    };
+    if used_at.is_some() {
+        simple_idm_core::audit::emit_event(
+            &state.db_pool,
+            "ad.onboarding.submit",
+            "ad_onboarding",
+            None,
+            "failure",
+            Some(serde_json::json!({"reason":"token_used"})),
+        )
+        .await;
+        return redirect_with("/ad/onboarding", "error", "Onboarding token was already used")
+            .into_response();
+    }
+    if Utc::now() > expires_at {
+        simple_idm_core::audit::emit_event(
+            &state.db_pool,
+            "ad.onboarding.submit",
+            "ad_onboarding",
+            None,
+            "failure",
+            Some(serde_json::json!({"reason":"token_expired"})),
+        )
+        .await;
+        return redirect_with("/ad/onboarding", "error", "Onboarding token expired").into_response();
+    }
+
+    let ldap_cfg = match &state.oauth_state.ldap_auth {
+        Some(v) => v.clone(),
+        None => {
+            return redirect_with("/ad/onboarding", "error", "AD auth is not enabled")
+                .into_response()
+        }
+    };
+
+    if let Err(e) =
+        simple_idm_ad_auth::verify_ldap_password(&ldap_cfg, form.login.trim(), &form.password).await
+    {
+        simple_idm_core::audit::emit_event(
+            &state.db_pool,
+            "ad.onboarding.submit",
+            "ad_onboarding",
+            None,
+            "failure",
+            Some(serde_json::json!({"reason":"ldap_auth_failed","error": e.to_string()})),
+        )
+        .await;
+        return redirect_with(
+            &format!("/ad/onboarding?token={}", urlencoding::encode(form.token.trim())),
+            "error",
+            &format!("AD login failed: {e}"),
+        )
+        .into_response();
+    }
+
+    let user_id = match row.try_get::<Uuid, _>("user_id") {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
+                .into_response()
+        }
+    };
+    let user = match sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return redirect_with("/ad/onboarding", "error", "User not found").into_response();
+        }
+        Err(e) => {
+            return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
+                .into_response()
+        }
+    };
+
+    if let Err(e) = oauth2::sync_ldap_roles_force(state.oauth_state.as_ref(), &user, form.login.trim()).await
+    {
+        simple_idm_core::audit::emit_event(
+            &state.db_pool,
+            "ad.onboarding.submit",
+            "ad_onboarding",
+            Some(user.id),
+            "failure",
+            Some(serde_json::json!({"reason":"ldap_role_sync_failed","error": e.to_string()})),
+        )
+        .await;
+        return redirect_with(
+            &format!("/ad/onboarding?token={}", urlencoding::encode(form.token.trim())),
+            "error",
+            &format!("AD role sync failed: {e}"),
+        )
+        .into_response();
+    }
+
+    if let Err(e) =
+        sqlx::query("UPDATE ad_onboarding_tokens SET used_at = NOW() WHERE token_hash = $1")
+            .bind(onboarding_token_hash(form.token.trim()))
+            .execute(&state.db_pool)
+            .await
+    {
+        simple_idm_core::audit::emit_event(
+            &state.db_pool,
+            "ad.onboarding.submit",
+            "ad_onboarding",
+            Some(user.id),
+            "failure",
+            Some(serde_json::json!({"reason":"mark_used_failed","error": e.to_string()})),
+        )
+        .await;
+        return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}")).into_response();
+    }
+
+    simple_idm_core::audit::emit_event(
+        &state.db_pool,
+        "ad.onboarding.submit",
+        "ad_onboarding",
+        Some(user.id),
+        "success",
+        Some(serde_json::json!({"login": form.login.trim()})),
+    )
+    .await;
+
+    redirect_with(
+        "/ad/onboarding",
+        "message",
+        "AD onboarding completed. You can close this page.",
+    )
+    .into_response()
+}
+
 async fn users_page(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -792,7 +1101,7 @@ async fn users_page(
     let offset = ((page - 1) as i64) * per_page;
 
     let rows = match sqlx::query_as::<_, UserRow>(
-        r#"SELECT id, username, email, first_name, last_name, recovery_email, phone_e164, last_sign_in_at, note, is_active
+        r#"SELECT id, username, email, first_name, last_name, recovery_email, phone_e164, last_sign_in_at, note, auth_mode, is_active
            FROM users
            WHERE deleted_at IS NULL
              AND (
@@ -870,6 +1179,7 @@ async fn users_page(
         sections: nav_items(AdminSection::Users),
         message: query.message,
         error: query.error,
+        ad_link: query.ad_link,
         rows,
         filter_q,
         filter_status,
@@ -885,6 +1195,48 @@ async fn users_page(
     })
 }
 
+async fn ad_onboarding_tokens_page(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let rows = match sqlx::query_as::<_, AdOnboardingTokenRow>(
+        r#"
+        SELECT
+            t.token_hash,
+            u.username,
+            u.email,
+            t.created_at,
+            t.expires_at,
+            t.used_at
+        FROM ad_onboarding_tokens t
+        JOIN users u ON u.id = t.user_id
+        ORDER BY t.created_at DESC
+        LIMIT 200
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/admin/ui/users", "error", &format!("DB error: {e}"))
+                .into_response();
+        }
+    };
+
+    render_template(AdOnboardingTokensTemplate {
+        sections: nav_items(AdminSection::Users),
+        message: query.message,
+        error: query.error,
+        rows,
+    })
+}
+
 async fn users_create(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -894,24 +1246,44 @@ async fn users_create(
         return redir.into_response();
     }
 
-    let password_hash = match simple_idm_core::auth::password::hash_password(&form.password) {
-        Ok(h) => h,
-        Err(e) => {
-            return redirect_with("/admin/ui/users", "error", &format!("Password hash failed: {e}"))
-                .into_response();
-        }
-    };
-
+    let auth_mode = normalize_auth_mode(form.auth_mode.as_deref());
     let is_active = parse_checkbox(&form.is_active);
+    let password = form.password.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let password_hash: Option<String> = match (auth_mode.as_str(), password) {
+        ("federated", _) => None,
+        (_, Some(p)) => match simple_idm_core::auth::password::hash_password(p) {
+            Ok(h) => Some(h),
+            Err(e) => {
+                return redirect_with(
+                    "/admin/ui/users",
+                    "error",
+                    &format!("Password hash failed: {e}"),
+                )
+                .into_response();
+            }
+        },
+        ("local", None) => {
+            return redirect_with(
+                "/admin/ui/users",
+                "error",
+                "Password is required for local auth mode",
+            )
+            .into_response();
+        }
+        (_, None) => None,
+    };
+    let password_disabled = auth_mode.eq_ignore_ascii_case("federated");
 
     let result = sqlx::query(
-        r#"INSERT INTO users (tenant_id, username, email, password_hash, is_active, first_name, last_name)
-           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, NULL, NULL)"#,
+        r#"INSERT INTO users (tenant_id, username, email, password_hash, is_active, auth_mode, password_disabled, first_name, last_name)
+           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, $6, NULL, NULL)"#,
     )
     .bind(form.username.trim())
     .bind(form.email.trim().to_lowercase())
     .bind(password_hash)
     .bind(is_active)
+    .bind(auth_mode)
+    .bind(password_disabled)
     .execute(&state.db_pool)
     .await;
 
@@ -932,23 +1304,42 @@ async fn users_update(
         return redir.into_response();
     }
 
+    let auth_mode = normalize_auth_mode(form.auth_mode.as_deref());
     let is_active = parse_checkbox(&form.is_active);
+    let password_disabled = auth_mode.eq_ignore_ascii_case("federated");
 
     let new_password = form
         .password
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty());
-    let result = if let Some(password) = new_password {
+    let result = if auth_mode.eq_ignore_ascii_case("federated") {
+        sqlx::query(
+            r#"UPDATE users
+               SET email = $2, password_hash = NULL, is_active = $3, auth_mode = $4, password_disabled = $5, updated_at = NOW()
+               WHERE id = $1"#,
+        )
+        .bind(id)
+        .bind(form.email.trim().to_lowercase())
+        .bind(is_active)
+        .bind(auth_mode)
+        .bind(password_disabled)
+        .execute(&state.db_pool)
+        .await
+    } else if let Some(password) = new_password {
         match simple_idm_core::auth::password::hash_password(password) {
             Ok(hash) => {
                 sqlx::query(
-                    r#"UPDATE users SET email = $2, password_hash = $3, is_active = $4, updated_at = NOW() WHERE id = $1"#,
+                    r#"UPDATE users
+                       SET email = $2, password_hash = $3, is_active = $4, auth_mode = $5, password_disabled = $6, updated_at = NOW()
+                       WHERE id = $1"#,
                 )
                 .bind(id)
                 .bind(form.email.trim().to_lowercase())
                 .bind(hash)
                 .bind(is_active)
+                .bind(auth_mode)
+                .bind(password_disabled)
                 .execute(&state.db_pool)
                 .await
             }
@@ -959,11 +1350,15 @@ async fn users_update(
         }
     } else {
         sqlx::query(
-            r#"UPDATE users SET email = $2, is_active = $3, updated_at = NOW() WHERE id = $1"#,
+            r#"UPDATE users
+               SET email = $2, is_active = $3, auth_mode = $4, password_disabled = $5, updated_at = NOW()
+               WHERE id = $1"#,
         )
         .bind(id)
         .bind(form.email.trim().to_lowercase())
         .bind(is_active)
+        .bind(auth_mode)
+        .bind(password_disabled)
         .execute(&state.db_pool)
         .await
     };
@@ -1137,6 +1532,95 @@ async fn users_deactivate(
             .into_response(),
         Err(e) => redirect_with("/admin/ui/users", "error", &format!("Deactivate failed: {e}"))
             .into_response(),
+    }
+}
+
+async fn users_ad_onboarding_link(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    if state.oauth_state.ldap_auth.is_none() {
+        return redirect_with("/admin/ui/users", "error", "AD auth is not enabled").into_response();
+    }
+
+    let user_exists = match sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_one(&state.db_pool)
+    .await
+    {
+        Ok(v) => v > 0,
+        Err(e) => {
+            return redirect_with("/admin/ui/users", "error", &format!("DB error: {e}"))
+                .into_response()
+        }
+    };
+    if !user_exists {
+        return redirect_with("/admin/ui/users", "error", "User not found").into_response();
+    }
+
+    let raw_token = random_onboarding_token();
+    let token_hash = onboarding_token_hash(&raw_token);
+    let expires_at = Utc::now() + chrono::Duration::seconds(state.ad_onboarding_token_ttl_seconds);
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO ad_onboarding_tokens (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(id)
+    .bind(token_hash)
+    .bind(expires_at)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            let link = format!("/ad/onboarding?token={}", urlencoding::encode(&raw_token));
+            let msg = format!(
+                "AD onboarding link generated ({}h)",
+                state.ad_onboarding_token_ttl_seconds / 3600
+            );
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "ad.onboarding.link.create",
+                "ad_onboarding",
+                Some(id),
+                "success",
+                Some(serde_json::json!({"expires_at": expires_at.to_rfc3339()})),
+            )
+            .await;
+            Redirect::to(&format!(
+                "/admin/ui/users?message={}&ad_link={}",
+                urlencoding::encode(&msg),
+                urlencoding::encode(&link)
+            ))
+            .into_response()
+        }
+        Err(e) => {
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "ad.onboarding.link.create",
+                "ad_onboarding",
+                Some(id),
+                "failure",
+                Some(serde_json::json!({"error": e.to_string()})),
+            )
+            .await;
+            redirect_with(
+                "/admin/ui/users",
+                "error",
+                &format!("Failed to generate onboarding link: {e}"),
+            )
+            .into_response()
+        }
     }
 }
 
