@@ -61,9 +61,9 @@ async fn sync_ldap_roles_internal(
         }
     }
 
-    let roles = match timeout(
+    let ldap_data = match timeout(
         StdDuration::from_secs(state.ldap_role_sync_timeout_seconds),
-        simple_idm_ad_auth::fetch_ldap_roles(cfg, login),
+        simple_idm_ad_auth::fetch_ldap_user_data(cfg, login),
     )
     .await
     {
@@ -78,7 +78,7 @@ async fn sync_ldap_roles_internal(
         }
     };
 
-    let roles_set: HashSet<String> = roles.into_iter().collect();
+    let roles_set: HashSet<String> = ldap_data.roles.into_iter().collect();
     let mut tx = state.db_pool.begin().await?;
 
     sqlx::query("DELETE FROM user_external_roles WHERE user_id = $1 AND source = $2")
@@ -165,6 +165,75 @@ async fn sync_ldap_roles_internal(
             .execute(&mut *tx)
             .await?;
     }
+
+    let first_name = ldap_data.profile.first_name.as_deref();
+    let last_name = ldap_data.profile.last_name.as_deref();
+    let recovery_email = ldap_data.profile.recovery_email.as_deref();
+    let phone_e164 = ldap_data.profile.phone_e164.as_deref();
+
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET
+            first_name = COALESCE($2, first_name),
+            last_name = COALESCE($3, last_name),
+            recovery_email = COALESCE($4, recovery_email),
+            phone_e164 = COALESCE($5, phone_e164),
+            updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(user.id)
+    .bind(first_name)
+    .bind(last_name)
+    .bind(recovery_email)
+    .bind(phone_e164)
+    .execute(&mut *tx)
+    .await?;
+
+    let external_user_id = ldap_data
+        .identity
+        .external_user_id
+        .clone()
+        .unwrap_or_else(|| login.to_string());
+    let external_user_id_type = ldap_data
+        .identity
+        .external_user_id_type
+        .clone()
+        .unwrap_or_else(|| "login_name".to_string());
+    let login_name = ldap_data
+        .identity
+        .login_name
+        .clone()
+        .or_else(|| Some(login.to_string()));
+    let upn = ldap_data.identity.upn.clone();
+
+    sqlx::query(
+        r#"
+        INSERT INTO user_external_identities
+          (tenant_id, user_id, source, external_user_id, external_user_id_type, login_name, upn, last_seen_at, updated_at)
+        VALUES
+          ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+        ON CONFLICT (tenant_id, source, external_user_id)
+        WHERE deleted_at IS NULL
+        DO UPDATE SET
+          user_id = EXCLUDED.user_id,
+          external_user_id_type = EXCLUDED.external_user_id_type,
+          login_name = EXCLUDED.login_name,
+          upn = EXCLUDED.upn,
+          last_seen_at = NOW(),
+          updated_at = NOW()
+        "#,
+    )
+    .bind(user.tenant_id)
+    .bind(user.id)
+    .bind(SOURCE_AD)
+    .bind(external_user_id)
+    .bind(external_user_id_type)
+    .bind(login_name)
+    .bind(upn)
+    .execute(&mut *tx)
+    .await?;
 
     for group_id in current_managed.difference(&desired_managed) {
         sqlx::query("DELETE FROM user_groups WHERE user_id = $1 AND group_id = $2::uuid")

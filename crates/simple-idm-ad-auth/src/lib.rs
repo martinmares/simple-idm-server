@@ -22,6 +22,29 @@ pub struct LdapAuthConfig {
     pub allow_insecure: bool,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LdapUserProfile {
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub recovery_email: Option<String>,
+    pub phone_e164: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LdapExternalIdentity {
+    pub external_user_id: Option<String>,
+    pub external_user_id_type: Option<String>,
+    pub login_name: Option<String>,
+    pub upn: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LdapUserData {
+    pub roles: Vec<String>,
+    pub profile: LdapUserProfile,
+    pub identity: LdapExternalIdentity,
+}
+
 impl LdapAuthConfig {
     pub fn validate(&self) -> Result<()> {
         if self.host.trim().is_empty() {
@@ -194,11 +217,38 @@ async fn find_user_dn(ldap: &mut ldap3::Ldap, cfg: &LdapAuthConfig, login: &str)
     Ok(dn)
 }
 
-/// Fetch AD/LDAP direct roles (memberOf DNs) for `login`.
+fn first_attr(se: &SearchEntry, names: &[&str]) -> Option<String> {
+    for name in names {
+        if let Some(vals) = se.attrs.get(*name)
+            && let Some(first) = vals.first()
+        {
+            let v = first.trim();
+            if !v.is_empty() {
+                return Some(v.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn format_ad_object_guid(raw: &[u8]) -> Option<String> {
+    if raw.len() != 16 {
+        return None;
+    }
+    let d1 = u32::from_le_bytes([raw[0], raw[1], raw[2], raw[3]]);
+    let d2 = u16::from_le_bytes([raw[4], raw[5]]);
+    let d3 = u16::from_le_bytes([raw[6], raw[7]]);
+    let d4 = &raw[8..16];
+    Some(format!(
+        "{d1:08x}-{d2:04x}-{d3:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+        d4[0], d4[1], d4[2], d4[3], d4[4], d4[5], d4[6], d4[7]
+    ))
+}
+
+/// Fetch AD/LDAP profile attributes + direct roles for `login`.
 ///
-/// This call uses service bind (`bind_dn` + `bind_password`) and does not
-/// require user password.
-pub async fn fetch_ldap_roles(cfg: &LdapAuthConfig, login: &str) -> Result<Vec<String>> {
+/// Uses service bind (`bind_dn` + `bind_password`).
+pub async fn fetch_ldap_user_data(cfg: &LdapAuthConfig, login: &str) -> Result<LdapUserData> {
     let mut ldap = connect_and_bind_service(cfg).await?;
     let user_dn = find_user_dn(&mut ldap, cfg, login).await?;
 
@@ -210,14 +260,28 @@ pub async fn fetch_ldap_roles(cfg: &LdapAuthConfig, login: &str) -> Result<Vec<S
             &cfg.base_dn,
             Scope::Subtree,
             &user_dn_filter,
-            vec!["memberOf"],
+            vec![
+                "memberOf",
+                "givenName",
+                "sn",
+                "mail",
+                "otherMailbox",
+                "mobile",
+                "telephoneNumber",
+                "sAMAccountName",
+                "userPrincipalName",
+                "objectGUID",
+            ],
         )
         .await
-        .with_context(|| format!("LDAP role search failed for DN: {}", user_dn))?
+        .with_context(|| format!("LDAP user data search failed for DN: {}", user_dn))?
         .success()
-        .context("LDAP role search failed")?;
+        .context("LDAP user data search failed")?;
 
     let mut roles = BTreeSet::new();
+    let mut profile = LdapUserProfile::default();
+    let mut identity = LdapExternalIdentity::default();
+
     if let Some(entry) = entries.into_iter().next() {
         let se = SearchEntry::construct(entry);
         if let Some(vals) = se.attrs.get("memberOf") {
@@ -228,9 +292,44 @@ pub async fn fetch_ldap_roles(cfg: &LdapAuthConfig, login: &str) -> Result<Vec<S
                 }
             }
         }
+
+        profile.first_name = first_attr(&se, &["givenName"]);
+        profile.last_name = first_attr(&se, &["sn"]);
+        profile.recovery_email = first_attr(&se, &["otherMailbox", "mail"]);
+        profile.phone_e164 = first_attr(&se, &["mobile", "telephoneNumber"]);
+
+        identity.login_name = first_attr(&se, &["sAMAccountName", "uid"]);
+        identity.upn = first_attr(&se, &["userPrincipalName"]);
+
+        if let Some(bin_vals) = se.bin_attrs.get("objectGUID")
+            && let Some(raw_guid) = bin_vals.first()
+            && let Some(guid_str) = format_ad_object_guid(raw_guid)
+        {
+            identity.external_user_id = Some(guid_str);
+            identity.external_user_id_type = Some("ad_object_guid".to_string());
+        }
+        if identity.external_user_id.is_none() {
+            let fallback = identity.login_name.clone().or_else(|| identity.upn.clone());
+            if let Some(v) = fallback {
+                identity.external_user_id = Some(v);
+                identity.external_user_id_type = Some("login_name".to_string());
+            }
+        }
     }
 
-    Ok(roles.into_iter().collect())
+    Ok(LdapUserData {
+        roles: roles.into_iter().collect(),
+        profile,
+        identity,
+    })
+}
+
+/// Fetch AD/LDAP direct roles (memberOf DNs) for `login`.
+///
+/// This call uses service bind (`bind_dn` + `bind_password`) and does not
+/// require user password.
+pub async fn fetch_ldap_roles(cfg: &LdapAuthConfig, login: &str) -> Result<Vec<String>> {
+    Ok(fetch_ldap_user_data(cfg, login).await?.roles)
 }
 
 #[cfg(test)]

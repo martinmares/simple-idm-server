@@ -30,7 +30,7 @@
   <div class="card-body">
     <form method="get" action="/admin/ui/users" class="row g-2" id="users-filter-form">
       <div class="col-md-5">
-        <input class="form-control" name="q" placeholder="search username, email, name" value="{{ filter_q }}" autocomplete="off">
+        <input class="form-control" name="q" placeholder="search username, email, name, external id/login/upn" value="{{ filter_q }}" autocomplete="off">
       </div>
       <div class="col-md-3">
         <select class="form-select" name="status">
@@ -84,6 +84,21 @@
         <td>
           <div>{{ r.username }}</div>
           <div class="small text-secondary mt-1">auth: {{ r.auth_mode }}</div>
+          {% if let Some(ext_id) = r.external_user_id %}
+          <div class="small text-secondary mt-1">
+            external:
+            <code>{{ ext_id }}</code>
+            {% if let Some(ext_type) = r.external_user_id_type %}
+              <span class="ms-1">({{ ext_type }})</span>
+            {% endif %}
+          </div>
+          {% endif %}
+          {% if let Some(login_name) = r.external_login_name %}
+          <div class="small text-secondary">login: <code>{{ login_name }}</code></div>
+          {% endif %}
+          {% if let Some(upn) = r.external_upn %}
+          <div class="small text-secondary">upn: <code>{{ upn }}</code></div>
+          {% endif %}
           {% if !r.is_active %}
           <span class="badge bg-red-lt mt-1">inactive</span>
           {% endif %}
@@ -354,6 +369,35 @@
                   <option value="federated" {% if r.auth_mode == "federated" %}selected{% endif %}>federated</option>
                 </select>
               </div>
+              <div class="col-md-12">
+                <label class="form-label">External identity</label>
+                <input class="form-control" value="{% if let Some(ext_id) = r.external_user_id %}{{ ext_id }}{% else %}-{% endif %}" disabled>
+                <div class="form-text">
+                  type:
+                  {% if let Some(ext_type) = r.external_user_id_type %}
+                    <code>{{ ext_type }}</code>
+                  {% else %}
+                    -
+                  {% endif %}
+                  {% if let Some(last_seen) = r.external_last_seen_at %}
+                    <span class="ms-2">last seen: {{ last_seen }}</span>
+                  {% endif %}
+                </div>
+                <div class="form-text">
+                  login:
+                  {% if let Some(login_name) = r.external_login_name %}
+                    <code>{{ login_name }}</code>
+                  {% else %}
+                    -
+                  {% endif %}
+                  <span class="ms-2">upn:</span>
+                  {% if let Some(upn) = r.external_upn %}
+                    <code>{{ upn }}</code>
+                  {% else %}
+                    -
+                  {% endif %}
+                </div>
+              </div>
               <div class="col-md-6">
                 <label class="form-label">First name</label>
                 <input class="form-control" value="{{ r.first_name.clone().unwrap_or("".to_string()) }}" disabled>
@@ -412,7 +456,7 @@
         <h5 class="modal-title">AD role mapping</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <form method="post" action="/admin/ui/users/{{ m.user_id }}/ad-mappings/apply" class="ad-map-form" data-user="{{ m.user_id }}">
+      <form method="post" action="/admin/ui/users/{{ m.user_id }}/ad-mappings/apply" class="ad-map-form" data-user="{{ m.user_id }}" data-existing="{{ m.existing_mappings_json }}">
         <div class="modal-body">
           <div class="row g-3">
             <div class="col-md-6">
@@ -443,10 +487,16 @@
               <button type="button" class="btn btn-outline-primary ad-add-btn">Add mapping</button>
             </div>
             <div class="col-12">
+              <div class="d-flex align-items-center justify-content-between mb-2">
+                <input class="form-control form-control-sm ad-filter-draft" type="text" placeholder="Filter existing/new mappings..." style="max-width: 360px;">
+                <button type="button" class="btn btn-sm btn-outline-danger ad-remove-selected">Remove selected</button>
+              </div>
               <div class="border rounded p-2" style="max-height: 220px; overflow:auto;">
                 <table class="table table-sm mb-0 ad-draft-table">
                   <thead>
                     <tr>
+                      <th style="width: 34px;"><input type="checkbox" class="form-check-input ad-draft-select-all"></th>
+                      <th>Status</th>
                       <th>AD role</th>
                       <th>Local group</th>
                       <th>Priority</th>
