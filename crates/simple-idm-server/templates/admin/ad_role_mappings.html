@@ -1,0 +1,82 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card mb-3">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h3 class="card-title mb-0">AD role mappings</h3>
+    <div class="btn-list">
+      <a class="btn btn-sm btn-outline-secondary" href="/admin/ui/ad-roles">AD roles cache</a>
+      <a class="btn btn-sm btn-outline-secondary" href="/admin/ui/users">Back to users</a>
+    </div>
+  </div>
+  <div class="card-body">
+    <form method="post" action="/admin/ui/ad-role-mappings/create" class="row g-2">
+      <div class="col-md-1">
+        <input class="form-control" name="source" value="ad" required>
+      </div>
+      <div class="col-md-5">
+        <input class="form-control" name="external_role" placeholder="CN=... memberOf DN" required>
+      </div>
+      <div class="col-md-3">
+        <select class="form-select" name="group_id" required>
+          {% for g in groups %}
+          <option value="{{ g.0 }}">{{ g.1 }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="col-md-1">
+        <select class="form-select" name="mode">
+          <option value="add" selected>add</option>
+          <option value="remove">remove</option>
+        </select>
+      </div>
+      <div class="col-md-1">
+        <input class="form-control" type="number" name="priority" value="100">
+      </div>
+      <div class="col-md-1">
+        <button class="btn btn-primary w-100" type="submit">Create</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+      <tr>
+        <th>Source</th>
+        <th>External role</th>
+        <th>Target group</th>
+        <th>Mode</th>
+        <th>Priority</th>
+        <th>Active</th>
+        <th>Actions</th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.source }}</td>
+        <td><code class="small">{{ r.external_role }}</code></td>
+        <td>{{ r.group_name }}</td>
+        <td>{{ r.mode }}</td>
+        <td>{{ r.priority }}</td>
+        <td>
+          {% if r.is_active %}
+          <span class="badge bg-green-lt">yes</span>
+          {% else %}
+          <span class="badge bg-red-lt">no</span>
+          {% endif %}
+        </td>
+        <td>
+          <form method="post" action="/admin/ui/ad-role-mappings/{{ r.id }}/deactivate">
+            <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

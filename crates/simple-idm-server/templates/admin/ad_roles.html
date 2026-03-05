@@ -1,0 +1,44 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card mb-3">
+  <div class="card-header d-flex justify-content-between align-items-center">
+    <h3 class="card-title mb-0">AD roles cache</h3>
+    <a class="btn btn-sm btn-outline-secondary" href="/admin/ui/users">Back to users</a>
+  </div>
+  <div class="card-body">
+    <form method="get" action="/admin/ui/ad-roles" class="row g-2">
+      <div class="col-md-10">
+        <input class="form-control" type="email" name="email" placeholder="user email (e.g. martin.mares@cetin.cz)" value="{{ email }}" required>
+      </div>
+      <div class="col-md-2">
+        <button class="btn btn-primary w-100" type="submit">Load</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+      <tr>
+        <th>Email</th>
+        <th>Source</th>
+        <th>Role (memberOf DN)</th>
+        <th>Synced at</th>
+      </tr>
+      </thead>
+      <tbody>
+      {% for r in rows %}
+      <tr>
+        <td>{{ r.email }}</td>
+        <td>{{ r.source }}</td>
+        <td><code class="small">{{ r.role_name }}</code></td>
+        <td class="text-nowrap">{{ r.synced_at }}</td>
+      </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}
