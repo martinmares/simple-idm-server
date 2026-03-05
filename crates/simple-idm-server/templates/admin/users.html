@@ -11,42 +11,26 @@
   </div>
 </div>
 {% endif %}
+
 <div class="card mb-3">
   <div class="card-header d-flex align-items-center justify-content-between">
-    <h3 class="card-title mb-0">Create user</h3>
-    <div class="d-flex gap-2">
-      <a class="btn btn-sm btn-outline-secondary" href="/admin/ui/ad-onboarding">
-        <i class="ti ti-list-details me-1"></i> AD onboarding tokens
-      </a>
-      <a class="btn btn-sm btn-outline-primary" href="/admin/ui/users/import">
-        <i class="ti ti-file-import me-1"></i> Import CSV
-      </a>
+    <h3 class="card-title mb-0">Users</h3>
+    <div class="btn-list">
+      <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-user-modal">
+        <i class="ti ti-user-plus me-1"></i>Create user
+      </button>
+      <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#ad-onboarding-tokens-modal">
+        <i class="ti ti-ticket me-1"></i>AD onboarding tokens
+      </button>
+      <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#import-users-modal">
+        <i class="ti ti-file-import me-1"></i>Import CSV
+      </button>
     </div>
   </div>
   <div class="card-body">
-    <form method="post" action="/admin/ui/users/create" class="row g-2">
-      <div class="col-md-2"><input class="form-control" name="username" placeholder="username" required></div>
-      <div class="col-md-3"><input class="form-control" name="email" type="email" placeholder="email" required></div>
-      <div class="col-md-2">
-        <select class="form-select" name="auth_mode">
-          <option value="local" selected>local</option>
-          <option value="ad">ad</option>
-          <option value="federated">federated</option>
-        </select>
-      </div>
-      <div class="col-md-3"><input class="form-control" name="password" type="password" placeholder="password (optional for ad/federated)"></div>
-      <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked> <label class="form-check-label">active</label></div>
-      <div class="col-md-1"><button class="btn btn-primary w-100" type="submit">Create</button></div>
-    </form>
-  </div>
-</div>
-
-<div class="card mb-3">
-  <div class="card-header"><h3 class="card-title mb-0">Filters</h3></div>
-  <div class="card-body">
     <form method="get" action="/admin/ui/users" class="row g-2" id="users-filter-form">
       <div class="col-md-5">
-        <input class="form-control" name="q" placeholder="search username, email, name" value="{{ filter_q }}">
+        <input class="form-control" name="q" placeholder="search username, email, name" value="{{ filter_q }}" autocomplete="off">
       </div>
       <div class="col-md-3">
         <select class="form-select" name="status">
@@ -55,32 +39,41 @@
           <option value="inactive" {% if filter_status == "inactive" %}selected{% endif %}>inactive</option>
         </select>
       </div>
-      <div class="col-md-3">
-        <input class="form-control" name="note" placeholder="note contains..." value="{{ filter_note }}">
+      <div class="col-md-4">
+        <input class="form-control" name="note" placeholder="note contains..." value="{{ filter_note }}" autocomplete="off">
       </div>
-      <div class="col-md-1 d-flex gap-1">
-        <button class="btn btn-primary w-100" type="submit">Apply</button>
+      <div class="col-12 d-flex justify-content-end">
+        <button type="button" class="btn btn-outline-secondary btn-sm" id="users-filter-reset">
+          <i class="ti ti-filter-off me-1"></i>Reset filters
+        </button>
       </div>
-      <div class="col-12">
+      <div class="col-12 mt-2">
         <input type="hidden" name="letters" id="letters-hidden">
-        <div class="d-flex flex-wrap gap-2 mt-2">
-          {% for l in letter_filters %}
-          {% if loop.index == 14 %}
+        <div class="table-responsive">
+          <table class="table table-sm table-borderless align-middle mb-0" style="max-width: 980px;">
+            <tbody>
+              <tr>
+                {% for l in letter_filters %}
+                <td class="text-center text-secondary small fw-semibold py-1">{{ l.value }}</td>
+                {% endfor %}
+              </tr>
+              <tr>
+                {% for l in letter_filters %}
+                <td class="text-center py-1">
+                  <input class="form-check-input letter-filter" type="checkbox" value="{{ l.value }}" {% if l.selected %}checked{% endif %}>
+                </td>
+                {% endfor %}
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <div class="d-flex flex-wrap gap-2 mt-2">
-          {% endif %}
-          <label class="form-check form-check-inline m-0">
-            <input class="form-check-input letter-filter" type="checkbox" value="{{ l.value }}" {% if l.selected %}checked{% endif %}>
-            <span class="form-check-label">{{ l.value }}</span>
-          </label>
-          {% endfor %}
-        </div>
-        <div class="form-text">Filter by first letter of last name (A-Z, multi-select).</div>
+        <div class="form-text mt-1">Filter by first letter of last name (A-Z, multi-select).</div>
       </div>
     </form>
   </div>
 </div>
 
+<div id="users-results">
 <div class="card">
   <div class="table-responsive">
     <table class="table table-vcenter card-table">
@@ -90,11 +83,12 @@
       <tr>
         <td>
           <div>{{ r.username }}</div>
+          <div class="small text-secondary mt-1">auth: {{ r.auth_mode }}</div>
+          {% if !r.is_active %}
+          <span class="badge bg-red-lt mt-1">inactive</span>
+          {% endif %}
           {% if let Some(note) = r.note %}
           <div class="small text-secondary mt-1">{{ note }}</div>
-          {% endif %}
-          {% if !r.is_active %}
-          <span class="badge bg-red-lt ms-2">inactive</span>
           {% endif %}
         </td>
         <td>
@@ -121,20 +115,24 @@
           {% endif %}
         </td>
         <td>
-          <div class="d-flex gap-2">
+          <div class="d-flex flex-wrap gap-2">
             <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#user-edit-{{ r.id }}">
               Edit
+            </button>
+            {% if r.auth_mode == "mixed" %}
+            <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#ad-map-{{ r.id }}">
+              Map roles
             </button>
             <form method="post" action="/admin/ui/users/{{ r.id }}/ad-onboarding-link">
               <button class="btn btn-sm btn-outline-secondary" type="submit">AD onboarding link</button>
             </form>
+            {% endif %}
             <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate">
               <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
             </form>
           </div>
         </td>
       </tr>
-
       {% endfor %}
       </tbody>
     </table>
@@ -156,6 +154,180 @@
     {% else %}
     <button class="btn btn-outline-secondary btn-sm" disabled>Next</button>
     {% endif %}
+  </div>
+</div>
+
+<div class="modal modal-blur fade" id="create-user-modal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Create user</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/users/create">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label">Username</label>
+              <input class="form-control" name="username" placeholder="username" required>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Email</label>
+              <input class="form-control" name="email" type="email" placeholder="name@domain.tld" required>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Auth type</label>
+              <select class="form-select" name="auth_mode">
+                <option value="local" selected>local</option>
+                <option value="ad">ad</option>
+                <option value="federated">federated</option>
+              </select>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Password</label>
+              <input class="form-control" name="password" type="password" placeholder="required for local auth">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">First name</label>
+              <input class="form-control" name="first_name" placeholder="optional">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Last name</label>
+              <input class="form-control" name="last_name" placeholder="optional">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Recovery email</label>
+              <input class="form-control" name="recovery_email" type="email" placeholder="optional">
+            </div>
+            <div class="col-md-3">
+              <label class="form-label">Phone (E.164)</label>
+              <input class="form-control" name="phone_e164" placeholder="+420...">
+            </div>
+            <div class="col-md-3 d-flex align-items-end">
+              <label class="form-check m-0">
+                <input class="form-check-input" name="is_active" type="checkbox" checked>
+                <span class="form-check-label">active</span>
+              </label>
+            </div>
+            <div class="col-md-12">
+              <label class="form-label">Note</label>
+              <input class="form-control" name="note" placeholder="optional">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Create user</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="modal modal-blur fade" id="ad-onboarding-tokens-modal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">AD onboarding tokens</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/ad-onboarding/delete">
+        <div class="modal-body">
+          <div class="row g-2 align-items-center mb-2">
+            <div class="col-md-4">
+              <select class="form-select" id="ad-token-status-filter">
+                <option value="all">all statuses</option>
+                <option value="pending">pending</option>
+                <option value="used">used</option>
+                <option value="expired">expired</option>
+              </select>
+            </div>
+            <div class="col-md-8 text-secondary small">
+              Select tokens and click delete.
+            </div>
+          </div>
+          <div class="table-responsive border rounded">
+            <table class="table table-sm table-vcenter card-table mb-0">
+              <thead>
+                <tr>
+                  <th style="width: 34px;"><input type="checkbox" id="ad-token-select-all"></th>
+                  <th>User</th>
+                  <th>Created</th>
+                  <th>Expires</th>
+                  <th>Used</th>
+                  <th>Status</th>
+                  <th>Token hash</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for t in ad_onboarding_tokens %}
+                <tr class="ad-token-row" data-status="{{ t.status }}">
+                  <td><input type="checkbox" class="ad-token-check" value="{{ t.token_hash }}"></td>
+                  <td>
+                    <div>{{ t.username }}</div>
+                    <div class="small text-secondary">{{ t.email }}</div>
+                  </td>
+                  <td class="text-nowrap">{{ t.created_at }}</td>
+                  <td class="text-nowrap">{{ t.expires_at }}</td>
+                  <td class="text-nowrap">
+                    {% if let Some(used) = t.used_at %}
+                      {{ used }}
+                    {% else %}
+                      -
+                    {% endif %}
+                  </td>
+                  <td><span class="badge {{ t.status_class }}">{{ t.status }}</span></td>
+                  <td><code class="small">{{ t.token_hash }}</code></td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+          <input type="hidden" name="token_hashes_csv" id="ad-token-hashes-csv">
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-bs-dismiss="modal">Close</button>
+          <button class="btn btn-outline-danger" type="submit">Delete selected</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<div class="modal modal-blur fade" id="import-users-modal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Import users from Google CSV</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/users/import" enctype="multipart/form-data">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-8">
+              <label class="form-label">CSV file</label>
+              <input type="file" name="file" class="form-control" accept=".csv,text/csv" required>
+              <div class="form-text">
+                Expected columns: <code>Email Address [Required]</code>, <code>First Name [Required]</code>,
+                <code>Last Name [Required]</code>, <code>Status [READ ONLY]</code>,
+                <code>Last Sign In [READ ONLY]</code>, <code>Recovery Email</code>, <code>Mobile Phone</code>.
+              </div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Import note (optional)</label>
+              <input type="text" name="note" class="form-control" placeholder="import z google 2026.01">
+              <div class="form-text">Stored to <code>users.note</code> for all imported rows.</div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">
+            <i class="ti ti-upload me-1"></i> Import
+          </button>
+        </div>
+      </form>
+    </div>
   </div>
 </div>
 
@@ -213,7 +385,6 @@
                     <i class="ti ti-copy"></i>
                   </button>
                 </div>
-                <div class="form-text">Generate password locally in browser, then save changes.</div>
               </div>
               <div class="col-md-12 d-flex justify-content-end mt-2">
                 <label class="form-check m-0">
@@ -232,51 +403,73 @@
   </div>
 </div>
 {% endfor %}
-<script>
-  document.addEventListener('DOMContentLoaded', function() {
-    const filterForm = document.getElementById('users-filter-form');
-    if (filterForm) {
-      filterForm.addEventListener('submit', function() {
-        const selected = Array.from(filterForm.querySelectorAll('.letter-filter:checked'))
-          .map(el => el.value)
-          .join(',');
-        const hidden = document.getElementById('letters-hidden');
-        if (hidden) hidden.value = selected;
-      });
-    }
 
-    function randomPassword(length) {
-      const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=';
-      const bytes = new Uint32Array(length);
-      window.crypto.getRandomValues(bytes);
-      let out = '';
-      for (let i = 0; i < length; i++) out += alphabet[bytes[i] % alphabet.length];
-      return out;
-    }
+{% for m in ad_modal_data %}
+<div class="modal modal-blur fade" id="ad-map-{{ m.user_id }}" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">AD role mapping</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/users/{{ m.user_id }}/ad-mappings/apply" class="ad-map-form" data-user="{{ m.user_id }}">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-6">
+              <label class="form-label">AD roles</label>
+              <input class="form-control ad-filter-left" type="text" placeholder="Filter AD roles...">
+              <div class="border rounded p-2 mt-2" style="max-height: 260px; overflow:auto;">
+                {% for role in m.ad_roles %}
+                <label class="form-check ad-left-item">
+                  <input class="form-check-input ad-left-check" type="checkbox" value="{{ role.role_name }}">
+                  <span class="form-check-label small"><code>{{ role.role_name }}</code></span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Local groups</label>
+              <input class="form-control ad-filter-right" type="text" placeholder="Filter local groups...">
+              <div class="border rounded p-2 mt-2" style="max-height: 260px; overflow:auto;">
+                {% for g in m.groups %}
+                <label class="form-check ad-right-item">
+                  <input class="form-check-input ad-right-check" type="checkbox" value="{{ g.id }}">
+                  <span class="form-check-label small">{{ g.name }}</span>
+                </label>
+                {% endfor %}
+              </div>
+            </div>
+            <div class="col-12">
+              <button type="button" class="btn btn-outline-primary ad-add-btn">Add mapping</button>
+            </div>
+            <div class="col-12">
+              <div class="border rounded p-2" style="max-height: 220px; overflow:auto;">
+                <table class="table table-sm mb-0 ad-draft-table">
+                  <thead>
+                    <tr>
+                      <th>AD role</th>
+                      <th>Local group</th>
+                      <th>Priority</th>
+                      <th>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <input type="hidden" name="mappings_json" class="ad-mappings-json">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary ad-apply-btn" type="submit">Apply</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+</div>
 
-    document.querySelectorAll('.user-password-generate').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const targetId = btn.getAttribute('data-target');
-        const input = document.getElementById(targetId);
-        if (!input) return;
-        input.value = randomPassword(20);
-        input.type = 'text';
-      });
-    });
-
-    document.querySelectorAll('.user-password-copy').forEach(btn => {
-      btn.addEventListener('click', async () => {
-        const targetId = btn.getAttribute('data-target');
-        const input = document.getElementById(targetId);
-        if (!input || !input.value) return;
-        try {
-          await navigator.clipboard.writeText(input.value);
-        } catch (_) {
-          input.select();
-          document.execCommand('copy');
-        }
-      });
-    });
-  });
-</script>
+<script src="/admin/ui/static/users.js"></script>
 {% endblock %}

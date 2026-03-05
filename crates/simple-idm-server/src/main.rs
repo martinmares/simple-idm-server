@@ -295,6 +295,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         admin_auth: admin_auth.clone(),
         secure_cookies: config.security.force_secure_cookies,
         ad_onboarding_token_ttl_seconds: config.ad_auth.onboarding_token_ttl_seconds as i64,
+        admin_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Admin API routes (protected by middleware)

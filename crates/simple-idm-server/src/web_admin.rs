@@ -1,7 +1,7 @@
 use askama::Template;
 use axum::{
     extract::{Form, Multipart, Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
     Router,
@@ -10,6 +10,7 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use rand::RngExt;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use serde_json::json;
 use simple_idm_core::{
     admin::middleware::AdminAuth,
     db::{DbPool, models::User},
@@ -17,12 +18,14 @@ use simple_idm_core::{
 };
 use sha2::Digest;
 use sqlx::{FromRow, Row};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
-const ADMIN_TOKEN_COOKIE: &str = "sidm_admin_token";
+const ADMIN_SESSION_COOKIE: &str = "sidm_admin_session";
+const ADMIN_SESSION_TTL_SECONDS: i64 = 8 * 60 * 60;
 
 #[derive(Clone)]
 pub struct WebAdminState {
@@ -31,6 +34,7 @@ pub struct WebAdminState {
     pub admin_auth: AdminAuth,
     pub secure_cookies: bool,
     pub ad_onboarding_token_ttl_seconds: i64,
+    pub admin_sessions: Arc<RwLock<HashMap<String, (String, DateTime<Utc>)>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +49,11 @@ pub struct UserCreateForm {
     password: Option<String>,
     auth_mode: Option<String>,
     is_active: Option<String>,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    recovery_email: Option<String>,
+    phone_e164: Option<String>,
+    note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +62,11 @@ pub struct UserUpdateForm {
     password: Option<String>,
     auth_mode: Option<String>,
     is_active: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserAdMappingsApplyForm {
+    mappings_json: String,
 }
 
 #[derive(Debug, Clone)]
@@ -151,8 +165,14 @@ struct PageQuery {
     q: Option<String>,
     status: Option<String>,
     note: Option<String>,
-    letters: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_opt_string_or_seq")]
+    letters: Option<Vec<String>>,
     page: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdTokenBulkDeleteForm {
+    token_hashes_csv: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +180,13 @@ struct AdOnboardingQuery {
     token: Option<String>,
     message: Option<String>,
     error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdRolesQuery {
+    message: Option<String>,
+    error: Option<String>,
+    email: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -170,6 +197,52 @@ struct AdOnboardingTokenRow {
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct UserAdRoleRow {
+    role_name: String,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct SimpleGroupOption {
+    id: Uuid,
+    name: String,
+}
+
+#[derive(Debug, Clone)]
+struct UserAdMappingModalData {
+    user_id: Uuid,
+    ad_roles: Vec<UserAdRoleRow>,
+    groups: Vec<SimpleGroupOption>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct ExternalRoleRow {
+    email: String,
+    source: String,
+    role_name: String,
+    synced_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct ExternalRoleMappingRow {
+    id: Uuid,
+    source: String,
+    external_role: String,
+    group_name: String,
+    mode: String,
+    priority: i32,
+    is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoleMappingCreateForm {
+    source: String,
+    external_role: String,
+    group_id: String,
+    mode: String,
+    priority: Option<i32>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -253,6 +326,7 @@ struct GroupClaimsRow {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdminSection {
+    Dashboard,
     Users,
     Groups,
     UserGroups,
@@ -263,8 +337,9 @@ enum AdminSection {
 }
 
 impl AdminSection {
-    fn all() -> [Self; 7] {
+    fn all() -> [Self; 8] {
         [
+            Self::Dashboard,
             Self::Users,
             Self::Groups,
             Self::UserGroups,
@@ -277,6 +352,7 @@ impl AdminSection {
 
     fn title(self) -> &'static str {
         match self {
+            Self::Dashboard => "Dashboard",
             Self::Users => "Users",
             Self::Groups => "Groups",
             Self::UserGroups => "User groups",
@@ -289,6 +365,7 @@ impl AdminSection {
 
     fn path(self) -> &'static str {
         match self {
+            Self::Dashboard => "/admin/ui/",
             Self::Users => "/admin/ui/users",
             Self::Groups => "/admin/ui/groups",
             Self::UserGroups => "/admin/ui/user-groups",
@@ -314,6 +391,8 @@ struct UsersTemplate {
     error: Option<String>,
     ad_link: Option<String>,
     rows: Vec<UserRow>,
+    ad_modal_data: Vec<UserAdMappingModalData>,
+    ad_onboarding_tokens: Vec<AdOnboardingTokenView>,
     filter_q: String,
     filter_status: String,
     filter_note: String,
@@ -325,6 +404,18 @@ struct UsersTemplate {
     prev_page_url: String,
     next_page_url: String,
     total_items: i64,
+}
+
+#[derive(Debug, Clone)]
+struct AdOnboardingTokenView {
+    token_hash: String,
+    username: String,
+    email: String,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    used_at: Option<DateTime<Utc>>,
+    status: String,
+    status_class: String,
 }
 
 #[derive(Debug, Clone)]
@@ -421,18 +512,69 @@ struct AdOnboardingTokensTemplate {
     rows: Vec<AdOnboardingTokenRow>,
 }
 
+#[derive(Template)]
+#[template(path = "admin/ad_roles.html")]
+struct AdRolesTemplate {
+    sections: Vec<NavItem>,
+    message: Option<String>,
+    error: Option<String>,
+    email: String,
+    rows: Vec<ExternalRoleRow>,
+}
+
+#[derive(Template)]
+#[template(path = "admin/ad_role_mappings.html")]
+struct AdRoleMappingsTemplate {
+    sections: Vec<NavItem>,
+    message: Option<String>,
+    error: Option<String>,
+    rows: Vec<ExternalRoleMappingRow>,
+    groups: Vec<(Uuid, String)>,
+}
+
+#[derive(Template)]
+#[template(path = "admin/dashboard.html")]
+struct DashboardTemplate {
+    sections: Vec<NavItem>,
+    message: Option<String>,
+    error: Option<String>,
+    users_total: i64,
+    users_active: i64,
+    users_local: i64,
+    users_ad: i64,
+    users_federated: i64,
+    groups_total: i64,
+    clients_total: i64,
+    claim_maps_total: i64,
+    managed_domains: Vec<String>,
+}
+
 pub fn router(state: WebAdminState) -> Router {
     Router::new()
         .route("/ad/onboarding", get(ad_onboarding_page).post(ad_onboarding_submit))
-        .route("/admin/ui", get(ui_root))
+        .route("/admin/ui/static/users.js", get(users_js))
+        .route("/admin/ui", get(ui_dashboard))
+        .route("/admin/ui/", get(ui_dashboard))
         .route("/admin/ui/login", get(login_page).post(login_submit))
         .route("/admin/ui/logout", post(logout_submit))
         .route("/admin/ui/users", get(users_page))
         .route("/admin/ui/ad-onboarding", get(ad_onboarding_tokens_page))
+        .route("/admin/ui/ad-roles", get(ad_roles_page))
+        .route("/admin/ui/ad-role-mappings", get(ad_role_mappings_page))
+        .route("/admin/ui/ad-role-mappings/create", post(ad_role_mappings_create))
+        .route(
+            "/admin/ui/ad-role-mappings/{id}/deactivate",
+            post(ad_role_mappings_deactivate),
+        )
         .route("/admin/ui/users/create", post(users_create))
         .route("/admin/ui/users/import", get(users_import_page).post(users_import_submit))
         .route("/admin/ui/users/{id}/update", post(users_update))
         .route("/admin/ui/users/{id}/deactivate", post(users_deactivate))
+        .route(
+            "/admin/ui/ad-onboarding/delete",
+            post(ad_onboarding_tokens_bulk_delete),
+        )
+        .route("/admin/ui/users/{id}/ad-mappings/apply", post(users_ad_mappings_apply))
         .route(
             "/admin/ui/users/{id}/ad-onboarding-link",
             post(users_ad_onboarding_link),
@@ -452,6 +594,416 @@ pub fn router(state: WebAdminState) -> Router {
         .route("/admin/ui/group-claims", get(group_claims_page))
         .with_state(state)
 }
+
+async fn users_js() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        USERS_PAGE_JS,
+    )
+}
+
+const USERS_PAGE_JS: &str = r#"
+document.addEventListener('DOMContentLoaded', function() {
+  const filterForm = document.getElementById('users-filter-form');
+  const FILTER_COOKIE = 'sidm_users_filters';
+
+  function setCookie(name, value, days) {
+    const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
+    document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+  }
+
+  function getCookie(name) {
+    const raw = document.cookie
+      .split('; ')
+      .find((row) => row.startsWith(`${name}=`));
+    if (!raw) return null;
+    return decodeURIComponent(raw.substring(name.length + 1));
+  }
+
+  function clearCookie(name) {
+    document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`;
+  }
+
+  function updateLettersHidden() {
+    if (!filterForm) return;
+    const selected = Array.from(filterForm.querySelectorAll('.letter-filter:checked'))
+      .map(el => el.value)
+      .join(',');
+    const hidden = document.getElementById('letters-hidden');
+    if (hidden) hidden.value = selected;
+  }
+  if (filterForm) {
+    const qInput = filterForm.querySelector('input[name="q"]');
+    const statusSelect = filterForm.querySelector('select[name="status"]');
+    const noteInput = filterForm.querySelector('input[name="note"]');
+    let lastFocusName = null;
+    let lastFocusPos = null;
+
+    function getSelectedLetters() {
+      return Array.from(filterForm.querySelectorAll('.letter-filter:checked')).map(el => el.value);
+    }
+
+    function persistFilters() {
+      const payload = {
+        q: (qInput?.value || '').trim(),
+        status: statusSelect?.value || 'all',
+        note: (noteInput?.value || '').trim(),
+        letters: getSelectedLetters()
+      };
+      setCookie(FILTER_COOKIE, JSON.stringify(payload), 14);
+    }
+
+    function applyPersistedFilters() {
+      const raw = getCookie(FILTER_COOKIE);
+      if (!raw) return false;
+      let saved = null;
+      try {
+        saved = JSON.parse(raw);
+      } catch (_) {
+        return false;
+      }
+      if (!saved || typeof saved !== 'object') return false;
+
+      if (qInput) qInput.value = saved.q || '';
+      if (statusSelect) statusSelect.value = saved.status || 'all';
+      if (noteInput) noteInput.value = saved.note || '';
+
+      const selected = new Set(Array.isArray(saved.letters) ? saved.letters : []);
+      filterForm.querySelectorAll('.letter-filter').forEach((el) => {
+        el.checked = selected.has(el.value);
+      });
+      updateLettersHidden();
+
+      return Boolean(
+        (saved.q && saved.q.trim().length > 0) ||
+        (saved.note && saved.note.trim().length > 0) ||
+        (saved.status && saved.status !== 'all') ||
+        (Array.isArray(saved.letters) && saved.letters.length > 0)
+      );
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const hasQueryState =
+      params.has('q') || params.has('status') || params.has('note') || params.has('letters');
+
+    function captureFocusState(el) {
+      if (!el || !el.name) return;
+      lastFocusName = el.name;
+      if (typeof el.selectionStart === 'number') {
+        lastFocusPos = el.selectionStart;
+      } else {
+        lastFocusPos = null;
+      }
+    }
+
+    [qInput, noteInput, statusSelect].forEach((el) => {
+      if (!el) return;
+      el.addEventListener('focus', () => captureFocusState(el));
+      el.addEventListener('click', () => captureFocusState(el));
+      el.addEventListener('input', () => captureFocusState(el));
+      el.addEventListener('keyup', () => captureFocusState(el));
+      el.addEventListener('change', () => captureFocusState(el));
+    });
+
+    async function navigateWithFilters(focusName) {
+      updateLettersHidden();
+      persistFilters();
+      const p = new URLSearchParams();
+      p.set('q', (qInput?.value || '').trim());
+      p.set('status', statusSelect?.value || 'all');
+      p.set('note', (noteInput?.value || '').trim());
+      p.set('letters', document.getElementById('letters-hidden')?.value || '');
+      if (focusName) p.set('_focus', focusName);
+      if (typeof lastFocusPos === 'number') p.set('_cursor', String(lastFocusPos));
+      const url = `/admin/ui/users?${p.toString()}`;
+      const resultsRoot = document.getElementById('users-results');
+      if (!resultsRoot) {
+        window.location.assign(url);
+        return;
+      }
+      try {
+        resultsRoot.style.opacity = '0.55';
+        const response = await fetch(url, {
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+          }
+        });
+        if (!response.ok) {
+          window.location.assign(url);
+          return;
+        }
+        const html = await response.text();
+        const parsed = new DOMParser().parseFromString(html, 'text/html');
+        const nextResults = parsed.getElementById('users-results');
+        if (!nextResults) {
+          window.location.assign(url);
+          return;
+        }
+        resultsRoot.replaceWith(nextResults);
+        history.replaceState({}, '', url);
+        initAdMapForms();
+        applyFocusFromUrlParams(new URL(url, window.location.origin).searchParams);
+      } catch (_) {
+        window.location.assign(url);
+      } finally {
+        const newRoot = document.getElementById('users-results');
+        if (newRoot) newRoot.style.opacity = '';
+      }
+    }
+
+    let shouldAutoApplyPersisted = false;
+    if (!hasQueryState) {
+      shouldAutoApplyPersisted = applyPersistedFilters();
+    }
+
+    let debounceTimer = null;
+    filterForm.addEventListener('submit', function(e) {
+      e.preventDefault();
+      const active = document.activeElement;
+      if (active && active.name) captureFocusState(active);
+      navigateWithFilters(lastFocusName);
+    });
+    const liveInputs = filterForm.querySelectorAll('input[name=\"q\"], input[name=\"note\"], select[name=\"status\"]');
+    liveInputs.forEach((el) => {
+      el.addEventListener('input', () => {
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+          void navigateWithFilters(el.name || lastFocusName);
+        }, 300);
+      });
+      el.addEventListener('change', () => {
+        clearTimeout(debounceTimer);
+        void navigateWithFilters(el.name || lastFocusName);
+      });
+    });
+    filterForm.querySelectorAll('.letter-filter').forEach((el) => {
+      el.addEventListener('change', () => {
+        clearTimeout(debounceTimer);
+        void navigateWithFilters(lastFocusName || 'q');
+      });
+    });
+
+    const resetBtn = document.getElementById('users-filter-reset');
+    if (resetBtn) {
+      resetBtn.addEventListener('click', () => {
+        clearCookie(FILTER_COOKIE);
+        window.location.href = '/admin/ui/users';
+      });
+    }
+
+    function applyFocusFromUrlParams(urlParams) {
+      const focusName = urlParams.get('_focus');
+      const focusPosRaw = urlParams.get('_cursor');
+      if (!focusName) return;
+      const target = filterForm.querySelector(`[name="${focusName}"]`);
+      if (target) {
+        setTimeout(() => {
+          target.focus();
+          if (target.setSelectionRange && typeof target.value === 'string') {
+            const parsed = Number.parseInt(focusPosRaw || '', 10);
+            const pos = Number.isFinite(parsed) ? Math.min(parsed, target.value.length) : target.value.length;
+            target.setSelectionRange(pos, pos);
+          }
+        }, 0);
+      }
+      urlParams.delete('_focus');
+      urlParams.delete('_cursor');
+      const next = urlParams.toString();
+      history.replaceState({}, '', next ? `/admin/ui/users?${next}` : '/admin/ui/users');
+    }
+    applyFocusFromUrlParams(params);
+
+    if (shouldAutoApplyPersisted) {
+      setTimeout(() => { void navigateWithFilters(null); }, 0);
+    }
+  }
+
+  function randomPassword(length) {
+    const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=';
+    const bytes = new Uint32Array(length);
+    window.crypto.getRandomValues(bytes);
+    let out = '';
+    for (let i = 0; i < length; i++) out += alphabet[bytes[i] % alphabet.length];
+    return out;
+  }
+
+  document.addEventListener('click', async (e) => {
+    const gen = e.target.closest('.user-password-generate');
+    if (gen) {
+      const targetId = gen.getAttribute('data-target');
+      const input = document.getElementById(targetId);
+      if (!input) return;
+      input.value = randomPassword(20);
+      input.type = 'text';
+      return;
+    }
+    const copy = e.target.closest('.user-password-copy');
+    if (copy) {
+      const targetId = copy.getAttribute('data-target');
+      const input = document.getElementById(targetId);
+      if (!input || !input.value) return;
+      try {
+        await navigator.clipboard.writeText(input.value);
+      } catch (_) {
+        input.select();
+        document.execCommand('copy');
+      }
+    }
+  });
+
+  function applyFilter(inputEl, itemSelector) {
+    const root = inputEl.closest('.modal-content');
+    if (!root) return;
+    const terms = inputEl.value
+      .toLowerCase()
+      .split(/\s+/)
+      .map(t => t.trim())
+      .filter(Boolean);
+    root.querySelectorAll(itemSelector).forEach(item => {
+      const text = item.textContent.toLowerCase();
+      const matches = terms.every(term => text.includes(term));
+      item.style.display = matches ? '' : 'none';
+    });
+  }
+
+  document.addEventListener('input', (e) => {
+    if (!(e.target instanceof Element)) return;
+    const left = e.target.closest('.ad-filter-left');
+    if (left) {
+      applyFilter(left, '.ad-left-item');
+      return;
+    }
+    const right = e.target.closest('.ad-filter-right');
+    if (right) {
+      applyFilter(right, '.ad-right-item');
+    }
+  });
+
+  function mappingKey(r, g) {
+    return `${r}__${g}`;
+  }
+
+  function initAdMapForms() {
+    document.querySelectorAll('.ad-map-form').forEach(form => {
+    if (form.dataset.initialized === '1') return;
+    form.dataset.initialized = '1';
+    const draft = new Map();
+    const tbody = form.querySelector('.ad-draft-table tbody');
+    const jsonInput = form.querySelector('.ad-mappings-json');
+    const addBtn = form.querySelector('.ad-add-btn');
+    if (!tbody || !jsonInput || !addBtn) return;
+
+    function refreshDraftTable() {
+      tbody.innerHTML = '';
+      for (const [key, item] of draft.entries()) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td><code class="small">${item.external_role}</code></td>
+          <td>${item.group_name}</td>
+          <td><input type="number" class="form-control form-control-sm ad-priority" data-key="${key}" value="${item.priority}" style="max-width:100px;"></td>
+          <td><button type="button" class="btn btn-sm btn-outline-danger ad-remove" data-key="${key}">Remove</button></td>
+        `;
+        tbody.appendChild(tr);
+      }
+      jsonInput.value = JSON.stringify(Array.from(draft.values()).map(v => ({
+        external_role: v.external_role,
+        group_id: v.group_id,
+        priority: Number(v.priority) || 100,
+        mode: 'add'
+      })));
+    }
+
+    addBtn.addEventListener('click', () => {
+      const selectedRoles = Array.from(form.querySelectorAll('.ad-left-check:checked'));
+      const selectedGroups = Array.from(form.querySelectorAll('.ad-right-check:checked'));
+      selectedRoles.forEach(r => {
+        selectedGroups.forEach(g => {
+          const groupLabel = g.closest('label')?.textContent?.trim() || g.value;
+          const k = mappingKey(r.value, g.value);
+          if (!draft.has(k)) {
+            draft.set(k, {
+              external_role: r.value,
+              group_id: g.value,
+              group_name: groupLabel,
+              priority: 100
+            });
+          }
+        });
+      });
+      refreshDraftTable();
+    });
+
+    tbody.addEventListener('click', (e) => {
+      const btn = e.target.closest('.ad-remove');
+      if (!btn) return;
+      draft.delete(btn.getAttribute('data-key'));
+      refreshDraftTable();
+    });
+
+    tbody.addEventListener('input', (e) => {
+      const inp = e.target.closest('.ad-priority');
+      if (!inp) return;
+      const key = inp.getAttribute('data-key');
+      if (!draft.has(key)) return;
+      const item = draft.get(key);
+      item.priority = Number(inp.value) || 100;
+      draft.set(key, item);
+      jsonInput.value = JSON.stringify(Array.from(draft.values()).map(v => ({
+        external_role: v.external_role,
+        group_id: v.group_id,
+        priority: Number(v.priority) || 100,
+        mode: 'add'
+      })));
+    });
+
+    form.addEventListener('submit', (e) => {
+      if (draft.size === 0) {
+        e.preventDefault();
+        alert('No mappings selected.');
+      }
+    });
+  });
+  }
+  initAdMapForms();
+
+  const tokenStatusFilter = document.getElementById('ad-token-status-filter');
+  const tokenRows = Array.from(document.querySelectorAll('.ad-token-row'));
+  if (tokenStatusFilter) {
+    tokenStatusFilter.addEventListener('change', () => {
+      const status = tokenStatusFilter.value;
+      tokenRows.forEach((row) => {
+        const rowStatus = row.getAttribute('data-status') || 'all';
+        row.style.display = status === 'all' || status === rowStatus ? '' : 'none';
+      });
+    });
+  }
+
+  const tokenSelectAll = document.getElementById('ad-token-select-all');
+  const tokenDeleteForm = document.querySelector('form[action=\"/admin/ui/ad-onboarding/delete\"]');
+  const tokenHashesCsv = document.getElementById('ad-token-hashes-csv');
+  if (tokenSelectAll) {
+    tokenSelectAll.addEventListener('change', () => {
+      document.querySelectorAll('.ad-token-check').forEach((el) => {
+        const row = el.closest('tr');
+        if (!row || row.style.display === 'none') return;
+        el.checked = tokenSelectAll.checked;
+      });
+    });
+  }
+  if (tokenDeleteForm && tokenHashesCsv) {
+    tokenDeleteForm.addEventListener('submit', (e) => {
+      const selected = Array.from(document.querySelectorAll('.ad-token-check:checked'))
+        .map(el => el.value)
+        .filter(Boolean);
+      tokenHashesCsv.value = selected.join(',');
+      if (selected.length === 0) {
+        e.preventDefault();
+        alert('No onboarding token selected.');
+      }
+    });
+  }
+});
+"#;
 
 fn parse_checkbox(v: &Option<String>) -> bool {
     v.as_deref().is_some_and(|x| x == "on" || x == "true" || x == "1")
@@ -475,6 +1027,10 @@ fn normalize_opt(raw: Option<&str>) -> Option<String> {
     raw.map(str::trim)
         .filter(|v| !v.is_empty())
         .map(|v| v.to_string())
+}
+
+fn normalize_opt_form(raw: Option<String>) -> Option<String> {
+    raw.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
 fn username_from_email(email: &str) -> String {
@@ -670,6 +1226,14 @@ where
     deserializer.deserialize_any(StringOrSeqVisitor)
 }
 
+fn deserialize_opt_string_or_seq<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let v = deserialize_string_or_seq(deserializer)?;
+    if v.is_empty() { Ok(None) } else { Ok(Some(v)) }
+}
+
 fn nav_items(active: AdminSection) -> Vec<NavItem> {
     AdminSection::all()
         .into_iter()
@@ -714,11 +1278,11 @@ fn onboarding_token_hash(token: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
-fn token_from_cookie(headers: &HeaderMap) -> Option<String> {
+fn session_id_from_cookie(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     raw.split(';')
         .map(|part| part.trim())
-        .find_map(|p| p.strip_prefix(&format!("{ADMIN_TOKEN_COOKIE}=")))
+        .find_map(|p| p.strip_prefix(&format!("{ADMIN_SESSION_COOKIE}=")))
         .map(|s| s.to_string())
 }
 
@@ -764,18 +1328,115 @@ async fn validate_admin_token(state: &WebAdminState, token: &str) -> bool {
 }
 
 async fn require_admin_token(state: &WebAdminState, headers: &HeaderMap) -> Result<String, Redirect> {
-    let Some(token) = token_from_cookie(headers) else {
+    let Some(session_id) = session_id_from_cookie(headers) else {
         return Err(Redirect::to("/admin/ui/login"));
     };
+
+    let session = {
+        let sessions = state.admin_sessions.read().await;
+        sessions.get(&session_id).cloned()
+    };
+    let Some((token, expires_at)) = session else {
+        return Err(Redirect::to("/admin/ui/login"));
+    };
+    if Utc::now() >= expires_at {
+        let mut sessions = state.admin_sessions.write().await;
+        sessions.remove(&session_id);
+        return Err(Redirect::to("/admin/ui/login?error=Session%20expired"));
+    }
+
     if validate_admin_token(state, &token).await {
         Ok(token)
     } else {
+        let mut sessions = state.admin_sessions.write().await;
+        sessions.remove(&session_id);
         Err(Redirect::to("/admin/ui/login?error=Invalid%20admin%20token"))
     }
 }
 
-async fn ui_root() -> Redirect {
-    Redirect::to("/admin/ui/users")
+async fn ui_dashboard(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let users_total = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL",
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+    let users_active = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND is_active = true",
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+    let users_local = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND auth_mode = 'local'",
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+    let users_ad = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND auth_mode = 'mixed'",
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+    let users_federated = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND auth_mode = 'federated'",
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+    let groups_total = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM groups WHERE deleted_at IS NULL",
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+    let clients_total = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM oauth_clients WHERE deleted_at IS NULL",
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+    let claim_maps_total = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM claim_maps WHERE deleted_at IS NULL",
+    )
+    .fetch_one(&state.db_pool)
+    .await
+    .unwrap_or(0);
+    let managed_domains = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT domain
+        FROM tenant_domains
+        WHERE is_active = true
+        ORDER BY domain ASC
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    render_template(DashboardTemplate {
+        sections: nav_items(AdminSection::Dashboard),
+        message: query.message,
+        error: query.error,
+        users_total,
+        users_active,
+        users_local,
+        users_ad,
+        users_federated,
+        groups_total,
+        clients_total,
+        claim_maps_total,
+        managed_domains,
+    })
 }
 
 async fn login_page(Query(query): Query<PageQuery>) -> Response {
@@ -792,10 +1453,21 @@ async fn login_submit(
         return Redirect::to("/admin/ui/login?error=Invalid%20admin%20token").into_response();
     }
 
+    let session_id = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(64)
+        .map(char::from)
+        .collect::<String>();
+    let expires_at = Utc::now() + chrono::Duration::seconds(ADMIN_SESSION_TTL_SECONDS);
+    {
+        let mut sessions = state.admin_sessions.write().await;
+        sessions.insert(session_id.clone(), (form.token, expires_at));
+    }
+
     let secure = if state.secure_cookies { "; Secure" } else { "" };
     let cookie = format!(
-        "{ADMIN_TOKEN_COOKIE}={}; Path=/; HttpOnly; SameSite=Lax{}",
-        form.token, secure
+        "{ADMIN_SESSION_COOKIE}={}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{}",
+        session_id, ADMIN_SESSION_TTL_SECONDS, secure
     );
 
     (
@@ -805,10 +1477,14 @@ async fn login_submit(
         .into_response()
 }
 
-async fn logout_submit(State(state): State<WebAdminState>) -> Response {
+async fn logout_submit(State(state): State<WebAdminState>, headers: HeaderMap) -> Response {
+    if let Some(session_id) = session_id_from_cookie(&headers) {
+        let mut sessions = state.admin_sessions.write().await;
+        sessions.remove(&session_id);
+    }
     let secure = if state.secure_cookies { "; Secure" } else { "" };
     let cookie = format!(
-        "{ADMIN_TOKEN_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
+        "{ADMIN_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
         secure
     );
     ([(header::SET_COOKIE, cookie)], Redirect::to("/admin/ui/login")).into_response()
@@ -1051,13 +1727,22 @@ async fn users_page(
     let filter_status = query.status.unwrap_or_else(|| "all".to_string());
     let page = query.page.unwrap_or(1).max(1);
     let per_page: i64 = 25;
+    let search_patterns = filter_q
+        .split_whitespace()
+        .map(|v| v.trim().to_lowercase())
+        .filter(|v| !v.is_empty())
+        .map(|v| format!("%{v}%"))
+        .collect::<Vec<_>>();
     let selected_letters = query
         .letters
-        .as_deref()
         .unwrap_or_default()
-        .split(',')
-        .map(|v| v.trim().to_uppercase())
-        .filter(|v| v.len() == 1 && v.chars().all(|c| c.is_ascii_alphabetic()))
+        .into_iter()
+        .flat_map(|raw| {
+            raw.split(',')
+                .map(|v| v.trim().to_uppercase())
+                .filter(|v| v.len() == 1 && v.chars().all(|c| c.is_ascii_alphabetic()))
+                .collect::<Vec<_>>()
+        })
         .collect::<Vec<_>>();
     let active_filter = match filter_status.as_str() {
         "active" => Some(true),
@@ -1070,11 +1755,9 @@ async fn users_page(
            FROM users
            WHERE deleted_at IS NULL
              AND (
-               $1::text IS NULL OR $1 = '' OR
-               username ILIKE '%' || $1 || '%' OR
-               email ILIKE '%' || $1 || '%' OR
-               COALESCE(first_name, '') ILIKE '%' || $1 || '%' OR
-               COALESCE(last_name, '') ILIKE '%' || $1 || '%'
+               cardinality($1::text[]) = 0 OR
+               LOWER(CONCAT_WS(' ', username, email, COALESCE(first_name, ''), COALESCE(last_name, '')))
+                 LIKE ALL($1::text[])
              )
              AND ($2::boolean IS NULL OR is_active = $2)
              AND ($3::text IS NULL OR $3 = '' OR COALESCE(note, '') ILIKE '%' || $3 || '%')
@@ -1083,7 +1766,7 @@ async fn users_page(
                UPPER(LEFT(COALESCE(last_name, ''), 1)) = ANY($4::text[])
              )"#,
     )
-    .bind(filter_q.trim())
+    .bind(&search_patterns)
     .bind(active_filter)
     .bind(filter_note.trim())
     .bind(&selected_letters)
@@ -1105,11 +1788,9 @@ async fn users_page(
            FROM users
            WHERE deleted_at IS NULL
              AND (
-               $1::text IS NULL OR $1 = '' OR
-               username ILIKE '%' || $1 || '%' OR
-               email ILIKE '%' || $1 || '%' OR
-               COALESCE(first_name, '') ILIKE '%' || $1 || '%' OR
-               COALESCE(last_name, '') ILIKE '%' || $1 || '%'
+               cardinality($1::text[]) = 0 OR
+               LOWER(CONCAT_WS(' ', username, email, COALESCE(first_name, ''), COALESCE(last_name, '')))
+                 LIKE ALL($1::text[])
              )
              AND ($2::boolean IS NULL OR is_active = $2)
              AND ($3::text IS NULL OR $3 = '' OR COALESCE(note, '') ILIKE '%' || $3 || '%')
@@ -1120,7 +1801,7 @@ async fn users_page(
            ORDER BY username ASC
            LIMIT $5 OFFSET $6"#,
     )
-    .bind(filter_q.trim())
+    .bind(&search_patterns)
     .bind(active_filter)
     .bind(filter_note.trim())
     .bind(&selected_letters)
@@ -1175,12 +1856,112 @@ async fn users_page(
         )
     };
 
+    let ad_user_ids = rows
+        .iter()
+        .filter(|u| u.auth_mode == "mixed")
+        .map(|u| u.id)
+        .collect::<Vec<_>>();
+
+    let ad_modal_data = if ad_user_ids.is_empty() {
+        Vec::new()
+    } else {
+        let role_rows = sqlx::query(
+            r#"
+            SELECT user_id, role_name
+            FROM user_external_roles
+            WHERE source = 'ad'
+              AND user_id = ANY($1::uuid[])
+            ORDER BY role_name ASC
+            "#,
+        )
+        .bind(&ad_user_ids)
+        .fetch_all(&state.db_pool)
+        .await
+        .unwrap_or_default();
+
+        let groups = sqlx::query_as::<_, SimpleGroupOption>(
+            r#"SELECT id, name FROM groups WHERE deleted_at IS NULL ORDER BY name ASC"#,
+        )
+        .fetch_all(&state.db_pool)
+        .await
+        .unwrap_or_default();
+
+        let mut by_user: BTreeMap<Uuid, Vec<UserAdRoleRow>> = BTreeMap::new();
+        for row in role_rows {
+            if let (Ok(user_id), Ok(role_name)) = (
+                row.try_get::<Uuid, _>("user_id"),
+                row.try_get::<String, _>("role_name"),
+            ) {
+                by_user
+                    .entry(user_id)
+                    .or_default()
+                    .push(UserAdRoleRow { role_name });
+            }
+        }
+
+        ad_user_ids
+            .into_iter()
+            .map(|user_id| UserAdMappingModalData {
+                user_id,
+                ad_roles: by_user.remove(&user_id).unwrap_or_default(),
+                groups: groups.clone(),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let ad_onboarding_tokens = match sqlx::query_as::<_, AdOnboardingTokenRow>(
+        r#"
+        SELECT
+            t.token_hash,
+            u.username,
+            u.email,
+            t.created_at,
+            t.expires_at,
+            t.used_at
+        FROM ad_onboarding_tokens t
+        JOIN users u ON u.id = t.user_id
+        ORDER BY t.created_at DESC
+        LIMIT 500
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(v) => {
+            let now = Utc::now();
+            v.into_iter()
+                .map(|r| {
+                    let (status, status_class) = if r.used_at.is_some() {
+                        ("used".to_string(), "bg-green-lt".to_string())
+                    } else if r.expires_at < now {
+                        ("expired".to_string(), "bg-red-lt".to_string())
+                    } else {
+                        ("pending".to_string(), "bg-yellow-lt".to_string())
+                    };
+                    AdOnboardingTokenView {
+                        token_hash: r.token_hash,
+                        username: r.username,
+                        email: r.email,
+                        created_at: r.created_at,
+                        expires_at: r.expires_at,
+                        used_at: r.used_at,
+                        status,
+                        status_class,
+                    }
+                })
+                .collect::<Vec<_>>()
+        }
+        Err(_) => Vec::new(),
+    };
+
     render_template(UsersTemplate {
         sections: nav_items(AdminSection::Users),
         message: query.message,
         error: query.error,
         ad_link: query.ad_link,
         rows,
+        ad_modal_data,
+        ad_onboarding_tokens,
         filter_q,
         filter_status,
         filter_note,
@@ -1237,6 +2018,185 @@ async fn ad_onboarding_tokens_page(
     })
 }
 
+async fn ad_roles_page(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Query(query): Query<AdRolesQuery>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let email = query.email.unwrap_or_default().trim().to_lowercase();
+    let rows = if email.is_empty() {
+        Vec::new()
+    } else {
+        match sqlx::query_as::<_, ExternalRoleRow>(
+            r#"
+            SELECT u.email, r.source, r.role_name, r.synced_at
+            FROM user_external_roles r
+            JOIN users u ON u.id = r.user_id
+            WHERE u.email = $1
+              AND u.deleted_at IS NULL
+            ORDER BY r.role_name ASC
+            "#,
+        )
+        .bind(&email)
+        .fetch_all(&state.db_pool)
+        .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return redirect_with("/admin/ui/ad-roles", "error", &format!("DB error: {e}"))
+                    .into_response();
+            }
+        }
+    };
+
+    render_template(AdRolesTemplate {
+        sections: nav_items(AdminSection::Users),
+        message: query.message,
+        error: query.error,
+        email,
+        rows,
+    })
+}
+
+async fn ad_role_mappings_page(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Query(query): Query<PageQuery>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let rows = match sqlx::query_as::<_, ExternalRoleMappingRow>(
+        r#"
+        SELECT m.id, m.source, m.external_role, g.name as group_name, m.mode, m.priority, m.is_active
+        FROM external_role_mappings m
+        JOIN groups g ON g.id = m.group_id
+        WHERE m.deleted_at IS NULL
+        ORDER BY m.priority ASC, m.external_role ASC
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/admin/ui/ad-role-mappings", "error", &format!("DB error: {e}"))
+                .into_response();
+        }
+    };
+
+    let groups = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, name FROM groups WHERE deleted_at IS NULL ORDER BY name ASC",
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    render_template(AdRoleMappingsTemplate {
+        sections: nav_items(AdminSection::Users),
+        message: query.message,
+        error: query.error,
+        rows,
+        groups,
+    })
+}
+
+async fn ad_role_mappings_create(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Form(form): Form<RoleMappingCreateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let group_id = match Uuid::parse_str(form.group_id.trim()) {
+        Ok(v) => v,
+        Err(_) => {
+            return redirect_with("/admin/ui/ad-role-mappings", "error", "Invalid group_id")
+                .into_response()
+        }
+    };
+    let mode = match form.mode.trim() {
+        "add" | "remove" => form.mode.trim().to_string(),
+        _ => "add".to_string(),
+    };
+    let priority = form.priority.unwrap_or(100);
+    let source = if form.source.trim().is_empty() {
+        "ad".to_string()
+    } else {
+        form.source.trim().to_lowercase()
+    };
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO external_role_mappings (tenant_id, source, external_role, group_id, mode, priority, is_active)
+        VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, true)
+        "#,
+    )
+    .bind(source)
+    .bind(form.external_role.trim())
+    .bind(group_id)
+    .bind(mode)
+    .bind(priority)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => redirect_with("/admin/ui/ad-role-mappings", "message", "Role mapping created")
+            .into_response(),
+        Err(e) => {
+            redirect_with(
+                "/admin/ui/ad-role-mappings",
+                "error",
+                &format!("Create failed: {e}"),
+            )
+            .into_response()
+        }
+    }
+}
+
+async fn ad_role_mappings_deactivate(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE external_role_mappings
+        SET is_active = false, deleted_at = NOW(), updated_at = NOW()
+        WHERE id = $1
+        "#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => redirect_with(
+            "/admin/ui/ad-role-mappings",
+            "message",
+            "Role mapping deactivated",
+        )
+        .into_response(),
+        Err(e) => redirect_with(
+            "/admin/ui/ad-role-mappings",
+            "error",
+            &format!("Deactivate failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
 async fn users_create(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -1275,8 +2235,11 @@ async fn users_create(
     let password_disabled = auth_mode.eq_ignore_ascii_case("federated");
 
     let result = sqlx::query(
-        r#"INSERT INTO users (tenant_id, username, email, password_hash, is_active, auth_mode, password_disabled, first_name, last_name)
-           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, $6, NULL, NULL)"#,
+        r#"INSERT INTO users (
+             tenant_id, username, email, password_hash, is_active, auth_mode, password_disabled,
+             first_name, last_name, recovery_email, phone_e164, note
+           )
+           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
     )
     .bind(form.username.trim())
     .bind(form.email.trim().to_lowercase())
@@ -1284,6 +2247,11 @@ async fn users_create(
     .bind(is_active)
     .bind(auth_mode)
     .bind(password_disabled)
+    .bind(normalize_opt_form(form.first_name))
+    .bind(normalize_opt_form(form.last_name))
+    .bind(normalize_opt_form(form.recovery_email).map(|v| v.to_lowercase()))
+    .bind(normalize_opt_form(form.phone_e164))
+    .bind(normalize_opt_form(form.note))
     .execute(&state.db_pool)
     .await;
 
@@ -1413,16 +2381,16 @@ async fn users_import_submit(
     }
 
     let Some(bytes) = file_bytes else {
-        return redirect_with("/admin/ui/users/import", "error", "Missing CSV file").into_response();
+        return redirect_with("/admin/ui/users", "error", "Missing CSV file").into_response();
     };
 
     let imported = match parse_google_users_csv(&bytes) {
         Ok(v) if !v.is_empty() => v,
         Ok(_) => {
-            return redirect_with("/admin/ui/users/import", "error", "CSV has no importable users")
+            return redirect_with("/admin/ui/users", "error", "CSV has no importable users")
                 .into_response()
         }
-        Err(e) => return redirect_with("/admin/ui/users/import", "error", &e).into_response(),
+        Err(e) => return redirect_with("/admin/ui/users", "error", &e).into_response(),
     };
 
     let mut created = 0usize;
@@ -1533,6 +2501,186 @@ async fn users_deactivate(
         Err(e) => redirect_with("/admin/ui/users", "error", &format!("Deactivate failed: {e}"))
             .into_response(),
     }
+}
+
+async fn ad_onboarding_tokens_bulk_delete(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Form(form): Form<AdTokenBulkDeleteForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let token_hashes = form
+        .token_hashes_csv
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .into_iter()
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>();
+
+    if token_hashes.is_empty() {
+        return redirect_with("/admin/ui/users", "error", "No onboarding token selected")
+            .into_response();
+    }
+
+    let result = sqlx::query("DELETE FROM ad_onboarding_tokens WHERE token_hash = ANY($1)")
+        .bind(&token_hashes)
+        .execute(&state.db_pool)
+        .await;
+
+    match result {
+        Ok(done) => redirect_with(
+            "/admin/ui/users",
+            "message",
+            &format!("Deleted onboarding tokens: {}", done.rows_affected()),
+        )
+        .into_response(),
+        Err(e) => redirect_with("/admin/ui/users", "error", &format!("Delete failed: {e}"))
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MappingDraftItem {
+    external_role: String,
+    group_id: String,
+    priority: Option<i32>,
+    mode: Option<String>,
+}
+
+async fn users_ad_mappings_apply(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Form(form): Form<UserAdMappingsApplyForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let user = match sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(u)) => u,
+        Ok(None) => return redirect_with("/admin/ui/users", "error", "User not found").into_response(),
+        Err(e) => {
+            return redirect_with("/admin/ui/users", "error", &format!("DB error: {e}")).into_response()
+        }
+    };
+
+    if user.auth_mode != "mixed" {
+        return redirect_with(
+            "/admin/ui/users",
+            "error",
+            "AD role mapping is available only for auth type 'ad'",
+        )
+        .into_response();
+    }
+
+    let items: Vec<MappingDraftItem> = match serde_json::from_str(form.mappings_json.trim()) {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with(
+                "/admin/ui/users",
+                "error",
+                &format!("Invalid mappings payload: {e}"),
+            )
+            .into_response();
+        }
+    };
+
+    if items.is_empty() {
+        return redirect_with("/admin/ui/users", "error", "No mappings selected").into_response();
+    }
+
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return redirect_with("/admin/ui/users", "error", &format!("DB error: {e}")).into_response(),
+    };
+    let mut created = 0usize;
+    for item in &items {
+        let Ok(group_id) = Uuid::parse_str(item.group_id.trim()) else {
+            continue;
+        };
+        let mode = match item.mode.as_deref().unwrap_or("add") {
+            "remove" => "remove",
+            _ => "add",
+        };
+        let priority = item.priority.unwrap_or(100);
+        if item.external_role.trim().is_empty() {
+            continue;
+        }
+        let result = sqlx::query(
+            r#"
+            INSERT INTO external_role_mappings
+              (tenant_id, source, external_role, group_id, mode, priority, is_active)
+            VALUES
+              ($1, 'ad', $2, $3, $4, $5, true)
+            ON CONFLICT (tenant_id, source, external_role, group_id, mode)
+            WHERE deleted_at IS NULL
+            DO UPDATE SET
+              is_active = true,
+              priority = EXCLUDED.priority,
+              updated_at = NOW()
+            "#,
+        )
+        .bind(user.tenant_id)
+        .bind(item.external_role.trim())
+        .bind(group_id)
+        .bind(mode)
+        .bind(priority)
+        .execute(&mut *tx)
+        .await;
+        if result.is_ok() {
+            created += 1;
+        }
+    }
+
+    if let Err(e) = tx.commit().await {
+        return redirect_with("/admin/ui/users", "error", &format!("DB error: {e}")).into_response();
+    }
+
+    if let Err(err) = oauth2::sync_ldap_roles_force(state.oauth_state.as_ref(), &user, &user.email).await {
+        simple_idm_core::audit::emit_event(
+            &state.db_pool,
+            "ad.role_mapping.apply",
+            "external_role_mappings",
+            Some(user.id),
+            "failure",
+            Some(json!({"error": err.to_string()})),
+        )
+        .await;
+        return redirect_with(
+            "/admin/ui/users",
+            "error",
+            &format!("Mappings saved ({created}), but sync failed: {err}"),
+        )
+        .into_response();
+    }
+
+    simple_idm_core::audit::emit_event(
+        &state.db_pool,
+        "ad.role_mapping.apply",
+        "external_role_mappings",
+        Some(user.id),
+        "success",
+        Some(json!({"count": created})),
+    )
+    .await;
+
+    redirect_with(
+        "/admin/ui/users",
+        "message",
+        &format!("AD mappings applied: {created}"),
+    )
+    .into_response()
 }
 
 async fn users_ad_onboarding_link(
