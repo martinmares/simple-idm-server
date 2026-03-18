@@ -711,11 +711,7 @@ SOFT_DELETE_RETENTION_DAYS=30
 
 ## License
 
-AGPLv3 License - see [LICENSE](LICENSE) file for details
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ## Author
 
