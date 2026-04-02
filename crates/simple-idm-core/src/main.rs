@@ -47,12 +47,9 @@ struct CliArgs {
     /// Optional domain/tenant hint shown on auth pages
     #[arg(long)]
     ui_brand_domain: Option<String>,
-    /// UI theme preset: blue, red, white, green, gold
+    /// Browser page title shown on auth pages
     #[arg(long)]
-    ui_theme: Option<String>,
-    /// Optional path to custom CSS file injected into auth pages
-    #[arg(long)]
-    ui_custom_css_path: Option<String>,
+    ui_page_title: Option<String>,
 }
 
 #[tokio::main]
@@ -79,48 +76,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let domain = brand_domain.trim().to_string();
         config.ui.brand_domain = if domain.is_empty() { None } else { Some(domain) };
     }
-    if let Some(theme) = cli.ui_theme {
-        config.ui.theme = theme.to_lowercase();
-    }
-    if let Some(path) = cli.ui_custom_css_path {
-        let p = path.trim().to_string();
-        config.ui.custom_css_path = if p.is_empty() { None } else { Some(p) };
-    }
-
-    let custom_css = if let Some(path) = &config.ui.custom_css_path {
-        match std::fs::read_to_string(path) {
-            Ok(css) => Some(css),
-            Err(err) => {
-                tracing::warn!("Failed to load custom UI CSS from '{}': {}", path, err);
-                None
-            }
+    if let Some(page_title) = cli.ui_page_title {
+        let title = page_title.trim().to_string();
+        if !title.is_empty() {
+            config.ui.page_title = title;
         }
-    } else {
-        None
-    };
+    }
 
     oauth2::templates::set_branding_from_config(
         config.ui.brand_name.clone(),
         config.ui.brand_domain.clone(),
-        config.ui.theme.clone(),
-        custom_css,
+        config.ui.page_title.clone(),
     );
 
     tracing::info!("Starting simple-idm-server");
     tracing::info!("Server: {}:{}", config.server.host, config.server.port);
     tracing::info!(
-        "UI branding: name='{}' domain='{}' theme='{}'",
+        "UI branding: name='{}' domain='{}' page_title='{}'",
         config.ui.brand_name,
         config
             .ui
             .brand_domain
             .clone()
             .unwrap_or_else(|| "-".to_string()),
-        config.ui.theme
+        config.ui.page_title
     );
-    if let Some(path) = &config.ui.custom_css_path {
-        tracing::info!("UI custom CSS: {}", path);
-    }
     tracing::info!(
         "Database: {}",
         redact_database_url(&config.database.url)

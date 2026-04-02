@@ -7,8 +7,7 @@ use std::sync::OnceLock;
 struct UiBranding {
     brand_name: String,
     brand_domain: Option<String>,
-    theme: String,
-    custom_css: Option<String>,
+    page_title: String,
 }
 
 impl Default for UiBranding {
@@ -16,8 +15,7 @@ impl Default for UiBranding {
         Self {
             brand_name: "Cloud App".to_string(),
             brand_domain: None,
-            theme: "blue".to_string(),
-            custom_css: None,
+            page_title: "Simple IDM".to_string(),
         }
     }
 }
@@ -28,14 +26,12 @@ static UI_BRANDING: OnceLock<UiBranding> = OnceLock::new();
 pub fn set_branding_from_config(
     brand_name: String,
     brand_domain: Option<String>,
-    theme: String,
-    custom_css: Option<String>,
+    page_title: String,
 ) {
     let _ = UI_BRANDING.set(UiBranding {
         brand_name,
         brand_domain,
-        theme,
-        custom_css,
+        page_title,
     });
 }
 
@@ -46,13 +42,14 @@ fn get_branding() -> &'static UiBranding {
 fn apply_branding(mut html: String) -> String {
     let branding = get_branding();
     let brand_name = escape_html(&branding.brand_name);
+    let page_title = escape_html(&branding.page_title);
     let brand_label = if let Some(domain) = &branding.brand_domain {
         format!("{} • {}", brand_name, escape_html(domain))
     } else {
         brand_name.clone()
     };
 
-    html = html.replace("Cloud App SSO", &format!("{} SSO", brand_name));
+    html = html.replace("Cloud App SSO", &page_title);
     html = html.replace("Cloud App", &brand_name);
     html = html.replace("you@company.com", &format!("user@{}", brand_name.to_lowercase()));
     html = html.replace(
@@ -69,65 +66,6 @@ fn apply_branding(mut html: String) -> String {
             "Secure sign-in for internal dashboards and admin tools.",
             &format!("Secure sign-in for {}.", domain),
         );
-    }
-
-    if branding.theme.eq_ignore_ascii_case("red") {
-        html = html.replace("#f1f5f9", "#fef2f2");
-        html = html.replace("#e2e8f0", "#fecaca");
-        html = html.replace("#05080f", "#17090d");
-        html = html.replace("#080f1a", "#2a0c14");
-        html = html.replace("rgba(59, 130, 246, 0.25)", "rgba(244, 63, 94, 0.32)");
-        html = html.replace("rgba(96, 165, 250, 0.35)", "rgba(239, 68, 68, 0.52)");
-        html = html.replace("rgba(84, 141, 214, 0.6)", "rgba(251, 113, 133, 0.68)");
-        html = html.replace("rgba(120, 170, 235, 0.75)", "rgba(239, 68, 68, 0.9)");
-        html = html.replace("dark:bg-slate-900", "dark:bg-[#1d0d13]");
-        html = html.replace("dark:bg-slate-800", "dark:bg-[#2a1019]");
-        html = html.replace("dark:border-slate-800", "dark:border-[#54202f]");
-        html = html.replace("dark:border-slate-700", "dark:border-[#6b2435]");
-        html = html.replace("focus:border-slate-500", "focus:border-rose-500");
-        html = html.replace("focus:ring-slate-200", "focus:ring-rose-200/40");
-        html = html.replace("dark:focus:border-slate-400", "dark:focus:border-rose-400");
-        html = html.replace("dark:focus:ring-slate-500/30", "dark:focus:ring-rose-500/35");
-        html = html.replace("bg-slate-900", "bg-rose-700");
-        html = html.replace("hover:bg-slate-800", "hover:bg-rose-600");
-        html = html.replace("dark:bg-slate-100", "dark:bg-rose-500");
-        html = html.replace("dark:hover:bg-slate-200", "dark:hover:bg-rose-400");
-        html = html.replace("dark:text-slate-900", "dark:text-white");
-        html = html.replace("text-slate-500", "text-rose-700");
-        html = html.replace("dark:text-slate-400", "dark:text-rose-200/80");
-        html = html.replace("dark:text-slate-300", "dark:text-rose-100/85");
-    } else if branding.theme.eq_ignore_ascii_case("white") {
-        html = html.replace("#05080f", "#ffffff");
-        html = html.replace("#080f1a", "#f8fafc");
-        html = html.replace("rgba(84, 141, 214, 0.6)", "rgba(148, 163, 184, 0.2)");
-        html = html.replace("rgba(120, 170, 235, 0.75)", "rgba(100, 116, 139, 0.25)");
-        html = html.replace("dark:bg-slate-900", "dark:bg-white");
-        html = html.replace("dark:bg-slate-800", "dark:bg-slate-50");
-        html = html.replace("dark:border-slate-800", "dark:border-slate-200");
-        html = html.replace("dark:border-slate-700", "dark:border-slate-300");
-        html = html.replace("dark:text-slate-100", "dark:text-slate-900");
-        html = html.replace("dark:text-slate-400", "dark:text-slate-600");
-        html = html.replace("dark:text-slate-300", "dark:text-slate-700");
-        html = html.replace("dark:text-white", "dark:text-slate-900");
-    } else if branding.theme.eq_ignore_ascii_case("green") {
-        html = html.replace("#f1f5f9", "#f0fdf4");
-        html = html.replace("#e2e8f0", "#bbf7d0");
-        html = html.replace("#05080f", "#07130d");
-        html = html.replace("#080f1a", "#0b2016");
-        html = html.replace("rgba(59, 130, 246, 0.25)", "rgba(34, 197, 94, 0.3)");
-        html = html.replace("rgba(96, 165, 250, 0.35)", "rgba(16, 185, 129, 0.45)");
-    } else if branding.theme.eq_ignore_ascii_case("gold") {
-        html = html.replace("#f1f5f9", "#fffbeb");
-        html = html.replace("#e2e8f0", "#fde68a");
-        html = html.replace("#05080f", "#151006");
-        html = html.replace("#080f1a", "#221806");
-        html = html.replace("rgba(59, 130, 246, 0.25)", "rgba(245, 158, 11, 0.35)");
-        html = html.replace("rgba(96, 165, 250, 0.35)", "rgba(234, 179, 8, 0.45)");
-    }
-
-    if let Some(custom_css) = &branding.custom_css {
-        let style_tag = format!("\n<style id=\"ui-custom-css\">\n{}\n</style>\n</head>", custom_css);
-        html = html.replace("</head>", &style_tag);
     }
 
     html

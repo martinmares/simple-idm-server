@@ -11,6 +11,17 @@
   </div>
 </div>
 {% endif %}
+{% if let Some(link) = federated_link %}
+<div class="alert alert-blue d-flex align-items-center justify-content-between">
+  <div>
+    <strong>Federated invitation ready.</strong>
+    <span class="text-secondary ms-2">{{ link }}</span>
+  </div>
+  <div class="btn-list">
+    <a class="btn btn-sm btn-primary" href="{{ link }}" target="_blank" rel="noopener">Open invitation</a>
+  </div>
+</div>
+{% endif %}
 
 <div class="card mb-3">
   <div class="card-header d-flex align-items-center justify-content-between">
@@ -102,6 +113,30 @@
           {% if !r.is_active %}
           <span class="badge bg-red-lt mt-1">inactive</span>
           {% endif %}
+          {% if let Some(status) = r.federated_approval_status %}
+          <div class="mt-1">
+            {% if status == "approved" %}
+            <span class="badge bg-green-lt">federated approved</span>
+            {% else if status == "pending" %}
+            <span class="badge bg-yellow-lt">federated pending approval</span>
+            {% else if status == "rejected" %}
+            <span class="badge bg-red-lt">federated rejected</span>
+            {% else %}
+            <span class="badge bg-secondary-lt">{{ status }}</span>
+            {% endif %}
+          </div>
+          {% endif %}
+          {% if let Some(provider) = r.federated_provider_slug %}
+          <div class="small text-secondary mt-1">
+            provider: <code>{{ provider }}</code>
+            {% if let Some(provider_type) = r.federated_provider_type %}
+            <span class="ms-1">({{ provider_type }})</span>
+            {% endif %}
+          </div>
+          {% endif %}
+          {% if let Some(subject) = r.federated_subject %}
+          <div class="small text-secondary mt-1">sub: <code>{{ subject }}</code></div>
+          {% endif %}
           {% if let Some(note) = r.note %}
           <div class="small text-secondary mt-1">{{ note }}</div>
           {% endif %}
@@ -141,6 +176,18 @@
             <form method="post" action="/admin/ui/users/{{ r.id }}/ad-onboarding-link">
               <button class="btn btn-sm btn-outline-secondary" type="submit">AD onboarding link</button>
             </form>
+            {% endif %}
+            {% if r.auth_mode == "federated" %}
+            <form method="post" action="/admin/ui/users/{{ r.id }}/federated-invitation-link">
+              <button class="btn btn-sm btn-outline-primary" type="submit">Send invitation</button>
+            </form>
+            {% if let Some(status) = r.federated_approval_status %}
+              {% if status == "pending" %}
+              <form method="post" action="/admin/ui/users/{{ r.id }}/federated-approve">
+                <button class="btn btn-sm btn-outline-success" type="submit">Approve</button>
+              </form>
+              {% endif %}
+            {% endif %}
             {% endif %}
             <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate">
               <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>

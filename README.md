@@ -149,8 +149,7 @@ The `/oauth2/token` endpoint has stricter rate limiting by default to prevent br
 - `ALLOWED_EMAIL_DOMAINS` - Optional comma-separated whitelist of login email domains (default: empty = allow all)
 - `UI_BRAND_NAME` - Company/product name shown on login/reset/error pages (default: `Cloud App`)
 - `UI_BRAND_DOMAIN` - Optional domain/tenant hint for login page subtitle (default: empty)
-- `UI_THEME` - UI theme preset for auth pages (`blue`, `red`, `white`, `green`, `gold`; default: `blue`)
-- `UI_CUSTOM_CSS_PATH` - Optional path to CSS file injected into auth pages at runtime (default: empty)
+- `UI_PAGE_TITLE` - Browser page title used on auth pages (default: `Simple IDM`)
 - `IDP_SECRETS_MASTER_KEY` - Master key for encrypting federated IdP client secrets in DB (`identity_providers.client_secret_encrypted`)
 - `AD_AUTH_ROLE_SYNC_ENABLED` - Enable LDAP role sync after successful AD login (default: `true`)
 - `AD_AUTH_ROLE_SYNC_TTL_SECONDS` - Skip role refresh if cached sync is newer than TTL (default: `3600`)
@@ -161,8 +160,7 @@ CLI overrides for branding are also available:
 
 - `--ui-brand-name`
 - `--ui-brand-domain`
-- `--ui-theme`
-- `--ui-custom-css-path`
+- `--ui-page-title`
 
 ### Federated IdP Secret Encryption
 

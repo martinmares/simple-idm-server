@@ -83,8 +83,7 @@ pub struct SoftDeletePurgeConfig {
 pub struct UiConfig {
     pub brand_name: String,
     pub brand_domain: Option<String>,
-    pub theme: String,
-    pub custom_css_path: Option<String>,
+    pub page_title: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -240,13 +239,8 @@ impl Config {
             .ok()
             .map(|d| d.trim().to_string())
             .filter(|d| !d.is_empty());
-        let ui_theme = env::var("UI_THEME")
-            .unwrap_or_else(|_| "blue".to_string())
-            .to_lowercase();
-        let ui_custom_css_path = env::var("UI_CUSTOM_CSS_PATH")
-            .ok()
-            .map(|p| p.trim().to_string())
-            .filter(|p| !p.is_empty());
+        let ui_page_title =
+            env::var("UI_PAGE_TITLE").unwrap_or_else(|_| "Simple IDM".to_string());
 
         let allow_username_login = env::var("AUTH_ALLOW_USERNAME_LOGIN")
             .unwrap_or_else(|_| "true".to_string())
@@ -391,8 +385,7 @@ impl Config {
             ui: UiConfig {
                 brand_name: ui_brand_name,
                 brand_domain: ui_brand_domain,
-                theme: ui_theme,
-                custom_css_path: ui_custom_css_path,
+                page_title: ui_page_title,
             },
             identity: IdentityConfig {
                 allow_username_login,

@@ -79,8 +79,6 @@ struct OidcTokenResponse {
 #[derive(Debug, Deserialize)]
 struct OidcUserInfoResponse {
     sub: String,
-    email: Option<String>,
-    email_verified: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -750,6 +748,7 @@ pub async fn handle_federated_callback(
         WHERE ui.tenant_id = $1
           AND ui.idp_id = $2
           AND ui.subject = $3
+          AND COALESCE(ui.approval_status, 'approved') = 'approved'
           AND ui.deleted_at IS NULL
           AND u.deleted_at IS NULL
           AND u.is_active = true
@@ -764,42 +763,11 @@ pub async fn handle_federated_callback(
     {
         Ok(Some(u)) => u,
         Ok(None) => {
-            let email = userinfo.email.clone().unwrap_or_default().to_lowercase();
-            if email.is_empty() || !userinfo.email_verified.unwrap_or(false) {
-                return Html(templates::error_page("access_denied", "User not linked and verified email is missing")).into_response();
-            }
-            let existing = match sqlx::query_as::<_, User>(
-                r#"
-                SELECT * FROM users
-                WHERE tenant_id = $1 AND email = $2 AND deleted_at IS NULL AND is_active = true
-                LIMIT 1
-                "#,
-            )
-            .bind(idp.tenant_id)
-            .bind(&email)
-            .fetch_optional(&state.db_pool)
-            .await
-            {
-                Ok(Some(u)) => u,
-                _ => return Html(templates::error_page("access_denied", "User is not provisioned in Simple IDM")).into_response(),
-            };
-            let _ = sqlx::query(
-                r#"
-                INSERT INTO user_identities (tenant_id, user_id, idp_id, issuer, subject, email_at_link, email_verified, last_login_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-                ON CONFLICT DO NOTHING
-                "#,
-            )
-            .bind(idp.tenant_id)
-            .bind(existing.id)
-            .bind(idp.id)
-            .bind(&idp.issuer)
-            .bind(&userinfo.sub)
-            .bind(userinfo.email.clone())
-            .bind(userinfo.email_verified)
-            .execute(&state.db_pool)
-            .await;
-            existing
+            return Html(templates::error_page(
+                "access_denied",
+                "Federated identity is not linked or approved in Simple IDM",
+            ))
+            .into_response();
         }
         Err(_) => return Html(templates::error_page("server_error", "Database error while resolving federated identity")).into_response(),
     };

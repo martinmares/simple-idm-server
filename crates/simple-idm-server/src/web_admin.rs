@@ -15,13 +15,17 @@ use simple_idm_core::{
     admin::middleware::AdminAuth,
     db::{DbPool, models::User},
     oauth2::{self, OAuth2State},
+    secret_crypto::decrypt_secret,
 };
 use sha2::Digest;
 use sqlx::{FromRow, Row};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use tokio::sync::RwLock;
+use url::Url;
 use uuid::Uuid;
 
 const ADMIN_SESSION_COOKIE: &str = "sidm_admin_session";
@@ -34,6 +38,7 @@ pub struct WebAdminState {
     pub admin_auth: AdminAuth,
     pub secure_cookies: bool,
     pub ad_onboarding_token_ttl_seconds: i64,
+    pub federated_invitation_token_ttl_seconds: i64,
     pub admin_sessions: Arc<RwLock<HashMap<String, (String, DateTime<Utc>)>>>,
 }
 
@@ -162,6 +167,7 @@ struct PageQuery {
     message: Option<String>,
     error: Option<String>,
     ad_link: Option<String>,
+    federated_link: Option<String>,
     q: Option<String>,
     status: Option<String>,
     note: Option<String>,
@@ -183,6 +189,11 @@ struct AdOnboardingQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct FederatedOnboardingQuery {
+    token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct AdRolesQuery {
     message: Option<String>,
     error: Option<String>,
@@ -197,6 +208,54 @@ struct AdOnboardingTokenRow {
     created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct FederatedInvitationResolvedRow {
+    user_id: Uuid,
+    tenant_id: Uuid,
+    email: String,
+    is_active: bool,
+    auth_mode: String,
+    idp_id: Uuid,
+    provider_slug: String,
+    provider_type: String,
+    issuer: String,
+    client_id: String,
+    client_secret_encrypted: String,
+    auth_url: Option<String>,
+    token_url: Option<String>,
+    scopes: Vec<String>,
+    hd_domain: Option<String>,
+    token_hash: String,
+    expires_at: DateTime<Utc>,
+    used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize, serde::Serialize)]
+struct FederatedInviteStatePayload {
+    csrf: String,
+    token_hash: String,
+    provider_slug: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FederatedDiscoveryResponse {
+    authorization_endpoint: String,
+    token_endpoint: String,
+    userinfo_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FederatedTokenResponse {
+    access_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct FederatedUserInfoResponse {
+    sub: String,
+    email: Option<String>,
+    email_verified: Option<bool>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -274,6 +333,10 @@ struct UserRow {
     external_login_name: Option<String>,
     external_upn: Option<String>,
     external_last_seen_at: Option<DateTime<Utc>>,
+    federated_provider_slug: Option<String>,
+    federated_provider_type: Option<String>,
+    federated_subject: Option<String>,
+    federated_approval_status: Option<String>,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -406,6 +469,7 @@ struct UsersTemplate {
     message: Option<String>,
     error: Option<String>,
     ad_link: Option<String>,
+    federated_link: Option<String>,
     rows: Vec<UserRow>,
     ad_modal_data: Vec<UserAdMappingModalData>,
     ad_onboarding_tokens: Vec<AdOnboardingTokenView>,
@@ -420,6 +484,12 @@ struct UsersTemplate {
     prev_page_url: String,
     next_page_url: String,
     total_items: i64,
+}
+
+#[derive(Template)]
+#[template(path = "admin/federated_onboarding_complete.html")]
+struct FederatedOnboardingCompleteTemplate<'a> {
+    message: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -568,6 +638,11 @@ struct DashboardTemplate {
 pub fn router(state: WebAdminState) -> Router {
     Router::new()
         .route("/ad/onboarding", get(ad_onboarding_page).post(ad_onboarding_submit))
+        .route("/federated/onboarding", get(federated_onboarding_start))
+        .route(
+            "/federated/onboarding/{provider}/callback",
+            get(federated_onboarding_callback),
+        )
         .route("/admin/ui/static/users.js", get(users_js))
         .route("/admin/ui", get(ui_dashboard))
         .route("/admin/ui/", get(ui_dashboard))
@@ -594,6 +669,14 @@ pub fn router(state: WebAdminState) -> Router {
         .route(
             "/admin/ui/users/{id}/ad-onboarding-link",
             post(users_ad_onboarding_link),
+        )
+        .route(
+            "/admin/ui/users/{id}/federated-invitation-link",
+            post(users_federated_invitation_link),
+        )
+        .route(
+            "/admin/ui/users/{id}/federated-approve",
+            post(users_federated_approve),
         )
         .route("/admin/ui/groups", get(groups_page))
         .route("/admin/ui/groups/create", post(groups_create))
@@ -1452,6 +1535,96 @@ fn onboarding_token_hash(token: &str) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
 }
 
+fn build_federated_csrf_cookie(token: Option<&str>, secure: bool) -> String {
+    let value = token.unwrap_or("");
+    let mut cookie = format!(
+        "federated_invite_csrf={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
+        value,
+        if token.is_some() { 600 } else { 0 }
+    );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
+}
+
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+    raw.split(';')
+        .map(|part| part.trim())
+        .find_map(|part| part.strip_prefix(&format!("{name}=")))
+        .map(|v| v.to_string())
+}
+
+async fn resolve_federated_invitation(
+    db_pool: &DbPool,
+    raw_token: &str,
+) -> Result<Option<FederatedInvitationResolvedRow>, sqlx::Error> {
+    let token_hash = onboarding_token_hash(raw_token.trim());
+    sqlx::query_as::<_, FederatedInvitationResolvedRow>(
+        r#"
+        SELECT
+            u.id AS user_id,
+            u.tenant_id,
+            u.email,
+            u.is_active,
+            u.auth_mode,
+            ip.id AS idp_id,
+            ip.slug AS provider_slug,
+            ip.provider_type,
+            ip.issuer,
+            ip.client_id,
+            ip.client_secret_encrypted,
+            ip.auth_url,
+            ip.token_url,
+            ip.scopes,
+            ip.hd_domain,
+            t.token_hash,
+            t.expires_at,
+            t.used_at
+        FROM federated_invitation_tokens t
+        JOIN users u ON u.id = t.user_id
+        JOIN identity_providers ip ON ip.id = t.idp_id
+        WHERE t.token_hash = $1
+          AND u.deleted_at IS NULL
+          AND ip.deleted_at IS NULL
+          AND ip.is_active = true
+        LIMIT 1
+        "#,
+    )
+    .bind(token_hash)
+    .fetch_optional(db_pool)
+    .await
+}
+
+async fn resolve_federated_discovery(
+    row: &FederatedInvitationResolvedRow,
+) -> Result<FederatedDiscoveryResponse, String> {
+    if let (Some(auth), Some(token)) = (&row.auth_url, &row.token_url) {
+        return Ok(FederatedDiscoveryResponse {
+            authorization_endpoint: auth.clone(),
+            token_endpoint: token.clone(),
+            userinfo_endpoint: None,
+        });
+    }
+
+    let discovery_url = format!(
+        "{}/.well-known/openid-configuration",
+        row.issuer.trim_end_matches('/')
+    );
+    let resp = reqwest::Client::new()
+        .get(discovery_url)
+        .send()
+        .await
+        .map_err(|e| format!("OIDC discovery request failed: {e}"))?;
+    let resp = resp
+        .error_for_status()
+        .map_err(|e| format!("OIDC discovery non-success response: {e}"))?;
+    resp.json::<FederatedDiscoveryResponse>()
+        .await
+        .map_err(|e| format!("OIDC discovery parse failed: {e}"))
+}
+
 fn session_id_from_cookie(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get(header::COOKIE)?.to_str().ok()?;
     raw.split(';')
@@ -1887,6 +2060,425 @@ async fn ad_onboarding_submit(
     .into_response()
 }
 
+async fn federated_onboarding_start(
+    State(state): State<WebAdminState>,
+    Query(query): Query<FederatedOnboardingQuery>,
+) -> Response {
+    let Some(raw_token) = query.token.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+        return Html(simple_idm_core::oauth2::templates::error_page(
+            "invalid_request",
+            "Missing invitation token",
+        ))
+        .into_response();
+    };
+
+    let row = match resolve_federated_invitation(&state.db_pool, raw_token).await {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return Html(simple_idm_core::oauth2::templates::error_page(
+                "invalid_request",
+                "Invalid invitation token",
+            ))
+            .into_response()
+        }
+        Err(e) => {
+            return Html(simple_idm_core::oauth2::templates::error_page(
+                "server_error",
+                &format!("DB error: {e}"),
+            ))
+            .into_response()
+        }
+    };
+
+    if !row.is_active || !row.auth_mode.eq_ignore_ascii_case("federated") {
+        return Html(simple_idm_core::oauth2::templates::error_page(
+            "access_denied",
+            "User is not eligible for federated onboarding",
+        ))
+        .into_response();
+    }
+    if row.used_at.is_some() {
+        return Html(simple_idm_core::oauth2::templates::error_page(
+            "invalid_request",
+            "Invitation token was already used",
+        ))
+        .into_response();
+    }
+    if row.expires_at < Utc::now() {
+        return Html(simple_idm_core::oauth2::templates::error_page(
+            "invalid_request",
+            "Invitation token expired",
+        ))
+        .into_response();
+    }
+
+    let discovery = match resolve_federated_discovery(&row).await {
+        Ok(v) => v,
+        Err(e) => return Html(simple_idm_core::oauth2::templates::error_page("server_error", &e)).into_response(),
+    };
+
+    let csrf: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    let payload = FederatedInviteStatePayload {
+        csrf: csrf.clone(),
+        token_hash: row.token_hash.clone(),
+        provider_slug: row.provider_slug.clone(),
+    };
+    let state_token = match serde_json::to_vec(&payload) {
+        Ok(v) => URL_SAFE_NO_PAD.encode(v),
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to prepare federated onboarding state",
+            )
+                .into_response()
+        }
+    };
+
+    let issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let callback = format!(
+        "{}/federated/onboarding/{}/callback",
+        issuer.trim_end_matches('/'),
+        row.provider_slug
+    );
+    let mut auth_url = match Url::parse(&discovery.authorization_endpoint) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Invalid upstream authorization endpoint",
+            )
+                .into_response()
+        }
+    };
+    let scope = if row.scopes.is_empty() {
+        "openid profile email".to_string()
+    } else {
+        row.scopes.join(" ")
+    };
+    auth_url
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &row.client_id)
+        .append_pair("redirect_uri", &callback)
+        .append_pair("scope", &scope)
+        .append_pair("state", &state_token);
+    if let Some(domain) = &row.hd_domain {
+        auth_url.query_pairs_mut().append_pair("hd", domain);
+    }
+
+    let cookie = build_federated_csrf_cookie(Some(&csrf), state.secure_cookies);
+    ([(header::SET_COOKIE, cookie)], Redirect::to(auth_url.as_ref())).into_response()
+}
+
+async fn federated_onboarding_callback(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let code = match params.get("code").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        Some(v) => v.to_string(),
+        None => {
+            return (
+                StatusCode::BAD_REQUEST,
+                "Missing authorization code from upstream provider",
+            )
+                .into_response()
+        }
+    };
+    let state_token = match params.get("state").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, "Missing state parameter").into_response(),
+    };
+
+    let payload: FederatedInviteStatePayload = match URL_SAFE_NO_PAD
+        .decode(state_token)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+    {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, "Invalid state parameter").into_response(),
+    };
+
+    if payload.provider_slug != provider {
+        return (StatusCode::BAD_REQUEST, "Provider mismatch").into_response();
+    }
+
+    let cookie_csrf = cookie_value(&headers, "federated_invite_csrf").unwrap_or_default();
+    if cookie_csrf.is_empty() || cookie_csrf != payload.csrf {
+        return (StatusCode::BAD_REQUEST, "CSRF verification failed").into_response();
+    }
+
+    let row = match sqlx::query_as::<_, FederatedInvitationResolvedRow>(
+        r#"
+        SELECT
+            u.id AS user_id,
+            u.tenant_id,
+            u.email,
+            u.is_active,
+            u.auth_mode,
+            ip.id AS idp_id,
+            ip.slug AS provider_slug,
+            ip.provider_type,
+            ip.issuer,
+            ip.client_id,
+            ip.client_secret_encrypted,
+            ip.auth_url,
+            ip.token_url,
+            ip.scopes,
+            ip.hd_domain,
+            t.token_hash,
+            t.expires_at,
+            t.used_at
+        FROM federated_invitation_tokens t
+        JOIN users u ON u.id = t.user_id
+        JOIN identity_providers ip ON ip.id = t.idp_id
+        WHERE t.token_hash = $1
+          AND ip.slug = $2
+          AND u.deleted_at IS NULL
+          AND ip.deleted_at IS NULL
+          AND ip.is_active = true
+        LIMIT 1
+        "#,
+    )
+    .bind(&payload.token_hash)
+    .bind(provider.trim())
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => return (StatusCode::BAD_REQUEST, "Invalid invitation token").into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response(),
+    };
+
+    if row.used_at.is_some() {
+        return (StatusCode::BAD_REQUEST, "Invitation token was already used").into_response();
+    }
+    if row.expires_at < Utc::now() {
+        return (StatusCode::BAD_REQUEST, "Invitation token expired").into_response();
+    }
+    if !row.is_active || !row.auth_mode.eq_ignore_ascii_case("federated") {
+        return (StatusCode::BAD_REQUEST, "User is not eligible for federated onboarding").into_response();
+    }
+
+    let discovery = match resolve_federated_discovery(&row).await {
+        Ok(v) => v,
+        Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
+    };
+
+    let issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let callback = format!(
+        "{}/federated/onboarding/{}/callback",
+        issuer.trim_end_matches('/'),
+        provider.trim()
+    );
+    let client_secret = match decrypt_secret(&row.client_secret_encrypted) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to decrypt upstream client secret: {e}"),
+            )
+                .into_response()
+        }
+    };
+
+    let token_resp = {
+        let resp = match reqwest::Client::new()
+            .post(&discovery.token_endpoint)
+            .form(&[
+                ("grant_type", "authorization_code"),
+                ("code", code.as_str()),
+                ("redirect_uri", callback.as_str()),
+                ("client_id", row.client_id.as_str()),
+                ("client_secret", client_secret.as_str()),
+            ])
+            .send()
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to exchange code with upstream IdP: {e}"),
+                )
+                    .into_response()
+            }
+        };
+        let resp = match resp.error_for_status() {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Upstream IdP rejected token request: {e}"),
+                )
+                    .into_response()
+            }
+        };
+        match resp.json::<FederatedTokenResponse>().await {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to parse token response: {e}"),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    let userinfo_endpoint = match discovery.userinfo_endpoint {
+        Some(v) => v,
+        None => {
+            return (
+                StatusCode::BAD_GATEWAY,
+                "Upstream IdP userinfo endpoint is missing",
+            )
+                .into_response()
+        }
+    };
+    let userinfo = {
+        let resp = match reqwest::Client::new()
+            .get(&userinfo_endpoint)
+            .bearer_auth(&token_resp.access_token)
+            .send()
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to load userinfo from upstream IdP: {e}"),
+                )
+                    .into_response()
+            }
+        };
+        let resp = match resp.error_for_status() {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Upstream IdP rejected userinfo request: {e}"),
+                )
+                    .into_response()
+            }
+        };
+        match resp.json::<FederatedUserInfoResponse>().await {
+            Ok(v) => v,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to parse userinfo from upstream IdP: {e}"),
+                )
+                    .into_response()
+            }
+        }
+    };
+
+    let email = userinfo.email.clone().unwrap_or_default().trim().to_lowercase();
+    if email.is_empty() || !userinfo.email_verified.unwrap_or(false) {
+        return (
+            StatusCode::FORBIDDEN,
+            "Verified email is required for federated onboarding",
+        )
+            .into_response();
+    }
+    if email != row.email.to_lowercase() {
+        return (
+            StatusCode::FORBIDDEN,
+            "Google account email does not match the invited Simple IDM user",
+        )
+            .into_response();
+    }
+
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response(),
+    };
+
+    if let Err(e) = sqlx::query(
+        r#"
+        INSERT INTO user_identities (
+            tenant_id, user_id, idp_id, issuer, subject, email_at_link, email_verified,
+            last_login_at, approval_status
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), 'pending')
+        ON CONFLICT (tenant_id, issuer, subject)
+        WHERE deleted_at IS NULL
+        DO UPDATE SET
+            email_at_link = EXCLUDED.email_at_link,
+            email_verified = EXCLUDED.email_verified,
+            last_login_at = NOW(),
+            approval_status = CASE
+                WHEN user_identities.approval_status = 'approved' THEN 'approved'
+                ELSE 'pending'
+            END,
+            approved_at = CASE
+                WHEN user_identities.approval_status = 'approved' THEN user_identities.approved_at
+                ELSE NULL
+            END,
+            rejected_at = NULL,
+            updated_at = NOW()
+        "#,
+    )
+    .bind(row.tenant_id)
+    .bind(row.user_id)
+    .bind(row.idp_id)
+    .bind(&row.issuer)
+    .bind(&userinfo.sub)
+    .bind(&email)
+    .bind(userinfo.email_verified)
+    .execute(&mut *tx)
+    .await
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response();
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE federated_invitation_tokens SET used_at = NOW() WHERE token_hash = $1",
+    )
+    .bind(&row.token_hash)
+    .execute(&mut *tx)
+    .await
+    {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response();
+    }
+
+    if let Err(e) = tx.commit().await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response();
+    }
+
+    simple_idm_core::audit::emit_event(
+        &state.db_pool,
+        "federated.onboarding.complete",
+        "user_identities",
+        Some(row.user_id),
+        "success",
+        Some(json!({
+            "provider": row.provider_slug,
+            "provider_type": row.provider_type,
+            "issuer": row.issuer,
+            "subject": userinfo.sub,
+            "email": email
+        })),
+    )
+    .await;
+
+    let clear_cookie = build_federated_csrf_cookie(None, state.secure_cookies);
+    let body = render_template(FederatedOnboardingCompleteTemplate {
+        message: "Federated onboarding completed. Waiting for admin approval.",
+    });
+    let mut response = body;
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, clear_cookie.parse().unwrap());
+    response
+}
+
 async fn users_page(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -2015,12 +2607,30 @@ async fn users_page(
              uei.external_user_id_type,
              uei.login_name AS external_login_name,
              uei.upn AS external_upn,
-             uei.last_seen_at AS external_last_seen_at
+             uei.last_seen_at AS external_last_seen_at,
+             fui.federated_provider_slug,
+             fui.federated_provider_type,
+             fui.federated_subject,
+             fui.federated_approval_status
            FROM users
            LEFT JOIN user_external_identities uei
              ON uei.user_id = users.id
             AND uei.source = 'ad'
             AND uei.deleted_at IS NULL
+           LEFT JOIN LATERAL (
+             SELECT
+               ip.slug AS federated_provider_slug,
+               ip.provider_type AS federated_provider_type,
+               ui.subject AS federated_subject,
+               ui.approval_status AS federated_approval_status
+             FROM user_identities ui
+             JOIN identity_providers ip ON ip.id = ui.idp_id
+             WHERE ui.user_id = users.id
+               AND ui.deleted_at IS NULL
+               AND ip.deleted_at IS NULL
+             ORDER BY ui.updated_at DESC, ui.created_at DESC
+             LIMIT 1
+           ) fui ON TRUE
            WHERE users.deleted_at IS NULL
              AND (
                cardinality($1::text[]) = 0 OR
@@ -2272,6 +2882,7 @@ async fn users_page(
         message: query.message,
         error: query.error,
         ad_link: query.ad_link,
+        federated_link: query.federated_link,
         rows,
         ad_modal_data,
         ad_onboarding_tokens,
@@ -3114,6 +3725,181 @@ async fn users_ad_onboarding_link(
             )
             .into_response()
         }
+    }
+}
+
+async fn users_federated_invitation_link(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let return_path = users_return_path_from_referer(&headers);
+    let user = match sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL LIMIT 1",
+    )
+    .bind(id)
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(u)) => u,
+        Ok(None) => return redirect_with(&return_path, "error", "User not found").into_response(),
+        Err(e) => {
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response()
+        }
+    };
+
+    if !user.auth_mode.eq_ignore_ascii_case("federated") {
+        return redirect_with(
+            &return_path,
+            "error",
+            "Federated invitation is available only for auth type 'federated'",
+        )
+        .into_response();
+    }
+
+    let providers = match sqlx::query_as::<_, (Uuid, String, String)>(
+        r#"
+        SELECT id, slug, provider_type
+        FROM identity_providers
+        WHERE tenant_id = $1
+          AND is_active = true
+          AND deleted_at IS NULL
+        ORDER BY slug ASC
+        "#,
+    )
+    .bind(user.tenant_id)
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response()
+        }
+    };
+
+    let Some((idp_id, provider_slug, provider_type)) = (match providers.len() {
+        1 => providers.into_iter().next(),
+        0 => None,
+        _ => {
+            return redirect_with(
+                &return_path,
+                "error",
+                "Multiple active federated providers found. Provider selection UI is not implemented yet.",
+            )
+            .into_response()
+        }
+    }) else {
+        return redirect_with(&return_path, "error", "No active federated provider configured").into_response();
+    };
+
+    let raw_token = random_onboarding_token();
+    let token_hash = onboarding_token_hash(&raw_token);
+    let expires_at =
+        Utc::now() + chrono::Duration::seconds(state.federated_invitation_token_ttl_seconds);
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO federated_invitation_tokens (user_id, idp_id, token_hash, expires_at)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(id)
+    .bind(idp_id)
+    .bind(token_hash)
+    .bind(expires_at)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            let link = format!(
+                "/federated/onboarding?token={}",
+                urlencoding::encode(&raw_token)
+            );
+            let msg = format!(
+                "Federated invitation generated via {} ({})",
+                provider_slug, provider_type
+            );
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "federated.invitation.create",
+                "federated_invitation_tokens",
+                Some(id),
+                "success",
+                Some(json!({
+                    "provider": provider_slug,
+                    "provider_type": provider_type,
+                    "expires_at": expires_at.to_rfc3339()
+                })),
+            )
+            .await;
+            Redirect::to(&format!(
+                "{}{}message={}&federated_link={}",
+                return_path,
+                if return_path.contains('?') { "&" } else { "?" },
+                urlencoding::encode(&msg),
+                urlencoding::encode(&link)
+            ))
+            .into_response()
+        }
+        Err(e) => {
+            redirect_with(
+                &return_path,
+                "error",
+                &format!("Failed to generate federated invitation: {e}"),
+            )
+            .into_response()
+        }
+    }
+}
+
+async fn users_federated_approve(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let return_path = users_return_path_from_referer(&headers);
+    let result = sqlx::query(
+        r#"
+        UPDATE user_identities
+        SET approval_status = 'approved',
+            approved_at = NOW(),
+            rejected_at = NULL,
+            updated_at = NOW()
+        WHERE user_id = $1
+          AND deleted_at IS NULL
+          AND approval_status = 'pending'
+        "#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "federated.identity.approve",
+                "user_identities",
+                Some(id),
+                "success",
+                Some(json!({"approved_rows": done.rows_affected()})),
+            )
+            .await;
+            redirect_with(&return_path, "message", "Federated identity approved").into_response()
+        }
+        Ok(_) => redirect_with(&return_path, "error", "No pending federated identity found")
+            .into_response(),
+        Err(e) => redirect_with(&return_path, "error", &format!("Approve failed: {e}"))
+            .into_response(),
     }
 }
 
