@@ -5,9 +5,9 @@ members = [
     "crates/simple-idm-ad-auth",
     "crates/simple-idm-ldap-sync",
     "crates/simple-idm-server",
-    "crates/simple-idm-ctl-app",
-    "crates/simple-idm-oauth2-proxy-app",
-    "crates/simple-idm-ssh-login-app",
-    "crates/simple-idm-ssh-signer-app",
+    "crates/simple-idm-ctl",
+    "crates/simple-idm-oauth2-proxy",
+    "crates/simple-idm-ssh-login",
+    "crates/simple-idm-ssh-signer",
 ]
 resolver = "2"

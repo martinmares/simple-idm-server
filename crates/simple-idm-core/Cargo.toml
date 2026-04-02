@@ -25,12 +25,12 @@ serde_urlencoded = "0.7"
 jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
 argon2 = "0.5"
-uuid = { version = "1.21", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }
 rand = "0.10"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 rsa = { version = "0.9", features = ["pem"] }
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 tabled = "0.20"
 
 # Time handling
@@ -39,7 +39,7 @@ chrono = { version = "0.4", features = ["serde"] }
 # Config & Env
 dotenvy = "0.15"
 config = "0.15"
-toml = "1.0"
+toml = "1.1"
 
 # Logging
 tracing = "0.1"
@@ -52,7 +52,7 @@ anyhow = "1.0"
 # Validation
 validator = { version = "0.20", features = ["derive"] }
 regex = "1.12"
-tempfile = "3.25"
+tempfile = "3.27"
 
 # HTTP client (for OIDC discovery)
 reqwest = { version = "0.13", features = ["json", "form"] }
@@ -79,5 +79,5 @@ simple-idm-ldap-sync = { path = "../simple-idm-ldap-sync" }
 tokio-test = "0.4"
 reqwest = { version = "0.13", features = ["json", "form", "cookies"] }
 chrono = { version = "0.4", features = ["serde"] }
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
