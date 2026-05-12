@@ -51,7 +51,10 @@ fn apply_branding(mut html: String) -> String {
 
     html = html.replace("Cloud App SSO", &page_title);
     html = html.replace("Cloud App", &brand_name);
-    html = html.replace("you@company.com", &format!("user@{}", brand_name.to_lowercase()));
+    html = html.replace(
+        "you@company.com",
+        &format!("user@{}", brand_name.to_lowercase()),
+    );
     html = html.replace(
         "<div class=\"mb-6\">",
         &format!(

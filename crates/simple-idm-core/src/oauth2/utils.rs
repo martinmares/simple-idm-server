@@ -1,6 +1,6 @@
-use axum::http::{header, HeaderMap};
-use base64::Engine as _;
 use crate::db::models::OAuthClient;
+use axum::http::{HeaderMap, header};
+use base64::Engine as _;
 use sqlx::PgPool;
 
 #[derive(Debug)]

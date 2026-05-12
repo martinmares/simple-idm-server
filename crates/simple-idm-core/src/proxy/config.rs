@@ -119,7 +119,9 @@ impl Config {
         }
 
         // Validate URLs
-        if !self.public_base_url.starts_with("http://") && !self.public_base_url.starts_with("https://") {
+        if !self.public_base_url.starts_with("http://")
+            && !self.public_base_url.starts_with("https://")
+        {
             anyhow::bail!("public_base_url must start with http:// or https://");
         }
 

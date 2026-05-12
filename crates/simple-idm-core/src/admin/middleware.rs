@@ -1,15 +1,15 @@
 use crate::auth::JwtService;
 use crate::config::Config;
 use crate::db::DbPool;
-use sqlx;
 use axum::{
+    Json,
     extract::{Request, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use serde::Serialize;
+use sqlx;
 use std::sync::Arc;
 
 #[derive(Debug, Serialize)]
@@ -99,7 +99,7 @@ pub async fn admin_auth_middleware(
                     error_description: "No active audiences available".to_string(),
                 }),
             )
-                .into_response())
+                .into_response());
         }
     };
 
@@ -115,9 +115,7 @@ pub async fn admin_auth_middleware(
             }
 
             // 2. Optional backward compatibility for old "admin" group
-            if admin_auth.allow_legacy_admin_group
-                && claims.groups.contains(&"admin".to_string())
-            {
+            if admin_auth.allow_legacy_admin_group && claims.groups.contains(&"admin".to_string()) {
                 tracing::warn!(
                     "User has deprecated 'admin' group - please migrate to 'simple-idm:role:admin'"
                 );
@@ -138,8 +136,9 @@ pub async fn admin_auth_middleware(
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
                     error: "forbidden".to_string(),
-                    error_description: "Insufficient permissions - admin group or admin claims required"
-                        .to_string(),
+                    error_description:
+                        "Insufficient permissions - admin group or admin claims required"
+                            .to_string(),
                 }),
             )
                 .into_response())

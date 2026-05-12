@@ -25,7 +25,7 @@ pub async fn cleanup_device_codes(pool: &DbPool) {
 
     // Smaž staré verification attempts (starší než 1 hodinu)
     let attempts_result = sqlx::query(
-        "DELETE FROM device_verification_attempts WHERE failed_at < NOW() - INTERVAL '1 hour'"
+        "DELETE FROM device_verification_attempts WHERE failed_at < NOW() - INTERVAL '1 hour'",
     )
     .execute(pool)
     .await;

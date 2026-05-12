@@ -115,7 +115,11 @@ pub async fn purge_soft_deleted(pool: &PgPool, retention_days: i64) {
     ];
 
     for (name, statement) in statements {
-        match sqlx::query(statement).bind(retention_days).execute(pool).await {
+        match sqlx::query(statement)
+            .bind(retention_days)
+            .execute(pool)
+            .await
+        {
             Ok(result) => {
                 let affected = result.rows_affected();
                 total_deleted += affected;
@@ -128,11 +132,7 @@ pub async fn purge_soft_deleted(pool: &PgPool, retention_days: i64) {
                 }
             }
             Err(error) => {
-                tracing::warn!(
-                    "Soft-delete purge failed on table {}: {}",
-                    name,
-                    error
-                );
+                tracing::warn!("Soft-delete purge failed on table {}: {}", name, error);
             }
         }
     }

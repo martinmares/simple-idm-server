@@ -1,8 +1,12 @@
 use crate::db::models::User;
 use crate::oauth2::client_credentials::OAuth2State;
-use anyhow::{anyhow, Result};
+use crate::secret_crypto::decrypt_secret;
+use anyhow::{Result, anyhow};
 use chrono::{Duration, Utc};
-use simple_idm_ldap_sync::{apply_role_mappings, ExternalRoleMapping, MappingMode, MappingTarget, SyncInput};
+use simple_idm_ad_auth::{LdapAuthConfig, LdapTlsMode};
+use simple_idm_ldap_sync::{
+    ExternalRoleMapping, MappingMode, MappingTarget, SyncInput, apply_role_mappings,
+};
 use sqlx::Row;
 use std::collections::HashSet;
 use std::time::Duration as StdDuration;
@@ -11,42 +15,133 @@ use tracing::{info, warn};
 
 const SOURCE_AD: &str = "ad";
 
-pub async fn sync_ldap_roles_if_stale(
-    state: &OAuth2State,
-    user: &User,
-    login: &str,
-) -> Result<()> {
-    sync_ldap_roles_internal(state, user, login, false).await
+pub struct AdLdapProvider {
+    pub id: uuid::Uuid,
+    pub config: LdapAuthConfig,
+    pub role_sync_enabled: bool,
+    pub role_sync_ttl_seconds: u64,
+    pub role_sync_timeout_seconds: u64,
 }
 
-pub async fn sync_ldap_roles_force(
+pub async fn load_ad_ldap_provider(
+    db: &sqlx::PgPool,
+    idp_id: uuid::Uuid,
+) -> Result<AdLdapProvider> {
+    let row = sqlx::query(
+        r#"
+        SELECT
+          c.host,
+          c.port,
+          c.base_dn,
+          c.user_filter,
+          c.tls_mode,
+          c.timeout_seconds,
+          c.allow_insecure,
+          c.bind_dn,
+          c.bind_password_encrypted,
+          c.role_sync_enabled,
+          c.role_sync_ttl_seconds,
+          c.role_sync_timeout_seconds
+        FROM identity_providers ip
+        JOIN identity_provider_ad_ldap_configs c ON c.idp_id = ip.id
+        WHERE ip.id = $1
+          AND ip.provider_type = 'ad_ldap'
+          AND ip.is_active = true
+          AND ip.deleted_at IS NULL
+        "#,
+    )
+    .bind(idp_id)
+    .fetch_optional(db)
+    .await?
+    .ok_or_else(|| anyhow!("AD/LDAP identity provider not found or inactive"))?;
+
+    let tls_mode_str = row.try_get::<String, _>("tls_mode")?;
+    let tls_mode = match tls_mode_str.as_str() {
+        "ldaps" => LdapTlsMode::Ldaps,
+        "starttls" => LdapTlsMode::StartTls,
+        other => return Err(anyhow!("Unsupported LDAP TLS mode: {other}")),
+    };
+    let bind_password = row
+        .try_get::<Option<String>, _>("bind_password_encrypted")?
+        .as_deref()
+        .map(decrypt_secret)
+        .transpose()?;
+
+    Ok(AdLdapProvider {
+        id: idp_id,
+        config: LdapAuthConfig {
+            host: row.try_get("host")?,
+            port: row.try_get::<i32, _>("port")? as u16,
+            base_dn: row.try_get("base_dn")?,
+            bind_dn: row.try_get("bind_dn")?,
+            bind_password,
+            user_filter: row.try_get("user_filter")?,
+            tls_mode,
+            timeout_seconds: row.try_get::<i64, _>("timeout_seconds")? as u64,
+            allow_insecure: row.try_get("allow_insecure")?,
+        },
+        role_sync_enabled: row.try_get("role_sync_enabled")?,
+        role_sync_ttl_seconds: row.try_get::<i64, _>("role_sync_ttl_seconds")? as u64,
+        role_sync_timeout_seconds: row.try_get::<i64, _>("role_sync_timeout_seconds")? as u64,
+    })
+}
+
+pub async fn load_ad_ldap_provider_for_user(
+    state: &OAuth2State,
+    user: &User,
+) -> Result<Option<AdLdapProvider>> {
+    if !user.auth_mode.eq_ignore_ascii_case("ad") {
+        return Ok(None);
+    }
+    let Some(idp_id) = user.auth_provider_id else {
+        return Err(anyhow!("AD user has no auth_provider_id"));
+    };
+    load_ad_ldap_provider(&state.db_pool, idp_id)
+        .await
+        .map(Some)
+}
+
+pub async fn sync_ldap_roles_if_stale(state: &OAuth2State, user: &User, login: &str) -> Result<()> {
+    let Some(provider) = load_ad_ldap_provider_for_user(state, user).await? else {
+        return Ok(());
+    };
+    sync_ldap_roles_internal(state, user, login, &provider, false).await
+}
+
+pub async fn sync_ldap_roles_force(state: &OAuth2State, user: &User, login: &str) -> Result<()> {
+    let Some(provider) = load_ad_ldap_provider_for_user(state, user).await? else {
+        return Ok(());
+    };
+    sync_ldap_roles_internal(state, user, login, &provider, true).await
+}
+
+pub async fn sync_ldap_roles_force_with_provider(
     state: &OAuth2State,
     user: &User,
     login: &str,
+    provider: &AdLdapProvider,
 ) -> Result<()> {
-    sync_ldap_roles_internal(state, user, login, true).await
+    sync_ldap_roles_internal(state, user, login, provider, true).await
 }
 
 async fn sync_ldap_roles_internal(
     state: &OAuth2State,
     user: &User,
     login: &str,
+    provider: &AdLdapProvider,
     force: bool,
 ) -> Result<()> {
-    if !state.ldap_role_sync_enabled {
+    if !provider.role_sync_enabled {
         return Ok(());
     }
-    let cfg = match &state.ldap_auth {
-        Some(v) => v,
-        None => return Ok(()),
-    };
-    let ttl = Duration::seconds(state.ldap_role_sync_ttl_seconds as i64);
+    let ttl = Duration::seconds(provider.role_sync_ttl_seconds as i64);
 
     let row = sqlx::query(
-        "SELECT last_synced_at FROM user_external_role_sync_state WHERE user_id = $1 AND source = $2",
+        "SELECT last_synced_at FROM user_external_role_sync_state WHERE user_id = $1 AND source = $2 AND idp_id = $3",
     )
     .bind(user.id)
     .bind(SOURCE_AD)
+    .bind(provider.id)
     .fetch_optional(&state.db_pool)
     .await?;
 
@@ -62,18 +157,30 @@ async fn sync_ldap_roles_internal(
     }
 
     let ldap_data = match timeout(
-        StdDuration::from_secs(state.ldap_role_sync_timeout_seconds),
-        simple_idm_ad_auth::fetch_ldap_user_data(cfg, login),
+        StdDuration::from_secs(provider.role_sync_timeout_seconds),
+        simple_idm_ad_auth::fetch_ldap_user_data(&provider.config, login),
     )
     .await
     {
         Ok(Ok(v)) => v,
         Ok(Err(e)) => {
-            persist_sync_error(&state.db_pool, user.id, format!("LDAP role fetch failed: {e}")).await?;
+            persist_sync_error(
+                &state.db_pool,
+                user.id,
+                provider.id,
+                format!("LDAP role fetch failed: {e}"),
+            )
+            .await?;
             return Err(anyhow!("LDAP role fetch failed: {e}"));
         }
         Err(_) => {
-            persist_sync_error(&state.db_pool, user.id, "LDAP role fetch timeout".to_string()).await?;
+            persist_sync_error(
+                &state.db_pool,
+                user.id,
+                provider.id,
+                "LDAP role fetch timeout".to_string(),
+            )
+            .await?;
             return Err(anyhow!("LDAP role fetch timeout"));
         }
     };
@@ -81,19 +188,23 @@ async fn sync_ldap_roles_internal(
     let roles_set: HashSet<String> = ldap_data.roles.into_iter().collect();
     let mut tx = state.db_pool.begin().await?;
 
-    sqlx::query("DELETE FROM user_external_roles WHERE user_id = $1 AND source = $2")
-        .bind(user.id)
-        .bind(SOURCE_AD)
-        .execute(&mut *tx)
-        .await?;
+    sqlx::query(
+        "DELETE FROM user_external_roles WHERE user_id = $1 AND source = $2 AND idp_id = $3",
+    )
+    .bind(user.id)
+    .bind(SOURCE_AD)
+    .bind(provider.id)
+    .execute(&mut *tx)
+    .await?;
 
     for role in &roles_set {
         sqlx::query(
-            "INSERT INTO user_external_roles (user_id, source, role_name, synced_at) VALUES ($1, $2, $3, NOW())",
+            "INSERT INTO user_external_roles (user_id, source, role_name, synced_at, idp_id) VALUES ($1, $2, $3, NOW(), $4)",
         )
         .bind(user.id)
         .bind(SOURCE_AD)
         .bind(role)
+        .bind(provider.id)
         .execute(&mut *tx)
         .await?;
     }
@@ -104,6 +215,7 @@ async fn sync_ldap_roles_internal(
         FROM external_role_mappings
         WHERE tenant_id = $1
           AND source = $2
+          AND idp_id = $3
           AND is_active = true
           AND deleted_at IS NULL
         ORDER BY priority ASC
@@ -111,6 +223,7 @@ async fn sync_ldap_roles_internal(
     )
     .bind(user.tenant_id)
     .bind(SOURCE_AD)
+    .bind(provider.id)
     .fetch_all(&mut *tx)
     .await?;
 
@@ -211,10 +324,10 @@ async fn sync_ldap_roles_internal(
     sqlx::query(
         r#"
         INSERT INTO user_external_identities
-          (tenant_id, user_id, source, external_user_id, external_user_id_type, login_name, upn, last_seen_at, updated_at)
+          (tenant_id, user_id, source, external_user_id, external_user_id_type, login_name, upn, last_seen_at, updated_at, idp_id)
         VALUES
-          ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-        ON CONFLICT (tenant_id, source, external_user_id)
+          ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW(), $8)
+        ON CONFLICT (tenant_id, idp_id, source, external_user_id)
         WHERE deleted_at IS NULL
         DO UPDATE SET
           user_id = EXCLUDED.user_id,
@@ -227,11 +340,12 @@ async fn sync_ldap_roles_internal(
     )
     .bind(user.tenant_id)
     .bind(user.id)
-    .bind(SOURCE_AD)
+        .bind(SOURCE_AD)
     .bind(external_user_id)
     .bind(external_user_id_type)
     .bind(login_name)
     .bind(upn)
+    .bind(provider.id)
     .execute(&mut *tx)
     .await?;
 
@@ -245,14 +359,15 @@ async fn sync_ldap_roles_internal(
 
     sqlx::query(
         r#"
-        INSERT INTO user_external_role_sync_state (user_id, source, last_synced_at, last_error, updated_at)
-        VALUES ($1, $2, NOW(), NULL, NOW())
-        ON CONFLICT (user_id, source)
+        INSERT INTO user_external_role_sync_state (user_id, source, last_synced_at, last_error, updated_at, idp_id)
+        VALUES ($1, $2, NOW(), NULL, NOW(), $3)
+        ON CONFLICT (user_id, source, idp_id)
         DO UPDATE SET last_synced_at = EXCLUDED.last_synced_at, last_error = NULL, updated_at = NOW()
         "#,
     )
     .bind(user.id)
     .bind(SOURCE_AD)
+    .bind(provider.id)
     .execute(&mut *tx)
     .await?;
 
@@ -271,20 +386,22 @@ async fn sync_ldap_roles_internal(
 async fn persist_sync_error(
     db: &sqlx::PgPool,
     user_id: uuid::Uuid,
+    idp_id: uuid::Uuid,
     err: String,
 ) -> Result<()> {
     warn!(user_id = %user_id, "AD role sync failed: {}", err);
     sqlx::query(
         r#"
-        INSERT INTO user_external_role_sync_state (user_id, source, last_synced_at, last_error, updated_at)
-        VALUES ($1, $2, NULL, $3, NOW())
-        ON CONFLICT (user_id, source)
+        INSERT INTO user_external_role_sync_state (user_id, source, last_synced_at, last_error, updated_at, idp_id)
+        VALUES ($1, $2, NULL, $3, NOW(), $4)
+        ON CONFLICT (user_id, source, idp_id)
         DO UPDATE SET last_error = EXCLUDED.last_error, updated_at = NOW()
         "#,
     )
     .bind(user_id)
     .bind(SOURCE_AD)
     .bind(err)
+    .bind(idp_id)
     .execute(db)
     .await?;
     Ok(())

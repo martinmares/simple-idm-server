@@ -1,10 +1,10 @@
 use chrono::{Duration, Utc};
 use jsonwebtoken::{
-    decode, decode_header, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation,
+    Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, decode_header, encode,
 };
+use rsa::RsaPublicKey;
 use rsa::pkcs8::DecodePublicKey;
 use rsa::traits::PublicKeyParts;
-use rsa::RsaPublicKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -29,11 +29,11 @@ pub enum JwtError {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
-    pub sub: String,           // Subject (user ID)
-    pub iss: String,           // Issuer
-    pub aud: Vec<String>,      // Audience (client IDs)
-    pub exp: i64,              // Expiration time
-    pub iat: i64,              // Issued at
+    pub sub: String,      // Subject (user ID)
+    pub iss: String,      // Issuer
+    pub aud: Vec<String>, // Audience (client IDs)
+    pub exp: i64,         // Expiration time
+    pub iat: i64,         // Issued at
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>, // OIDC nonce (ID token only)
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -41,7 +41,7 @@ pub struct Claims {
     pub email: Option<String>, // User email
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_username: Option<String>,
-    pub groups: Vec<String>,   // User groups
+    pub groups: Vec<String>, // User groups
     #[serde(flatten)]
     pub custom_claims: HashMap<String, serde_json::Value>, // Custom claim maps
 }
@@ -83,9 +83,13 @@ impl JwtService {
             }
             let additional_pem = fs::read(&path)
                 .map_err(|e| JwtError::KeyFileError(format!("Public key ({}): {}", path, e)))?;
-            let additional_decoding_key = DecodingKey::from_rsa_pem(&additional_pem).map_err(|e| {
-                JwtError::KeyFileError(format!("Invalid additional public key ({}): {}", path, e))
-            })?;
+            let additional_decoding_key =
+                DecodingKey::from_rsa_pem(&additional_pem).map_err(|e| {
+                    JwtError::KeyFileError(format!(
+                        "Invalid additional public key ({}): {}",
+                        path, e
+                    ))
+                })?;
             decoding_keys.insert(kid.clone(), additional_decoding_key);
             public_key_paths.push((kid, path));
         }
@@ -170,17 +174,14 @@ impl JwtService {
             .map_err(|e| JwtError::EncodeError(e.to_string()))
     }
 
-    fn decode_token_without_audience_validation(
-        &self,
-        token: &str,
-    ) -> Result<Claims, JwtError> {
+    fn decode_token_without_audience_validation(&self, token: &str) -> Result<Claims, JwtError> {
         let header = decode_header(token)
             .map_err(|e| JwtError::DecodeError(format!("Invalid token header: {}", e)))?;
 
         let decoding_key = if let Some(kid) = header.kid {
-            self.decoding_keys.get(&kid).ok_or_else(|| {
-                JwtError::DecodeError(format!("Unknown key id (kid): {}", kid))
-            })?
+            self.decoding_keys
+                .get(&kid)
+                .ok_or_else(|| JwtError::DecodeError(format!("Unknown key id (kid): {}", kid)))?
         } else {
             &self.active_decoding_key
         };
@@ -258,7 +259,11 @@ impl JwtService {
             })?;
             let n = public_key.n().to_bytes_be();
             let e = public_key.e().to_bytes_be();
-            keys.push(crate::jwks::rsa_components_to_jwk(&n, &e, Some(kid.clone())));
+            keys.push(crate::jwks::rsa_components_to_jwk(
+                &n,
+                &e,
+                Some(kid.clone()),
+            ));
         }
 
         Ok(crate::jwks::JsonWebKeySet { keys })

@@ -79,10 +79,7 @@ fn pattern_matches(pattern: &str, group_name: &str) -> bool {
 ///
 /// // Result: true (ssh:prod matches, ssh:test1 excluded)
 /// ```
-pub fn evaluate_claim_map_patterns(
-    group_names: &[String],
-    patterns: &[ClaimMapPattern],
-) -> bool {
+pub fn evaluate_claim_map_patterns(group_names: &[String], patterns: &[ClaimMapPattern]) -> bool {
     // No patterns = always match (backward compatibility)
     if patterns.is_empty() {
         return true;
@@ -242,15 +239,15 @@ mod tests {
 
         // Priority 1 (exclude) then 2 (include) = should match
         let patterns1 = vec![
-            make_pattern("ssh:*", false, 1), // Exclude first
+            make_pattern("ssh:*", false, 1),  // Exclude first
             make_pattern("*:admin", true, 2), // Include after
         ];
         assert!(evaluate_claim_map_patterns(&groups, &patterns1));
 
         // Priority 1 (include) then 2 (exclude) = should not match
         let patterns2 = vec![
-            make_pattern("*:admin", true, 1),  // Include first
-            make_pattern("ssh:*", false, 2),   // Exclude after
+            make_pattern("*:admin", true, 1), // Include first
+            make_pattern("ssh:*", false, 2),  // Exclude after
         ];
         assert!(!evaluate_claim_map_patterns(&groups, &patterns2));
     }

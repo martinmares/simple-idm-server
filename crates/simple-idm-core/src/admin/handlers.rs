@@ -1,13 +1,13 @@
-use crate::auth::password::hash_password;
-use crate::password_reset::{create_reset_token_for_user, PasswordResetTokenInfo};
-use crate::secret_crypto::encrypt_secret;
 use crate::audit;
-use crate::db::{models::OAuthClient, DbPool};
+use crate::auth::password::hash_password;
+use crate::db::{DbPool, models::OAuthClient};
+use crate::password_reset::{PasswordResetTokenInfo, create_reset_token_for_user};
+use crate::secret_crypto::encrypt_secret;
 use axum::{
+    Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -355,12 +355,14 @@ pub async fn create_user(
                 "username": requested_username,
                 "email": requested_email,
             })),
-        ).await;
+        )
+        .await;
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: "bad_request".to_string(),
-                error_description: "Username or email conflicts with an existing account".to_string(),
+                error_description: "Username or email conflicts with an existing account"
+                    .to_string(),
             }),
         )
             .into_response();
@@ -412,17 +414,18 @@ pub async fn create_user(
                     "username": user.username,
                     "email": user.email
                 })),
-            ).await;
+            )
+            .await;
             (
-            StatusCode::CREATED,
-            Json(UserResponse {
-                id: user.id,
-                username: user.username,
-                email: user.email,
-                is_active: user.is_active,
-            }),
-        )
-            .into_response()
+                StatusCode::CREATED,
+                Json(UserResponse {
+                    id: user.id,
+                    username: user.username,
+                    email: user.email,
+                    is_active: user.is_active,
+                }),
+            )
+                .into_response()
         }
         Err(e) => {
             audit::emit_event(
@@ -436,7 +439,8 @@ pub async fn create_user(
                     "username": requested_username,
                     "email": requested_email,
                 })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to create user: {:?}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -678,17 +682,18 @@ pub async fn update_user(
                 Some(user.id),
                 "success",
                 None,
-            ).await;
+            )
+            .await;
             (
-            StatusCode::OK,
-            Json(UserResponse {
-                id: user.id,
-                username: user.username,
-                email: user.email,
-                is_active: user.is_active,
-            }),
-        )
-            .into_response()
+                StatusCode::OK,
+                Json(UserResponse {
+                    id: user.id,
+                    username: user.username,
+                    email: user.email,
+                    is_active: user.is_active,
+                }),
+            )
+                .into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -706,7 +711,8 @@ pub async fn update_user(
                 Some(user_id),
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to update user: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -750,7 +756,8 @@ pub async fn delete_user(
                     Some(user_id),
                     "success",
                     None,
-                ).await;
+                )
+                .await;
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
@@ -768,7 +775,8 @@ pub async fn delete_user(
                 Some(user_id),
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to delete user: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -814,17 +822,18 @@ pub async fn create_group(
                 Some(group.id),
                 "success",
                 Some(serde_json::json!({ "name": group.name })),
-            ).await;
+            )
+            .await;
             (
-            StatusCode::CREATED,
-            Json(GroupResponse {
-                id: group.id,
-                name: group.name,
-                description: group.description,
-                is_virtual: group.is_virtual,
-            }),
-        )
-            .into_response()
+                StatusCode::CREATED,
+                Json(GroupResponse {
+                    id: group.id,
+                    name: group.name,
+                    description: group.description,
+                    is_virtual: group.is_virtual,
+                }),
+            )
+                .into_response()
         }
         Err(e) => {
             audit::emit_event(
@@ -834,7 +843,8 @@ pub async fn create_group(
                 None,
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to create group: {:?}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -915,17 +925,18 @@ pub async fn update_group(
                 Some(group.id),
                 "success",
                 None,
-            ).await;
+            )
+            .await;
             (
-            StatusCode::OK,
-            Json(GroupResponse {
-                id: group.id,
-                name: group.name,
-                description: group.description,
-                is_virtual: group.is_virtual,
-            }),
-        )
-            .into_response()
+                StatusCode::OK,
+                Json(GroupResponse {
+                    id: group.id,
+                    name: group.name,
+                    description: group.description,
+                    is_virtual: group.is_virtual,
+                }),
+            )
+                .into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -943,7 +954,8 @@ pub async fn update_group(
                 Some(group_id),
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to update group: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1101,7 +1113,8 @@ pub async fn delete_group(
                     Some(group_id),
                     "success",
                     None,
-                ).await;
+                )
+                .await;
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
@@ -1119,7 +1132,8 @@ pub async fn delete_group(
                 Some(group_id),
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to delete group: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1237,7 +1251,8 @@ pub async fn create_oauth_client(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "bad_request".to_string(),
-                    error_description: "groups_claim_mode must be one of: effective, direct, none".to_string(),
+                    error_description: "groups_claim_mode must be one of: effective, direct, none"
+                        .to_string(),
                 }),
             )
                 .into_response();
@@ -1275,7 +1290,9 @@ pub async fn create_oauth_client(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: "bad_request".to_string(),
-                        error_description: "Confidential clients (is_public=false) must have client_secret".to_string(),
+                        error_description:
+                            "Confidential clients (is_public=false) must have client_secret"
+                                .to_string(),
                     }),
                 )
                     .into_response();
@@ -1285,7 +1302,9 @@ pub async fn create_oauth_client(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: "bad_request".to_string(),
-                        error_description: "Confidential clients (is_public=false) must have client_secret".to_string(),
+                        error_description:
+                            "Confidential clients (is_public=false) must have client_secret"
+                                .to_string(),
                     }),
                 )
                     .into_response();
@@ -1344,24 +1363,25 @@ pub async fn create_oauth_client(
                 Some(client.id),
                 "success",
                 Some(serde_json::json!({ "client_id": client.client_id })),
-            ).await;
+            )
+            .await;
             (
-            StatusCode::CREATED,
-            Json(OAuthClientResponse {
-                id: client.id,
-                client_id: client.client_id,
-                name: client.name,
-                redirect_uris: client.redirect_uris,
-                grant_types: client.grant_types,
-                scope: client.scope,
-                is_active: client.is_active,
-                is_public: client.is_public,
-                groups_claim_mode: client.groups_claim_mode,
-                include_claim_maps: client.include_claim_maps,
-                ignore_virtual_groups: client.ignore_virtual_groups,
-            }),
-        )
-            .into_response()
+                StatusCode::CREATED,
+                Json(OAuthClientResponse {
+                    id: client.id,
+                    client_id: client.client_id,
+                    name: client.name,
+                    redirect_uris: client.redirect_uris,
+                    grant_types: client.grant_types,
+                    scope: client.scope,
+                    is_active: client.is_active,
+                    is_public: client.is_public,
+                    groups_claim_mode: client.groups_claim_mode,
+                    include_claim_maps: client.include_claim_maps,
+                    ignore_virtual_groups: client.ignore_virtual_groups,
+                }),
+            )
+                .into_response()
         }
         Err(e) => {
             audit::emit_event(
@@ -1374,7 +1394,8 @@ pub async fn create_oauth_client(
                     "reason": e.to_string(),
                     "client_id": requested_client_id
                 })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to create OAuth client: {:?}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -1471,7 +1492,8 @@ pub async fn delete_oauth_client(
                     Some(client_id),
                     "success",
                     None,
-                ).await;
+                )
+                .await;
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
@@ -1489,7 +1511,8 @@ pub async fn delete_oauth_client(
                 Some(client_id),
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to delete OAuth client: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1632,9 +1655,9 @@ pub async fn update_oauth_client(
     // - Some(None) => set to NULL (for public clients)
     // - Some(Some(hash)) => set to hash (for confidential clients)
     let (update_secret, secret_value) = match secret_hash {
-        Some(Some(hash)) => (true, Some(hash)),  // Set new hash
-        Some(None) => (true, None),              // Set to NULL
-        None => (false, None),                   // Keep existing
+        Some(Some(hash)) => (true, Some(hash)), // Set new hash
+        Some(None) => (true, None),             // Set to NULL
+        None => (false, None),                  // Keep existing
     };
 
     let result = sqlx::query!(
@@ -1659,8 +1682,8 @@ pub async fn update_oauth_client(
             groups_claim_mode, include_claim_maps, ignore_virtual_groups
         "#,
         req.name,
-        update_secret,      // $2: bool - should we update secret?
-        secret_value,       // $3: Option<String> - new value (NULL or hash)
+        update_secret, // $2: bool - should we update secret?
+        secret_value,  // $3: Option<String> - new value (NULL or hash)
         redirect_uris,
         grant_types,
         req.scope,
@@ -1684,24 +1707,25 @@ pub async fn update_oauth_client(
                 Some(client.id),
                 "success",
                 None,
-            ).await;
+            )
+            .await;
             (
-            StatusCode::OK,
-            Json(OAuthClientResponse {
-                id: client.id,
-                client_id: client.client_id,
-                name: client.name,
-                redirect_uris: client.redirect_uris,
-                grant_types: client.grant_types,
-                scope: client.scope,
-                is_active: client.is_active,
-                is_public: client.is_public,
-                groups_claim_mode: client.groups_claim_mode,
-                include_claim_maps: client.include_claim_maps,
-                ignore_virtual_groups: client.ignore_virtual_groups,
-            }),
-        )
-            .into_response()
+                StatusCode::OK,
+                Json(OAuthClientResponse {
+                    id: client.id,
+                    client_id: client.client_id,
+                    name: client.name,
+                    redirect_uris: client.redirect_uris,
+                    grant_types: client.grant_types,
+                    scope: client.scope,
+                    is_active: client.is_active,
+                    is_public: client.is_public,
+                    groups_claim_mode: client.groups_claim_mode,
+                    include_claim_maps: client.include_claim_maps,
+                    ignore_virtual_groups: client.ignore_virtual_groups,
+                }),
+            )
+                .into_response()
         }
         Ok(None) => (
             StatusCode::NOT_FOUND,
@@ -1719,7 +1743,8 @@ pub async fn update_oauth_client(
                 Some(client_id),
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to update OAuth client: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -1741,23 +1766,23 @@ fn validate_redirect_uris(
         if uri.contains('*') {
             // Parse URL with wildcard replaced temporarily for validation
             let test_uri = uri.replace('*', "8080");
-            let url = Url::parse(&test_uri).map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(ErrorResponse {
-                        error: "bad_request".to_string(),
-                        error_description: format!("Invalid redirect_uri format: {}", uri),
-                    }),
-                )
-                    .into_response()
-            }).map_err(Box::new)?;
+            let url = Url::parse(&test_uri)
+                .map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(ErrorResponse {
+                            error: "bad_request".to_string(),
+                            error_description: format!("Invalid redirect_uri format: {}", uri),
+                        }),
+                    )
+                        .into_response()
+                })
+                .map_err(Box::new)?;
 
             // Check if host is loopback (localhost, 127.0.0.1, ::1)
             let host = url.host_str().unwrap_or("");
-            let is_loopback = host == "localhost"
-                || host == "127.0.0.1"
-                || host == "[::1]"
-                || host == "::1";
+            let is_loopback =
+                host == "localhost" || host == "127.0.0.1" || host == "[::1]" || host == "::1";
 
             if !is_loopback {
                 return Err(Box::new(
@@ -1792,16 +1817,18 @@ fn validate_redirect_uris(
             continue;
         }
 
-        let url = Url::parse(uri).map_err(|_| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "bad_request".to_string(),
-                    error_description: format!("Invalid redirect_uri: {}", uri),
-                }),
-            )
-                .into_response()
-        }).map_err(Box::new)?;
+        let url = Url::parse(uri)
+            .map_err(|_| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "bad_request".to_string(),
+                        error_description: format!("Invalid redirect_uri: {}", uri),
+                    }),
+                )
+                    .into_response()
+            })
+            .map_err(Box::new)?;
 
         let scheme = url.scheme();
         if scheme != "http" && scheme != "https" {
@@ -1810,10 +1837,7 @@ fn validate_redirect_uris(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: "bad_request".to_string(),
-                        error_description: format!(
-                            "redirect_uris must be http or https: {}",
-                            uri
-                        ),
+                        error_description: format!("redirect_uris must be http or https: {}", uri),
                     }),
                 )
                     .into_response(),
@@ -1886,7 +1910,8 @@ pub async fn create_claim_map(
         }
         serde_json::Value::Array(arr) => {
             // Array of strings
-            let strings: Vec<String> = arr.iter()
+            let strings: Vec<String> = arr
+                .iter()
                 .filter_map(|v| v.as_str().map(|s| s.to_string()))
                 .collect();
 
@@ -1895,7 +1920,8 @@ pub async fn create_claim_map(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: "bad_request".to_string(),
-                        error_description: "claim_value array must contain at least one string".to_string(),
+                        error_description: "claim_value array must contain at least one string"
+                            .to_string(),
                     }),
                 )
                     .into_response();
@@ -1913,7 +1939,8 @@ pub async fn create_claim_map(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "bad_request".to_string(),
-                    error_description: "claim_value must be a string or array of strings".to_string(),
+                    error_description: "claim_value must be a string or array of strings"
+                        .to_string(),
                 }),
             )
                 .into_response();
@@ -1947,13 +1974,19 @@ pub async fn create_claim_map(
                 Some(serde_json::json!({
                     "claim_name": claim_map.claim_name
                 })),
-            ).await;
+            )
+            .await;
             // Build response value based on kind
             let response_value = if claim_map.claim_value_kind == "array" {
-                claim_map.claim_value_json.as_ref()
+                claim_map
+                    .claim_value_json
+                    .as_ref()
                     .and_then(|json| serde_json::from_str(json).ok())
             } else {
-                claim_map.claim_value.as_ref().map(|s| serde_json::Value::String(s.clone()))
+                claim_map
+                    .claim_value
+                    .as_ref()
+                    .map(|s| serde_json::Value::String(s.clone()))
             };
 
             (
@@ -1977,7 +2010,8 @@ pub async fn create_claim_map(
                 None,
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to create claim map: {:?}", e);
             (
                 StatusCode::BAD_REQUEST,
@@ -2027,10 +2061,13 @@ pub async fn list_claim_maps(
                 .into_iter()
                 .map(|cm| {
                     let response_value = if cm.claim_value_kind == "array" {
-                        cm.claim_value_json.as_ref()
+                        cm.claim_value_json
+                            .as_ref()
                             .and_then(|json| serde_json::from_str(json).ok())
                     } else {
-                        cm.claim_value.as_ref().map(|s| serde_json::Value::String(s.clone()))
+                        cm.claim_value
+                            .as_ref()
+                            .map(|s| serde_json::Value::String(s.clone()))
                     };
 
                     ClaimMapResponse {
@@ -2078,10 +2115,10 @@ pub async fn delete_claim_map(
           AND g.deleted_at IS NULL
         "#,
     )
-        .bind(claim_map_id)
-        .bind(default_tenant_id())
-        .execute(&db_pool)
-        .await;
+    .bind(claim_map_id)
+    .bind(default_tenant_id())
+    .execute(&db_pool)
+    .await;
 
     match result {
         Ok(result) => {
@@ -2102,7 +2139,8 @@ pub async fn delete_claim_map(
                     Some(claim_map_id),
                     "success",
                     None,
-                ).await;
+                )
+                .await;
                 (
                     StatusCode::OK,
                     Json(SuccessResponse {
@@ -2120,7 +2158,8 @@ pub async fn delete_claim_map(
                 Some(claim_map_id),
                 "failure",
                 Some(serde_json::json!({ "reason": e.to_string() })),
-            ).await;
+            )
+            .await;
             tracing::error!("Failed to delete claim map: {:?}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -2176,7 +2215,7 @@ async fn would_create_cycle(
 
         // Get all children of current group
         let children = sqlx::query_scalar::<_, Uuid>(
-            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1"
+            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1",
         )
         .bind(current)
         .fetch_all(db_pool)
@@ -2204,7 +2243,7 @@ pub async fn get_transitive_children(
         visited.insert(current);
 
         let children = sqlx::query_scalar::<_, Uuid>(
-            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1"
+            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1",
         )
         .bind(current)
         .fetch_all(db_pool)
@@ -2230,14 +2269,14 @@ pub async fn add_child_group(
 
     // Validate that both groups exist
     let parent_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)"
+        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(parent_id)
     .fetch_one(&db_pool)
     .await;
 
     let child_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)"
+        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(child_id)
     .fetch_one(&db_pool)
@@ -2275,7 +2314,9 @@ pub async fn add_child_group(
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {
                     error: "cycle_detected".to_string(),
-                    error_description: "Adding this relationship would create a cycle in the group hierarchy".to_string(),
+                    error_description:
+                        "Adding this relationship would create a cycle in the group hierarchy"
+                            .to_string(),
                 }),
             )
                 .into_response();
@@ -2336,7 +2377,9 @@ pub async fn add_child_group(
                 }
             }
         }
-        Err(sqlx::Error::Database(ref db_err)) if db_err.constraint() == Some("group_groups_pkey") => {
+        Err(sqlx::Error::Database(ref db_err))
+            if db_err.constraint() == Some("group_groups_pkey") =>
+        {
             (
                 StatusCode::CONFLICT,
                 Json(ErrorResponse {
@@ -2364,13 +2407,12 @@ pub async fn remove_child_group(
     State(db_pool): State<DbPool>,
     Path((parent_id, child_id)): Path<(Uuid, Uuid)>,
 ) -> impl IntoResponse {
-    let result = sqlx::query(
-        "DELETE FROM group_groups WHERE parent_group_id = $1 AND child_group_id = $2"
-    )
-    .bind(parent_id)
-    .bind(child_id)
-    .execute(&db_pool)
-    .await;
+    let result =
+        sqlx::query("DELETE FROM group_groups WHERE parent_group_id = $1 AND child_group_id = $2")
+            .bind(parent_id)
+            .bind(child_id)
+            .execute(&db_pool)
+            .await;
 
     match result {
         Ok(res) => {
@@ -2423,7 +2465,7 @@ pub async fn list_child_groups(
                 }
 
                 // Fetch group details for all children
-        let children = sqlx::query_as::<_, (Uuid, String, Option<String>, bool)>(
+                let children = sqlx::query_as::<_, (Uuid, String, Option<String>, bool)>(
             "SELECT id, name, description, is_virtual FROM groups WHERE id = ANY($1) AND deleted_at IS NULL ORDER BY name"
         )
         .bind(&child_ids)
@@ -2477,7 +2519,7 @@ pub async fn list_child_groups(
             INNER JOIN group_groups gg ON g.id = gg.child_group_id
             WHERE gg.parent_group_id = $1
             ORDER BY g.name
-            "#
+            "#,
         )
         .bind(parent_id)
         .fetch_all(&db_pool)
@@ -2662,7 +2704,7 @@ pub async fn update_user_group_pattern(
                     error_description: "Pattern not found or does not belong to user".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             tracing::error!("Failed to check pattern existence: {:?}", e);
@@ -3212,7 +3254,7 @@ pub async fn create_claim_map_pattern(
 ) -> impl IntoResponse {
     // Validate claim_map exists
     let claim_map_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM claim_maps WHERE id = $1 AND deleted_at IS NULL)"
+        "SELECT EXISTS(SELECT 1 FROM claim_maps WHERE id = $1 AND deleted_at IS NULL)",
     )
     .bind(claim_map_id)
     .fetch_one(&db_pool)
@@ -3574,7 +3616,7 @@ pub async fn update_tenant(
                     error_description: "mode must be one of: single, multi".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -3940,10 +3982,13 @@ pub async fn create_identity_provider(
     Json(req): Json<CreateIdentityProviderRequest>,
 ) -> impl IntoResponse {
     let tenant_id = req.tenant_id.unwrap_or_else(default_tenant_id);
-    let scopes = req
-        .scopes
-        .filter(|v| !v.is_empty())
-        .unwrap_or_else(|| vec!["openid".to_string(), "profile".to_string(), "email".to_string()]);
+    let scopes = req.scopes.filter(|v| !v.is_empty()).unwrap_or_else(|| {
+        vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ]
+    });
     let encrypted_secret = match encrypt_secret(req.client_secret.trim()) {
         Ok(v) => v,
         Err(e) => {
@@ -3976,11 +4021,27 @@ pub async fn create_identity_provider(
     .bind(req.issuer.trim())
     .bind(req.client_id.trim())
     .bind(encrypted_secret)
-    .bind(req.auth_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
-    .bind(req.token_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
-    .bind(req.jwks_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(
+        req.auth_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
+    .bind(
+        req.token_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
+    .bind(
+        req.jwks_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
     .bind(scopes)
-    .bind(req.hd_domain.map(|v| v.trim().to_lowercase()).filter(|v| !v.is_empty()))
+    .bind(
+        req.hd_domain
+            .map(|v| v.trim().to_lowercase())
+            .filter(|v| !v.is_empty()),
+    )
     .bind(req.is_active.unwrap_or(true))
     .fetch_one(&db_pool)
     .await;
@@ -4049,7 +4110,12 @@ pub async fn update_identity_provider(
     Path(id): Path<Uuid>,
     Json(req): Json<UpdateIdentityProviderRequest>,
 ) -> impl IntoResponse {
-    let encrypted_secret_update = match req.client_secret.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+    let encrypted_secret_update = match req
+        .client_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
         Some(secret) => match encrypt_secret(secret) {
             Ok(v) => Some(v),
             Err(e) => {
@@ -4057,7 +4123,10 @@ pub async fn update_identity_provider(
                     StatusCode::BAD_REQUEST,
                     Json(ErrorResponse {
                         error: "bad_request".to_string(),
-                        error_description: format!("Failed to encrypt identity provider secret: {}", e),
+                        error_description: format!(
+                            "Failed to encrypt identity provider secret: {}",
+                            e
+                        ),
                     }),
                 )
                     .into_response();
@@ -4089,16 +4158,48 @@ pub async fn update_identity_provider(
         "#,
     )
     .bind(id)
-    .bind(req.slug.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
-    .bind(req.provider_type.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
-    .bind(req.issuer.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
-    .bind(req.client_id.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(
+        req.slug
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
+    .bind(
+        req.provider_type
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
+    .bind(
+        req.issuer
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
+    .bind(
+        req.client_id
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
     .bind(encrypted_secret_update)
-    .bind(req.auth_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
-    .bind(req.token_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
-    .bind(req.jwks_url.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()))
+    .bind(
+        req.auth_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
+    .bind(
+        req.token_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
+    .bind(
+        req.jwks_url
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty()),
+    )
     .bind(req.scopes.filter(|v| !v.is_empty()))
-    .bind(req.hd_domain.map(|v| v.trim().to_lowercase()).filter(|v| !v.is_empty()))
+    .bind(
+        req.hd_domain
+            .map(|v| v.trim().to_lowercase())
+            .filter(|v| !v.is_empty()),
+    )
     .bind(req.is_active)
     .fetch_optional(&db_pool)
     .await;

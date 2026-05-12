@@ -1,5 +1,8 @@
 use crate::claim_map_patterns::evaluate_claim_map_patterns;
-use crate::db::{models::{ClaimMap, ClaimMapPattern}, DbPool};
+use crate::db::{
+    DbPool,
+    models::{ClaimMap, ClaimMapPattern},
+};
 use serde_json::Value;
 use sqlx;
 use std::collections::HashMap;
@@ -83,9 +86,13 @@ pub async fn build_custom_claims(
     }
 
     // Group applicable claim maps by claim_name
-    let mut claims_by_name: std::collections::HashMap<String, Vec<ClaimMap>> = std::collections::HashMap::new();
+    let mut claims_by_name: std::collections::HashMap<String, Vec<ClaimMap>> =
+        std::collections::HashMap::new();
     for map in applicable_claim_maps {
-        claims_by_name.entry(map.claim_name.clone()).or_default().push(map);
+        claims_by_name
+            .entry(map.claim_name.clone())
+            .or_default()
+            .push(map);
     }
 
     let mut custom_claims: HashMap<String, Value> = HashMap::new();
@@ -121,9 +128,10 @@ pub async fn build_custom_claims(
             all_values.sort();
             all_values.dedup();
 
-            custom_claims.insert(claim_name.clone(), Value::Array(
-                all_values.into_iter().map(Value::String).collect()
-            ));
+            custom_claims.insert(
+                claim_name.clone(),
+                Value::Array(all_values.into_iter().map(Value::String).collect()),
+            );
         } else {
             // Output as single string - take first value (deterministic due to ORDER BY)
             if let Some(first_map) = maps.first() {
@@ -134,9 +142,8 @@ pub async fn build_custom_claims(
 
                 // Warn if there are multiple different single values
                 if maps.len() > 1 {
-                    let unique_values: std::collections::HashSet<_> = maps.iter()
-                        .filter_map(|m| m.claim_value.as_ref())
-                        .collect();
+                    let unique_values: std::collections::HashSet<_> =
+                        maps.iter().filter_map(|m| m.claim_value.as_ref()).collect();
                     if unique_values.len() > 1 {
                         tracing::warn!(
                             "Multiple different single values for claim '{}': {:?}. Using first value deterministically.",
@@ -155,10 +162,7 @@ pub async fn build_custom_claims(
 }
 
 /// Načte přímé skupiny uživatele (bez rozbalení nested groups)
-pub async fn get_user_groups(
-    pool: &DbPool,
-    user_id: Uuid,
-) -> Result<Vec<Uuid>, ClaimMapError> {
+pub async fn get_user_groups(pool: &DbPool, user_id: Uuid) -> Result<Vec<Uuid>, ClaimMapError> {
     let group_ids = sqlx::query_scalar::<_, Uuid>(
         r#"
         SELECT group_id FROM user_groups WHERE user_id = $1
@@ -173,10 +177,7 @@ pub async fn get_user_groups(
 
 /// Rozbalí nested groups tranzitivně
 /// Vrací všechny transitive child groups pro danou skupinu
-async fn expand_nested_groups(
-    pool: &DbPool,
-    group_id: Uuid,
-) -> Result<Vec<Uuid>, ClaimMapError> {
+async fn expand_nested_groups(pool: &DbPool, group_id: Uuid) -> Result<Vec<Uuid>, ClaimMapError> {
     let mut all_groups = std::collections::HashSet::new();
     let mut stack = vec![group_id];
     let mut visited = std::collections::HashSet::new();
@@ -190,7 +191,7 @@ async fn expand_nested_groups(
 
         // Načti child groups
         let children = sqlx::query_scalar::<_, Uuid>(
-            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1"
+            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1",
         )
         .bind(current)
         .fetch_all(pool)

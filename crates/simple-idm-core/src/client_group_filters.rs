@@ -100,9 +100,7 @@ mod tests {
 
         // Only include grafana groups - no exclude pattern needed
         // (groups not explicitly included are excluded by default)
-        let patterns = vec![
-            make_pattern("grafana:*", true, 1),
-        ];
+        let patterns = vec![make_pattern("grafana:*", true, 1)];
 
         let result = apply_client_group_filters(&groups, &patterns);
 
@@ -155,13 +153,11 @@ mod tests {
 
     #[test]
     fn test_priority_ordering() {
-        let groups = vec![
-            "test:group".to_string(),
-        ];
+        let groups = vec!["test:group".to_string()];
 
         // Higher priority (lower number) should apply first
         let patterns = vec![
-            make_pattern("*", false, 10), // Apply second: exclude all
+            make_pattern("*", false, 10),    // Apply second: exclude all
             make_pattern("test:*", true, 1), // Apply first: include test:*
         ];
 
@@ -174,9 +170,7 @@ mod tests {
     #[test]
     fn test_empty_groups() {
         let groups: Vec<String> = vec![];
-        let patterns = vec![
-            make_pattern("ssh:*", true, 1),
-        ];
+        let patterns = vec![make_pattern("ssh:*", true, 1)];
 
         let result = apply_client_group_filters(&groups, &patterns);
 

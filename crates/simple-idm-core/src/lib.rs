@@ -11,9 +11,10 @@ pub mod group_patterns;
 pub mod jwks;
 pub mod oauth2;
 pub mod oidc;
+pub mod onboarding_cleanup;
 pub mod password_reset;
-pub mod security_headers;
 pub mod secret_crypto;
+pub mod security_headers;
 pub mod soft_delete_cleanup;
 
 // OAuth2 Proxy modules

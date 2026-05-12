@@ -1,9 +1,9 @@
 use crate::db::DbPool;
 use axum::{
+    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
 use serde::Serialize;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ pub async fn handle_userinfo(
                     error_description: "Missing Authorization header".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -73,7 +73,7 @@ pub async fn handle_userinfo(
                     error_description: "No active audiences available".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -142,7 +142,5 @@ async fn load_active_client_ids(pool: &DbPool) -> Result<Vec<String>, sqlx::Erro
 }
 
 fn has_scope(scope: &str, expected: &str) -> bool {
-    scope
-        .split_whitespace()
-        .any(|value| value == expected)
+    scope.split_whitespace().any(|value| value == expected)
 }

@@ -1,10 +1,10 @@
 use crate::db::models::RefreshToken;
 use axum::{
+    Json,
     body::Bytes,
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::IntoResponse,
-    Json,
 };
 use serde::Deserialize;
 use sqlx;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use super::cleanup::cleanup_refresh_tokens;
 use super::client_credentials::OAuth2State;
-use super::utils::{apply_client_auth, resolve_oauth_client, ClientLookupError};
+use super::utils::{ClientLookupError, apply_client_auth, resolve_oauth_client};
 
 #[derive(Debug, Deserialize)]
 pub struct RevocationRequest {
@@ -51,7 +51,7 @@ pub async fn handle_revoke(
                     error_description: "Missing client_id".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -65,11 +65,12 @@ pub async fn handle_revoke(
                     error_description: "Missing client_secret".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
-    let client = match resolve_oauth_client(&state.db_pool, &client_id, req.tenant.as_deref()).await {
+    let client = match resolve_oauth_client(&state.db_pool, &client_id, req.tenant.as_deref()).await
+    {
         Ok(Some(client)) => client,
         Ok(None) => {
             return (
@@ -79,7 +80,7 @@ pub async fn handle_revoke(
                     error_description: "Invalid client credentials".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
         Err(ClientLookupError::AmbiguousClientId) => {
             return (
@@ -89,7 +90,7 @@ pub async fn handle_revoke(
                     error_description: "Ambiguous client_id. Provide tenant hint.".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
         Err(ClientLookupError::InvalidTenantHint) => {
             return (
@@ -99,7 +100,7 @@ pub async fn handle_revoke(
                     error_description: "Invalid tenant hint".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
         Err(ClientLookupError::Database) => {
             return (
@@ -109,7 +110,7 @@ pub async fn handle_revoke(
                     error_description: "Database error".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -141,16 +142,15 @@ pub async fn handle_revoke(
         return StatusCode::OK.into_response();
     }
 
-    let refresh_token = match sqlx::query_as::<_, RefreshToken>(
-        "SELECT * FROM refresh_tokens WHERE token = $1",
-    )
-    .bind(&req.token)
-    .fetch_optional(&state.db_pool)
-    .await
-    {
-        Ok(Some(rt)) => rt,
-        _ => return StatusCode::OK.into_response(),
-    };
+    let refresh_token =
+        match sqlx::query_as::<_, RefreshToken>("SELECT * FROM refresh_tokens WHERE token = $1")
+            .bind(&req.token)
+            .fetch_optional(&state.db_pool)
+            .await
+        {
+            Ok(Some(rt)) => rt,
+            _ => return StatusCode::OK.into_response(),
+        };
 
     if refresh_token.client_id != client.id {
         return StatusCode::OK.into_response();
@@ -166,7 +166,7 @@ pub async fn handle_revoke(
                     error_description: "Failed to start transaction".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 

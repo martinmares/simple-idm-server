@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     response::{Html, IntoResponse},
 };
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, Duration, Utc};
 use rand::Rng;
 use serde::Deserialize;
@@ -13,8 +13,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::auth::password::hash_password;
-use crate::oauth2::templates;
 use crate::oauth2::OAuth2State;
+use crate::oauth2::templates;
 
 #[derive(Debug, Deserialize)]
 pub struct PasswordResetQuery {
@@ -183,7 +183,11 @@ pub async fn create_reset_token_for_user(
     .execute(db_pool)
     .await?;
 
-    let reset_url = format!("{}/password/reset?token={}", issuer.trim_end_matches('/'), token);
+    let reset_url = format!(
+        "{}/password/reset?token={}",
+        issuer.trim_end_matches('/'),
+        token
+    );
 
     Ok(PasswordResetTokenInfo {
         token,

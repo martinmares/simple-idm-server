@@ -1,4 +1,7 @@
-use crate::db::{models::{Group, UserGroupPattern}, DbPool};
+use crate::db::{
+    DbPool,
+    models::{Group, UserGroupPattern},
+};
 use std::collections::HashSet;
 use uuid::Uuid;
 
@@ -155,7 +158,11 @@ pub async fn evaluate_and_sync_patterns(pool: &DbPool) {
         {
             Ok(rows) => rows.into_iter().map(|r| r.group_id).collect::<HashSet<_>>(),
             Err(e) => {
-                tracing::error!("Failed to fetch current groups for user {}: {:?}", user_id, e);
+                tracing::error!(
+                    "Failed to fetch current groups for user {}: {:?}",
+                    user_id,
+                    e
+                );
                 continue;
             }
         };

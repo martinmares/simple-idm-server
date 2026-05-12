@@ -13,7 +13,7 @@ pub struct Config {
     pub soft_delete_purge: SoftDeletePurgeConfig,
     pub ui: UiConfig,
     pub identity: IdentityConfig,
-    pub ad_auth: AdAuthConfig,
+    pub onboarding: OnboardingConfig,
     pub security: SecurityConfig,
     pub auth_protection: AuthProtectionConfig,
 }
@@ -38,7 +38,7 @@ pub struct JwtConfig {
     pub auth_session_expiry_seconds: i64, // SSO session duration
     pub private_key_path: String,
     pub public_key_path: String,
-    pub key_id: String, // kid for JWKS
+    pub key_id: String,                                // kid for JWKS
     pub additional_public_keys: Vec<(String, String)>, // (kid, public_key_path)
 }
 
@@ -93,22 +93,8 @@ pub struct IdentityConfig {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct AdAuthConfig {
-    pub enabled: bool,
-    pub host: String,
-    pub port: u16,
-    pub base_dn: String,
-    pub bind_dn: Option<String>,
-    pub bind_password: Option<String>,
-    pub user_filter: String,
-    pub tls_mode: String, // ldaps | starttls
-    pub timeout_seconds: u64,
-    pub allow_insecure: bool,
-    pub domains: Vec<String>,
-    pub role_sync_enabled: bool,
-    pub role_sync_ttl_seconds: u64,
-    pub role_sync_timeout_seconds: u64,
-    pub onboarding_token_ttl_seconds: u64,
+pub struct OnboardingConfig {
+    pub token_ttl_seconds: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -137,8 +123,8 @@ impl Config {
         let database_url = env::var("DATABASE_URL")
             .unwrap_or_else(|_| "postgres://postgres:postgres@localhost/simple_idm".to_string());
 
-        let jwt_issuer = env::var("JWT_ISSUER")
-            .unwrap_or_else(|_| "http://localhost:8080".to_string());
+        let jwt_issuer =
+            env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
         let access_token_expiry = env::var("ACCESS_TOKEN_EXPIRY_SECONDS")
             .unwrap_or_else(|_| "3600".to_string())
             .parse()
@@ -155,12 +141,11 @@ impl Config {
             .unwrap_or_else(|_| "3600".to_string()) // 1 hour default
             .parse()
             .unwrap_or(3600);
-        let private_key_path = env::var("JWT_PRIVATE_KEY_PATH")
-            .unwrap_or_else(|_| "./keys/private.pem".to_string());
-        let public_key_path = env::var("JWT_PUBLIC_KEY_PATH")
-            .unwrap_or_else(|_| "./keys/public.pem".to_string());
-        let key_id = env::var("JWT_KEY_ID")
-            .unwrap_or_else(|_| "default-key-2025".to_string());
+        let private_key_path =
+            env::var("JWT_PRIVATE_KEY_PATH").unwrap_or_else(|_| "./keys/private.pem".to_string());
+        let public_key_path =
+            env::var("JWT_PUBLIC_KEY_PATH").unwrap_or_else(|_| "./keys/public.pem".to_string());
+        let key_id = env::var("JWT_KEY_ID").unwrap_or_else(|_| "default-key-2025".to_string());
         let additional_public_keys = parse_additional_public_keys(
             &env::var("JWT_ADDITIONAL_PUBLIC_KEYS").unwrap_or_default(),
         );
@@ -170,11 +155,10 @@ impl Config {
             .unwrap_or_else(|_| "false".to_string())
             .parse()
             .unwrap_or(false);
-        let admin_allow_admin_substring_claim =
-            env::var("ALLOW_ADMIN_SUBSTRING_CLAIM")
-                .unwrap_or_else(|_| "false".to_string())
-                .parse()
-                .unwrap_or(false);
+        let admin_allow_admin_substring_claim = env::var("ALLOW_ADMIN_SUBSTRING_CLAIM")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse()
+            .unwrap_or(false);
         let rate_limit_rps = env::var("RATE_LIMIT_REQUESTS_PER_SECOND")
             .unwrap_or_else(|_| "5".to_string())
             .parse()
@@ -204,8 +188,8 @@ impl Config {
             .unwrap_or_else(|_| "8".to_string())
             .parse()
             .unwrap_or(8);
-        let device_user_code_format = env::var("DEVICE_USER_CODE_FORMAT")
-            .unwrap_or_else(|_| "XXXX-XXXX".to_string());
+        let device_user_code_format =
+            env::var("DEVICE_USER_CODE_FORMAT").unwrap_or_else(|_| "XXXX-XXXX".to_string());
         let device_cleanup_interval = env::var("DEVICE_CODE_CLEANUP_INTERVAL_SECONDS")
             .unwrap_or_else(|_| "3600".to_string())
             .parse()
@@ -223,24 +207,21 @@ impl Config {
             .unwrap_or_else(|_| "false".to_string())
             .parse()
             .unwrap_or(false);
-        let soft_delete_purge_interval_seconds =
-            env::var("SOFT_DELETE_PURGE_INTERVAL_SECONDS")
-                .unwrap_or_else(|_| "3600".to_string())
-                .parse()
-                .unwrap_or(3600);
+        let soft_delete_purge_interval_seconds = env::var("SOFT_DELETE_PURGE_INTERVAL_SECONDS")
+            .unwrap_or_else(|_| "3600".to_string())
+            .parse()
+            .unwrap_or(3600);
         let soft_delete_purge_retention_days = env::var("SOFT_DELETE_RETENTION_DAYS")
             .unwrap_or_else(|_| "30".to_string())
             .parse()
             .unwrap_or(30);
 
-        let ui_brand_name =
-            env::var("UI_BRAND_NAME").unwrap_or_else(|_| "Cloud App".to_string());
+        let ui_brand_name = env::var("UI_BRAND_NAME").unwrap_or_else(|_| "Cloud App".to_string());
         let ui_brand_domain = env::var("UI_BRAND_DOMAIN")
             .ok()
             .map(|d| d.trim().to_string())
             .filter(|d| !d.is_empty());
-        let ui_page_title =
-            env::var("UI_PAGE_TITLE").unwrap_or_else(|_| "Simple IDM".to_string());
+        let ui_page_title = env::var("UI_PAGE_TITLE").unwrap_or_else(|_| "Simple IDM".to_string());
 
         let allow_username_login = env::var("AUTH_ALLOW_USERNAME_LOGIN")
             .unwrap_or_else(|_| "true".to_string())
@@ -253,56 +234,7 @@ impl Config {
             .filter(|d| !d.is_empty())
             .collect::<Vec<_>>();
 
-        let ad_auth_enabled = env::var("AD_AUTH_ENABLED")
-            .unwrap_or_else(|_| "false".to_string())
-            .parse()
-            .unwrap_or(false);
-        let ad_auth_host = env::var("AD_AUTH_HOST").unwrap_or_default();
-        let ad_auth_port = env::var("AD_AUTH_PORT")
-            .unwrap_or_else(|_| "636".to_string())
-            .parse()
-            .unwrap_or(636);
-        let ad_auth_base_dn = env::var("AD_AUTH_BASE_DN").unwrap_or_default();
-        let ad_auth_bind_dn = env::var("AD_AUTH_BIND_DN")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        let ad_auth_bind_password = env::var("AD_AUTH_BIND_PASSWORD")
-            .ok()
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        let ad_auth_user_filter = env::var("AD_AUTH_USER_FILTER")
-            .unwrap_or_else(|_| "(mail={login})".to_string());
-        let ad_auth_tls_mode = env::var("AD_AUTH_TLS_MODE")
-            .unwrap_or_else(|_| "ldaps".to_string())
-            .to_lowercase();
-        let ad_auth_timeout_seconds = env::var("AD_AUTH_TIMEOUT_SECONDS")
-            .unwrap_or_else(|_| "5".to_string())
-            .parse()
-            .unwrap_or(5);
-        let ad_auth_allow_insecure = env::var("AD_AUTH_ALLOW_INSECURE")
-            .unwrap_or_else(|_| "false".to_string())
-            .parse()
-            .unwrap_or(false);
-        let ad_auth_domains = env::var("AD_AUTH_DOMAINS")
-            .unwrap_or_default()
-            .split(',')
-            .map(|d| d.trim().to_lowercase())
-            .filter(|d| !d.is_empty())
-            .collect::<Vec<_>>();
-        let ad_auth_role_sync_enabled = env::var("AD_AUTH_ROLE_SYNC_ENABLED")
-            .unwrap_or_else(|_| "true".to_string())
-            .parse()
-            .unwrap_or(true);
-        let ad_auth_role_sync_ttl_seconds = env::var("AD_AUTH_ROLE_SYNC_TTL_SECONDS")
-            .unwrap_or_else(|_| "3600".to_string())
-            .parse()
-            .unwrap_or(3600);
-        let ad_auth_role_sync_timeout_seconds = env::var("AD_AUTH_ROLE_SYNC_TIMEOUT_SECONDS")
-            .unwrap_or_else(|_| "5".to_string())
-            .parse()
-            .unwrap_or(5);
-        let ad_onboarding_token_ttl_seconds = env::var("AD_ONBOARDING_TOKEN_TTL_SECONDS")
+        let onboarding_token_ttl_seconds = env::var("ONBOARDING_TOKEN_TTL_SECONDS")
             .unwrap_or_else(|_| "86400".to_string())
             .parse()
             .unwrap_or(86400);
@@ -391,22 +323,8 @@ impl Config {
                 allow_username_login,
                 allowed_email_domains,
             },
-            ad_auth: AdAuthConfig {
-                enabled: ad_auth_enabled,
-                host: ad_auth_host,
-                port: ad_auth_port,
-                base_dn: ad_auth_base_dn,
-                bind_dn: ad_auth_bind_dn,
-                bind_password: ad_auth_bind_password,
-                user_filter: ad_auth_user_filter,
-                tls_mode: ad_auth_tls_mode,
-                timeout_seconds: ad_auth_timeout_seconds,
-                allow_insecure: ad_auth_allow_insecure,
-                domains: ad_auth_domains,
-                role_sync_enabled: ad_auth_role_sync_enabled,
-                role_sync_ttl_seconds: ad_auth_role_sync_ttl_seconds,
-                role_sync_timeout_seconds: ad_auth_role_sync_timeout_seconds,
-                onboarding_token_ttl_seconds: ad_onboarding_token_ttl_seconds,
+            onboarding: OnboardingConfig {
+                token_ttl_seconds: onboarding_token_ttl_seconds,
             },
             security: SecurityConfig {
                 app_env,
@@ -484,19 +402,15 @@ mod tests {
 
     #[test]
     fn production_rejects_admin_root_token() {
-        let result = validate_admin_root_token_policy(
-            "production",
-            &Some("dev-root-token".to_string()),
-        );
+        let result =
+            validate_admin_root_token_policy("production", &Some("dev-root-token".to_string()));
         assert!(result.is_err());
     }
 
     #[test]
     fn development_allows_admin_root_token() {
-        let result = validate_admin_root_token_policy(
-            "development",
-            &Some("dev-root-token".to_string()),
-        );
+        let result =
+            validate_admin_root_token_policy("development", &Some("dev-root-token".to_string()));
         assert!(result.is_ok());
     }
 }

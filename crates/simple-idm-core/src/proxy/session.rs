@@ -3,8 +3,8 @@ use base64::Engine;
 use chrono::{DateTime, Duration, TimeZone, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 use sqlx::{Row, SqlitePool};
+use std::sync::Arc;
 
 use super::config::{Config, SessionBackend};
 use super::oidc::{RefreshResult, TokenResponse};
@@ -143,7 +143,8 @@ impl MemoryStore {
     }
 
     pub fn store_flow_state(&self, flow_state: &FlowState) {
-        self.flow_states.insert(flow_state.state.clone(), flow_state.clone());
+        self.flow_states
+            .insert(flow_state.state.clone(), flow_state.clone());
     }
 
     pub fn get_flow_state(&self, state: &str) -> Option<FlowState> {

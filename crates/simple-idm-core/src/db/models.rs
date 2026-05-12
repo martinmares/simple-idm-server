@@ -12,8 +12,9 @@ pub struct User {
     #[serde(skip_serializing)]
     pub password_hash: Option<String>,
     pub is_active: bool,
-    pub auth_mode: String,        // local|federated|mixed
-    pub password_disabled: bool,  // disable local password login
+    pub auth_mode: String, // local|federated|ad
+    pub auth_provider_id: Option<Uuid>,
+    pub password_disabled: bool, // disable local password login
     pub first_name: Option<String>,
     pub last_name: Option<String>,
     pub recovery_email: Option<String>,
@@ -109,7 +110,7 @@ pub struct ClaimMap {
     pub group_id: Option<Uuid>, // Optional - can use patterns instead
     pub claim_name: String,
     pub claim_value: Option<String>,
-    pub claim_value_kind: String, // 'single' or 'array'
+    pub claim_value_kind: String,         // 'single' or 'array'
     pub claim_value_json: Option<String>, // JSON array for array kind
     pub updated_at: DateTime<Utc>,
 }

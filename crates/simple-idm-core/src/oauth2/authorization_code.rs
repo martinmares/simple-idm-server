@@ -1,22 +1,25 @@
+use crate::audit;
 use crate::auth::{
     build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
     get_user_group_names, verify_password,
 };
-use crate::audit;
 use crate::client_group_filters::apply_client_group_filters;
-use crate::db::models::{AuthenticationSession, AuthorizationCode, OAuthClient, OAuthClientGroupPattern, RefreshToken, UsedRefreshToken, User};
+use crate::db::models::{
+    AuthenticationSession, AuthorizationCode, OAuthClient, OAuthClientGroupPattern, RefreshToken,
+    UsedRefreshToken, User,
+};
 use crate::secret_crypto::decrypt_secret;
+use axum::http::header::SET_COOKIE;
 use axum::{
+    Form, Json,
     body::Bytes,
     extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
-    Form, Json,
 };
-use axum::http::header::SET_COOKIE;
-use chrono::{Duration, Utc};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use chrono::{Duration, Utc};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use sqlx;
@@ -26,15 +29,14 @@ use url::Url;
 use uuid::Uuid;
 
 #[allow(dead_code)]
-const EMPTY_CLIENT_SECRET_HASH: &str =
-    "$argon2id$v=19$m=19456,t=2,p=1$cmFuZG9tc2FsdDEyMzQ1Njc4$XuNHV8S+FPZGCjrD8bqRHT5rCREu9xqhvWqmCFKaRRA";
+const EMPTY_CLIENT_SECRET_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$cmFuZG9tc2FsdDEyMzQ1Njc4$XuNHV8S+FPZGCjrD8bqRHT5rCREu9xqhvWqmCFKaRRA";
 
-use super::client_credentials::{ErrorResponse, OAuth2State};
 use super::cleanup::cleanup_refresh_tokens;
-use super::ldap_role_sync::sync_ldap_roles_if_stale;
-use super::throttle;
+use super::client_credentials::{ErrorResponse, OAuth2State};
+use super::ldap_role_sync::{load_ad_ldap_provider_for_user, sync_ldap_roles_if_stale};
 use super::templates;
-use super::utils::{apply_client_auth, resolve_oauth_client, ClientLookupError};
+use super::throttle;
+use super::utils::{ClientLookupError, apply_client_auth, resolve_oauth_client};
 use simple_idm_ad_auth::verify_ldap_password;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -156,16 +158,14 @@ async fn get_auth_session_from_cookie(
     // Extract session token from cookie
     let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
 
-    let session_token = cookie_header
-        .split(';')
-        .find_map(|cookie| {
-            let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
-            if parts.len() == 2 && parts[0] == "auth_session" {
-                Some(parts[1].to_string())
-            } else {
-                None
-            }
-        })?;
+    let session_token = cookie_header.split(';').find_map(|cookie| {
+        let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
+        if parts.len() == 2 && parts[0] == "auth_session" {
+            Some(parts[1].to_string())
+        } else {
+            None
+        }
+    })?;
 
     // Load session from database
     let session = sqlx::query_as::<_, AuthenticationSession>(
@@ -190,7 +190,10 @@ pub async fn handle_authorize(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     // Získej response_type
-    let response_type = params.get("response_type").map(|s| s.as_str()).unwrap_or("");
+    let response_type = params
+        .get("response_type")
+        .map(|s| s.as_str())
+        .unwrap_or("");
     if response_type != "code" {
         let html = templates::error_page(
             "unsupported_response_type",
@@ -203,10 +206,8 @@ pub async fn handle_authorize(
     let client_id = match params.get("client_id") {
         Some(id) => id,
         None => {
-            let html = templates::error_page(
-                "invalid_request",
-                "Missing required parameter: client_id",
-            );
+            let html =
+                templates::error_page("invalid_request", "Missing required parameter: client_id");
             return Html(html).into_response();
         }
     };
@@ -228,10 +229,8 @@ pub async fn handle_authorize(
     let client = match resolve_oauth_client(&state.db_pool, client_id, tenant_hint).await {
         Ok(Some(client)) => client,
         Ok(None) => {
-            let html = templates::error_page(
-                "invalid_client",
-                "OAuth client not found or inactive",
-            );
+            let html =
+                templates::error_page("invalid_client", "OAuth client not found or inactive");
             return Html(html).into_response();
         }
         Err(ClientLookupError::AmbiguousClientId) => {
@@ -242,27 +241,19 @@ pub async fn handle_authorize(
             return Html(html).into_response();
         }
         Err(ClientLookupError::InvalidTenantHint) => {
-            let html = templates::error_page(
-                "invalid_request",
-                "Invalid tenant hint",
-            );
+            let html = templates::error_page("invalid_request", "Invalid tenant hint");
             return Html(html).into_response();
         }
         Err(ClientLookupError::Database) => {
-            let html = templates::error_page(
-                "server_error",
-                "Database error while validating client",
-            );
+            let html =
+                templates::error_page("server_error", "Database error while validating client");
             return Html(html).into_response();
         }
     };
 
     // Ověř redirect_uri
     if !is_redirect_uri_allowed(&client, redirect_uri) {
-        let html = templates::error_page(
-            "invalid_request",
-            "Invalid redirect_uri for this client",
-        );
+        let html = templates::error_page("invalid_request", "Invalid redirect_uri for this client");
         return Html(html).into_response();
     }
 
@@ -282,15 +273,21 @@ pub async fn handle_authorize(
             .collect();
 
         let expires_at = Utc::now() + Duration::minutes(10);
-    let scope = params
-        .get("scope")
-        .map(|s| s.as_str())
-        .unwrap_or(&client.scope);
-    let nonce = params.get("nonce").map(|s| s.as_str()).and_then(non_empty);
+        let scope = params
+            .get("scope")
+            .map(|s| s.as_str())
+            .unwrap_or(&client.scope);
+        let nonce = params.get("nonce").map(|s| s.as_str()).and_then(non_empty);
 
         // Normalize PKCE fields
-        let code_challenge = params.get("code_challenge").map(|s| s.as_str()).and_then(non_empty);
-        let code_challenge_method = params.get("code_challenge_method").map(|s| s.as_str()).and_then(non_empty);
+        let code_challenge = params
+            .get("code_challenge")
+            .map(|s| s.as_str())
+            .and_then(non_empty);
+        let code_challenge_method = params
+            .get("code_challenge_method")
+            .map(|s| s.as_str())
+            .and_then(non_empty);
 
         // Store authorization code
         if let Err(e) = sqlx::query(
@@ -352,18 +349,15 @@ pub async fn handle_authorize(
 
 fn is_redirect_uri_allowed(client: &OAuthClient, redirect_uri: &str) -> bool {
     // Exact match
-    if client
-        .redirect_uris
-        .iter()
-        .any(|uri| uri == redirect_uri)
-    {
+    if client.redirect_uris.iter().any(|uri| uri == redirect_uri) {
         return true;
     }
 
     // Check for loopback wildcard patterns (for all clients)
-    client.redirect_uris.iter().any(|pattern| {
-        matches_loopback_wildcard(pattern, redirect_uri)
-    })
+    client
+        .redirect_uris
+        .iter()
+        .any(|pattern| matches_loopback_wildcard(pattern, redirect_uri))
 }
 
 fn matches_loopback_wildcard(pattern: &str, redirect_uri: &str) -> bool {
@@ -530,31 +524,41 @@ pub async fn handle_federated_start(
     .await
     {
         Ok(Some(c)) => c,
-        _ => return Html(templates::error_page("invalid_client", "OAuth client not found")).into_response(),
+        _ => {
+            return Html(templates::error_page(
+                "invalid_client",
+                "OAuth client not found",
+            ))
+            .into_response();
+        }
     };
     if !is_redirect_uri_allowed(&client, redirect_uri) {
-        return Html(templates::error_page("invalid_request", "Invalid redirect_uri for this client")).into_response();
+        return Html(templates::error_page(
+            "invalid_request",
+            "Invalid redirect_uri for this client",
+        ))
+        .into_response();
     }
 
-    let idp =
-        match resolve_identity_provider_for_client(&state.db_pool, provider.trim(), client.id).await
-        {
-            Ok(Some(v)) => v,
-            Ok(None) => {
-                return Html(templates::error_page(
-                    "invalid_request",
-                    "Identity provider not found for this client tenant",
-                ))
-                .into_response();
-            }
-            Err(_) => {
-                return Html(templates::error_page(
-                    "server_error",
-                    "Database error while loading identity provider",
-                ))
-                .into_response();
-            }
-        };
+    let idp = match resolve_identity_provider_for_client(&state.db_pool, provider.trim(), client.id)
+        .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "Identity provider not found for this client tenant",
+            ))
+            .into_response();
+        }
+        Err(_) => {
+            return Html(templates::error_page(
+                "server_error",
+                "Database error while loading identity provider",
+            ))
+            .into_response();
+        }
+    };
 
     let discovery = match resolve_discovery(&idp).await {
         Ok(v) => v,
@@ -571,25 +575,44 @@ pub async fn handle_federated_start(
         csrf: csrf.clone(),
         client_id: client_id.to_string(),
         redirect_uri: redirect_uri.to_string(),
-        tenant: params.get("tenant").cloned().filter(|v| !v.trim().is_empty()),
-        scope: params.get("scope").cloned().filter(|v| !v.trim().is_empty()),
-        state: params.get("state").cloned().filter(|v| !v.trim().is_empty()),
-        code_challenge: params.get("code_challenge").cloned().filter(|v| !v.trim().is_empty()),
+        tenant: params
+            .get("tenant")
+            .cloned()
+            .filter(|v| !v.trim().is_empty()),
+        scope: params
+            .get("scope")
+            .cloned()
+            .filter(|v| !v.trim().is_empty()),
+        state: params
+            .get("state")
+            .cloned()
+            .filter(|v| !v.trim().is_empty()),
+        code_challenge: params
+            .get("code_challenge")
+            .cloned()
+            .filter(|v| !v.trim().is_empty()),
         code_challenge_method: params
             .get("code_challenge_method")
             .cloned()
             .filter(|v| !v.trim().is_empty()),
-        nonce: params.get("nonce").cloned().filter(|v| !v.trim().is_empty()),
+        nonce: params
+            .get("nonce")
+            .cloned()
+            .filter(|v| !v.trim().is_empty()),
     };
     let state_token = match serde_json::to_vec(&payload) {
         Ok(v) => URL_SAFE_NO_PAD.encode(v),
         Err(_) => {
-            return Html(templates::error_page("server_error", "Failed to prepare federated state"))
-                .into_response()
+            return Html(templates::error_page(
+                "server_error",
+                "Failed to prepare federated state",
+            ))
+            .into_response();
         }
     };
 
-    let issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let issuer =
+        std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let callback = format!(
         "{}/oauth2/federated/{}/callback",
         issuer.trim_end_matches('/'),
@@ -602,7 +625,7 @@ pub async fn handle_federated_start(
                 "server_error",
                 "Invalid upstream authorization endpoint",
             ))
-            .into_response()
+            .into_response();
         }
     };
     let scope = if idp.scopes.is_empty() {
@@ -621,7 +644,8 @@ pub async fn handle_federated_start(
         auth_url.query_pairs_mut().append_pair("hd", domain);
     }
 
-    let secure = state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+    let secure =
+        state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
     let cookie = build_federated_csrf_cookie(Some(&csrf), secure);
     ([(SET_COOKIE, cookie)], Redirect::to(auth_url.as_ref())).into_response()
 }
@@ -634,11 +658,23 @@ pub async fn handle_federated_callback(
 ) -> impl IntoResponse {
     let code = match params.get("code") {
         Some(v) if !v.trim().is_empty() => v.trim().to_string(),
-        _ => return Html(templates::error_page("invalid_request", "Missing code parameter")).into_response(),
+        _ => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "Missing code parameter",
+            ))
+            .into_response();
+        }
     };
     let state_token = match params.get("state") {
         Some(v) if !v.trim().is_empty() => v.trim(),
-        _ => return Html(templates::error_page("invalid_request", "Missing state parameter")).into_response(),
+        _ => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "Missing state parameter",
+            ))
+            .into_response();
+        }
     };
 
     let payload: FederatedStatePayload = match URL_SAFE_NO_PAD
@@ -647,32 +683,71 @@ pub async fn handle_federated_callback(
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
     {
         Some(v) => v,
-        None => return Html(templates::error_page("invalid_request", "Invalid state parameter")).into_response(),
+        None => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "Invalid state parameter",
+            ))
+            .into_response();
+        }
     };
 
     let cookie_csrf = cookie_value(&headers, "federated_csrf").unwrap_or_default();
     if cookie_csrf.is_empty() || cookie_csrf != payload.csrf {
-        return Html(templates::error_page("invalid_request", "CSRF verification failed")).into_response();
+        return Html(templates::error_page(
+            "invalid_request",
+            "CSRF verification failed",
+        ))
+        .into_response();
     }
 
-    let local_client = match resolve_oauth_client(&state.db_pool, &payload.client_id, payload.tenant.as_deref()).await {
+    let local_client = match resolve_oauth_client(
+        &state.db_pool,
+        &payload.client_id,
+        payload.tenant.as_deref(),
+    )
+    .await
+    {
         Ok(Some(c)) => c,
-        _ => return Html(templates::error_page("invalid_client", "OAuth client not found")).into_response(),
+        _ => {
+            return Html(templates::error_page(
+                "invalid_client",
+                "OAuth client not found",
+            ))
+            .into_response();
+        }
     };
     if !is_redirect_uri_allowed(&local_client, &payload.redirect_uri) {
-        return Html(templates::error_page("invalid_request", "Invalid redirect_uri")).into_response();
+        return Html(templates::error_page(
+            "invalid_request",
+            "Invalid redirect_uri",
+        ))
+        .into_response();
     }
 
-    let idp = match resolve_identity_provider_for_client(&state.db_pool, provider.trim(), local_client.id).await {
+    let idp = match resolve_identity_provider_for_client(
+        &state.db_pool,
+        provider.trim(),
+        local_client.id,
+    )
+    .await
+    {
         Ok(Some(v)) => v,
-        _ => return Html(templates::error_page("invalid_request", "Identity provider not found")).into_response(),
+        _ => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "Identity provider not found",
+            ))
+            .into_response();
+        }
     };
     let discovery = match resolve_discovery(&idp).await {
         Ok(v) => v,
         Err(e) => return Html(templates::error_page("server_error", &e)).into_response(),
     };
 
-    let issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let issuer =
+        std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let callback = format!(
         "{}/oauth2/federated/{}/callback",
         issuer.trim_end_matches('/'),
@@ -686,7 +761,7 @@ pub async fn handle_federated_callback(
                 "server_error",
                 "Failed to decrypt upstream client secret",
             ))
-            .into_response()
+            .into_response();
         }
     };
 
@@ -704,21 +779,45 @@ pub async fn handle_federated_callback(
             .await
         {
             Ok(v) => v,
-            Err(_) => return Html(templates::error_page("server_error", "Failed to exchange code with upstream IdP")).into_response(),
+            Err(_) => {
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to exchange code with upstream IdP",
+                ))
+                .into_response();
+            }
         };
         let resp = match resp.error_for_status() {
             Ok(v) => v,
-            Err(_) => return Html(templates::error_page("server_error", "Upstream IdP rejected token request")).into_response(),
+            Err(_) => {
+                return Html(templates::error_page(
+                    "server_error",
+                    "Upstream IdP rejected token request",
+                ))
+                .into_response();
+            }
         };
         match resp.json::<OidcTokenResponse>().await {
             Ok(v) => v,
-            Err(_) => return Html(templates::error_page("server_error", "Failed to parse token response from upstream IdP")).into_response(),
+            Err(_) => {
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to parse token response from upstream IdP",
+                ))
+                .into_response();
+            }
         }
     };
 
     let userinfo_endpoint = match discovery.userinfo_endpoint {
         Some(v) => v,
-        None => return Html(templates::error_page("server_error", "Upstream IdP userinfo endpoint is missing")).into_response(),
+        None => {
+            return Html(templates::error_page(
+                "server_error",
+                "Upstream IdP userinfo endpoint is missing",
+            ))
+            .into_response();
+        }
     };
     let userinfo = {
         let resp = match reqwest::Client::new()
@@ -728,15 +827,33 @@ pub async fn handle_federated_callback(
             .await
         {
             Ok(v) => v,
-            Err(_) => return Html(templates::error_page("server_error", "Failed to load userinfo from upstream IdP")).into_response(),
+            Err(_) => {
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to load userinfo from upstream IdP",
+                ))
+                .into_response();
+            }
         };
         let resp = match resp.error_for_status() {
             Ok(v) => v,
-            Err(_) => return Html(templates::error_page("server_error", "Upstream IdP rejected userinfo request")).into_response(),
+            Err(_) => {
+                return Html(templates::error_page(
+                    "server_error",
+                    "Upstream IdP rejected userinfo request",
+                ))
+                .into_response();
+            }
         };
         match resp.json::<OidcUserInfoResponse>().await {
             Ok(v) => v,
-            Err(_) => return Html(templates::error_page("server_error", "Failed to parse userinfo from upstream IdP")).into_response(),
+            Err(_) => {
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to parse userinfo from upstream IdP",
+                ))
+                .into_response();
+            }
         }
     };
 
@@ -769,7 +886,13 @@ pub async fn handle_federated_callback(
             ))
             .into_response();
         }
-        Err(_) => return Html(templates::error_page("server_error", "Database error while resolving federated identity")).into_response(),
+        Err(_) => {
+            return Html(templates::error_page(
+                "server_error",
+                "Database error while resolving federated identity",
+            ))
+            .into_response();
+        }
     };
 
     let _ = sqlx::query(
@@ -819,7 +942,8 @@ pub async fn handle_federated_callback(
         return Html(templates::error_page("server_error", "Failed to store authorization code")).into_response();
     }
 
-    let secure = state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+    let secure =
+        state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
     let session_token = create_auth_session(
         &state.db_pool,
         user.id,
@@ -828,16 +952,25 @@ pub async fn handle_federated_callback(
     )
     .await
     .ok();
-    let auth_cookie = build_auth_session_cookie(session_token.as_deref(), state.auth_session_expiry, secure);
+    let auth_cookie =
+        build_auth_session_cookie(session_token.as_deref(), state.auth_session_expiry, secure);
     let federated_cookie = build_federated_csrf_cookie(None, secure);
 
     let mut redirect = match Url::parse(&payload.redirect_uri) {
         Ok(v) => v,
-        Err(_) => return Html(templates::error_page("invalid_request", "Invalid redirect URI")).into_response(),
+        Err(_) => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "Invalid redirect URI",
+            ))
+            .into_response();
+        }
     };
     redirect.query_pairs_mut().append_pair("code", &code_out);
     if let Some(state_param) = payload.state {
-        redirect.query_pairs_mut().append_pair("state", &state_param);
+        redirect
+            .query_pairs_mut()
+            .append_pair("state", &state_param);
     }
 
     audit::emit_event(
@@ -855,7 +988,11 @@ pub async fn handle_federated_callback(
     )
     .await;
 
-    ([(SET_COOKIE, auth_cookie), (SET_COOKIE, federated_cookie)], Redirect::to(redirect.as_ref())).into_response()
+    (
+        [(SET_COOKIE, auth_cookie), (SET_COOKIE, federated_cookie)],
+        Redirect::to(redirect.as_ref()),
+    )
+        .into_response()
 }
 
 /// Endpoint pro login a vygenerování authorization code
@@ -898,7 +1035,8 @@ pub async fn handle_login(
                 "username": req.username,
                 "client_id": req.client_id
             })),
-        ).await;
+        )
+        .await;
         return invalid_login_response(&req);
     }
 
@@ -929,7 +1067,8 @@ pub async fn handle_login(
                 "username": req.username,
                 "client_id": req.client_id
             })),
-        ).await;
+        )
+        .await;
         return invalid_login_response(&req);
     }
 
@@ -971,14 +1110,13 @@ pub async fn handle_login(
                     "username": req.username,
                     "client_id": req.client_id
                 })),
-            ).await;
+            )
+            .await;
             return invalid_login_response(&req);
         }
         Err(_) => {
-            let html = templates::error_page(
-                "server_error",
-                "Database error while validating user",
-            );
+            let html =
+                templates::error_page("server_error", "Database error while validating user");
             return Html(html).into_response();
         }
     };
@@ -1002,7 +1140,8 @@ pub async fn handle_login(
                 "email": user.email,
                 "client_id": req.client_id
             })),
-        ).await;
+        )
+        .await;
         return invalid_login_response(&req);
     }
 
@@ -1026,45 +1165,36 @@ pub async fn handle_login(
                 "email": user.email,
                 "client_id": req.client_id
             })),
-        ).await;
+        )
+        .await;
         return invalid_login_response(&req);
     }
 
     // Ověř klienta
-    let client = match resolve_oauth_client(
-        &state.db_pool,
-        &req.client_id,
-        req.tenant.as_deref(),
-    )
-    .await
-    {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            let html = templates::error_page(
-                "invalid_client",
-                "OAuth client not found",
-            );
-            return Html(html).into_response();
-        }
-        Err(ClientLookupError::AmbiguousClientId) => {
-            let html = templates::error_page(
-                "invalid_request",
-                "Ambiguous client_id. Provide tenant hint.",
-            );
-            return Html(html).into_response();
-        }
-        Err(ClientLookupError::InvalidTenantHint) => {
-            let html = templates::error_page("invalid_request", "Invalid tenant hint");
-            return Html(html).into_response();
-        }
-        Err(ClientLookupError::Database) => {
-            let html = templates::error_page(
-                "server_error",
-                "Database error while validating client",
-            );
-            return Html(html).into_response();
-        }
-    };
+    let client =
+        match resolve_oauth_client(&state.db_pool, &req.client_id, req.tenant.as_deref()).await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                let html = templates::error_page("invalid_client", "OAuth client not found");
+                return Html(html).into_response();
+            }
+            Err(ClientLookupError::AmbiguousClientId) => {
+                let html = templates::error_page(
+                    "invalid_request",
+                    "Ambiguous client_id. Provide tenant hint.",
+                );
+                return Html(html).into_response();
+            }
+            Err(ClientLookupError::InvalidTenantHint) => {
+                let html = templates::error_page("invalid_request", "Invalid tenant hint");
+                return Html(html).into_response();
+            }
+            Err(ClientLookupError::Database) => {
+                let html =
+                    templates::error_page("server_error", "Database error while validating client");
+                return Html(html).into_response();
+            }
+        };
 
     // Normalize empty PKCE fields (Grafana can submit empty values)
     let code_challenge = req.code_challenge.as_deref().and_then(non_empty);
@@ -1136,7 +1266,8 @@ pub async fn handle_login(
             "client_id": client.client_id,
             "scope": scope
         })),
-    ).await;
+    )
+    .await;
     clear_failures(&state.db_pool, "oauth2_login", &login_throttle_keys).await;
 
     // Redirect zpět na aplikaci s authorization code
@@ -1154,10 +1285,9 @@ pub async fn handle_login(
             build_auth_session_cookie(Some(&session_token), state.auth_session_expiry, secure);
 
         let mut response = Redirect::to(&redirect_url).into_response();
-        response.headers_mut().insert(
-            SET_COOKIE,
-            cookie.parse().unwrap(),
-        );
+        response
+            .headers_mut()
+            .insert(SET_COOKIE, cookie.parse().unwrap());
         return response;
     }
 
@@ -1262,11 +1392,7 @@ async fn register_failures(
     }
 }
 
-async fn clear_failures(
-    db_pool: &sqlx::PgPool,
-    endpoint: &str,
-    keys: &[String],
-) {
+async fn clear_failures(db_pool: &sqlx::PgPool, endpoint: &str, keys: &[String]) {
     for key in keys {
         let _ = throttle::clear_failures(db_pool, endpoint, key).await;
     }
@@ -1330,55 +1456,40 @@ fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     })
 }
 
-fn should_use_ldap_for_email(state: &OAuth2State, email: &str) -> bool {
-    if state.ldap_auth.is_none() {
-        return false;
-    }
-    if state.ldap_auth_domains.is_empty() {
-        return true;
-    }
-    let domain = match email.rsplit_once('@') {
-        Some((_, d)) => d.trim().to_lowercase(),
-        None => return false,
-    };
-    state
-        .ldap_auth_domains
-        .iter()
-        .any(|d| d.eq_ignore_ascii_case(&domain))
-}
-
-async fn verify_user_password(
-    state: &OAuth2State,
-    user: &User,
-    password: &str,
-) -> bool {
+async fn verify_user_password(state: &OAuth2State, user: &User, password: &str) -> bool {
     if user.password_disabled || user.auth_mode.eq_ignore_ascii_case("federated") {
         return false;
     }
 
-    if should_use_ldap_for_email(state, &user.email) {
-        if let Some(cfg) = &state.ldap_auth {
-            match verify_ldap_password(cfg, &user.email, password).await {
-                Ok(()) => {
-                    if let Err(err) = sync_ldap_roles_if_stale(state, user, &user.email).await {
-                        tracing::warn!(
-                            user_id = %user.id,
-                            username = %user.username,
-                            "LDAP role sync warning: {}",
-                            err
-                        );
-                    }
-                    return true;
-                }
-                Err(err) => {
+    if user.auth_mode.eq_ignore_ascii_case("ad") {
+        let provider = match load_ad_ldap_provider_for_user(state, user).await {
+            Ok(Some(v)) => v,
+            Ok(None) => return false,
+            Err(err) => {
+                tracing::warn!(user_id = %user.id, username = %user.username, "LDAP provider load failed: {}", err);
+                return false;
+            }
+        };
+        match verify_ldap_password(&provider.config, &user.email, password).await {
+            Ok(()) => {
+                if let Err(err) = sync_ldap_roles_if_stale(state, user, &user.email).await {
                     tracing::warn!(
                         user_id = %user.id,
                         username = %user.username,
-                        "LDAP auth failed: {}",
+                        "LDAP role sync warning: {}",
                         err
                     );
-                    return false;
                 }
+                return true;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user.id,
+                    username = %user.username,
+                    "LDAP auth failed: {}",
+                    err
+                );
+                return false;
             }
         }
     }
@@ -1414,7 +1525,7 @@ async fn resolve_tenant_for_email(db_pool: &sqlx::PgPool, email: &str) -> Option
 
 /// Wrapper pro device code token exchange - deleguje na device_flow modul
 async fn handle_device_code_token(state: Arc<OAuth2State>, req: TokenRequest) -> Response {
-    use crate::oauth2::device_flow::{handle_device_token_internal, DeviceTokenRequest};
+    use crate::oauth2::device_flow::{DeviceTokenRequest, handle_device_token_internal};
 
     let device_req = DeviceTokenRequest {
         grant_type: req.grant_type,
@@ -1428,7 +1539,7 @@ async fn handle_device_code_token(state: Arc<OAuth2State>, req: TokenRequest) ->
                         error_description: "Missing device_code parameter".to_string(),
                     }),
                 )
-                    .into_response()
+                    .into_response();
             }
         },
         client_id: req.client_id.unwrap_or_default(),
@@ -1463,7 +1574,8 @@ pub async fn handle_token(
             StatusCode::TOO_MANY_REQUESTS,
             Json(ErrorResponse {
                 error: "rate_limited".to_string(),
-                error_description: "Too many failed attempts. Please wait and try again.".to_string(),
+                error_description: "Too many failed attempts. Please wait and try again."
+                    .to_string(),
             }),
         )
             .into_response();
@@ -1480,9 +1592,9 @@ pub async fn handle_token(
             Json(ErrorResponse {
                 error: "unsupported_grant_type".to_string(),
                 error_description: "Unsupported grant type".to_string(),
-                }),
-            )
-                .into_response(),
+            }),
+        )
+            .into_response(),
     };
 
     if response.status().is_success() {
@@ -1554,10 +1666,7 @@ fn generate_refresh_token() -> String {
         .collect()
 }
 
-async fn handle_authorization_code_token(
-    state: Arc<OAuth2State>,
-    req: TokenRequest,
-) -> Response {
+async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequest) -> Response {
     cleanup_refresh_tokens(&state.db_pool).await;
 
     let code = match req.code {
@@ -1567,7 +1676,7 @@ async fn handle_authorization_code_token(
                 error: "invalid_request".to_string(),
                 error_description: "Missing code parameter".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -1585,14 +1694,14 @@ async fn handle_authorization_code_token(
                 error: "invalid_grant".to_string(),
                 error_description: "Invalid authorization code".to_string(),
             })
-            .into_response()
+            .into_response();
         }
         Err(_) => {
             return Json(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Database error".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -1624,14 +1733,14 @@ async fn handle_authorization_code_token(
                 error: "invalid_client".to_string(),
                 error_description: "Client not found".to_string(),
             })
-            .into_response()
+            .into_response();
         }
         Err(_) => {
             return Json(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Database error".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -1642,7 +1751,7 @@ async fn handle_authorization_code_token(
                 error: "invalid_request".to_string(),
                 error_description: "Missing client_id".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -1661,9 +1770,10 @@ async fn handle_authorization_code_token(
         None => {
             return Json(ErrorResponse {
                 error: "invalid_request".to_string(),
-                error_description: "Missing redirect_uri parameter (required by OAuth2 spec)".to_string(),
+                error_description: "Missing redirect_uri parameter (required by OAuth2 spec)"
+                    .to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -1688,7 +1798,7 @@ async fn handle_authorization_code_token(
                     error: "invalid_client".to_string(),
                     error_description: "Missing client_secret".to_string(),
                 })
-                .into_response()
+                .into_response();
             }
         };
 
@@ -1724,8 +1834,8 @@ async fn handle_authorization_code_token(
                 {
                     Some("plain") => challenge == verifier,
                     Some("S256") => {
-                        use sha2::{Sha256, Digest};
                         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+                        use sha2::{Digest, Sha256};
                         let hash = Sha256::digest(verifier.as_bytes());
                         let encoded = URL_SAFE_NO_PAD.encode(hash);
                         challenge == encoded
@@ -1746,56 +1856,64 @@ async fn handle_authorization_code_token(
                     error: "invalid_request".to_string(),
                     error_description: "Missing code_verifier".to_string(),
                 })
-                .into_response()
+                .into_response();
             }
         }
     }
 
     // Načti uživatele
-    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
-        .bind(auth_code.user_id)
-        .fetch_optional(&state.db_pool)
-        .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_grant".to_string(),
-                error_description: "User not found".to_string(),
-            })
-            .into_response()
-        }
-        Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
-        }
-    };
+    let user =
+        match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(auth_code.user_id)
+            .fetch_optional(&state.db_pool)
+            .await
+        {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                return Json(ErrorResponse {
+                    error: "invalid_grant".to_string(),
+                    error_description: "User not found".to_string(),
+                })
+                .into_response();
+            }
+            Err(_) => {
+                return Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Database error".to_string(),
+                })
+                .into_response();
+            }
+        };
 
     let user_group_names = match client.groups_claim_mode.as_str() {
         "none" => vec![],
-        "direct" => match get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await {
-            Ok(names) => names,
-            Err(_) => {
-                return Json(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Failed to fetch direct user group names".to_string(),
-                })
-                .into_response()
+        "direct" => {
+            match get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+                .await
+            {
+                Ok(names) => names,
+                Err(_) => {
+                    return Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Failed to fetch direct user group names".to_string(),
+                    })
+                    .into_response();
+                }
             }
-        },
-        _ => match get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await {
-            Ok(names) => names,
-            Err(_) => {
-                return Json(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Failed to fetch user group names".to_string(),
-                })
-                .into_response()
+        }
+        _ => {
+            match get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await
+            {
+                Ok(names) => names,
+                Err(_) => {
+                    return Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Failed to fetch user group names".to_string(),
+                    })
+                    .into_response();
+                }
             }
-        },
+        }
     };
 
     // Apply client group filtering patterns (if any)
@@ -1836,17 +1954,24 @@ async fn handle_authorization_code_token(
                     error: "server_error".to_string(),
                     error_description: "Failed to fetch user groups".to_string(),
                 })
-                .into_response()
+                .into_response();
             }
         };
-        match build_custom_claims(&state.db_pool, client.id, &user_group_ids, &filtered_group_names).await {
+        match build_custom_claims(
+            &state.db_pool,
+            client.id,
+            &user_group_ids,
+            &filtered_group_names,
+        )
+        .await
+        {
             Ok(claims) => claims,
             Err(_) => {
                 return Json(ErrorResponse {
                     error: "server_error".to_string(),
                     error_description: "Failed to build custom claims".to_string(),
                 })
-                .into_response()
+                .into_response();
             }
         }
     } else {
@@ -1880,7 +2005,7 @@ async fn handle_authorization_code_token(
                 error: "server_error".to_string(),
                 error_description: "Failed to create access token".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -1900,7 +2025,7 @@ async fn handle_authorization_code_token(
                 error: "server_error".to_string(),
                 error_description: "Failed to create ID token".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -1957,7 +2082,8 @@ async fn handle_authorization_code_token(
             "grant_type": "authorization_code",
             "client_id": client.client_id
         })),
-    ).await;
+    )
+    .await;
 
     tracing::debug!("Token response: {:?}", response);
 
@@ -1982,51 +2108,50 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
                 error: "invalid_request".to_string(),
                 error_description: "Missing refresh_token parameter".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
     // Načti refresh token
-    let refresh_token = match sqlx::query_as::<_, RefreshToken>(
-        "SELECT * FROM refresh_tokens WHERE token = $1",
-    )
-    .bind(&refresh_token_str)
-    .fetch_optional(&state.db_pool)
-    .await
-    {
-        Ok(Some(rt)) => rt,
-        Ok(None) => {
-            let used = sqlx::query_as::<_, UsedRefreshToken>(
-                "SELECT * FROM used_refresh_tokens WHERE token = $1",
-            )
+    let refresh_token =
+        match sqlx::query_as::<_, RefreshToken>("SELECT * FROM refresh_tokens WHERE token = $1")
             .bind(&refresh_token_str)
             .fetch_optional(&state.db_pool)
-            .await;
-
-            if let Ok(Some(used)) = used {
-                let _ = sqlx::query(
-                    "DELETE FROM refresh_tokens WHERE client_id = $1 AND user_id = $2",
+            .await
+        {
+            Ok(Some(rt)) => rt,
+            Ok(None) => {
+                let used = sqlx::query_as::<_, UsedRefreshToken>(
+                    "SELECT * FROM used_refresh_tokens WHERE token = $1",
                 )
-                .bind(used.client_id)
-                .bind(used.user_id)
-                .execute(&state.db_pool)
+                .bind(&refresh_token_str)
+                .fetch_optional(&state.db_pool)
                 .await;
-            }
 
-            return Json(ErrorResponse {
-                error: "invalid_grant".to_string(),
-                error_description: "Invalid refresh token".to_string(),
-            })
-            .into_response()
-        }
-        Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
-        }
-    };
+                if let Ok(Some(used)) = used {
+                    let _ = sqlx::query(
+                        "DELETE FROM refresh_tokens WHERE client_id = $1 AND user_id = $2",
+                    )
+                    .bind(used.client_id)
+                    .bind(used.user_id)
+                    .execute(&state.db_pool)
+                    .await;
+                }
+
+                return Json(ErrorResponse {
+                    error: "invalid_grant".to_string(),
+                    error_description: "Invalid refresh token".to_string(),
+                })
+                .into_response();
+            }
+            Err(_) => {
+                return Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Database error".to_string(),
+                })
+                .into_response();
+            }
+        };
 
     // Zkontroluj expiraci
     if refresh_token.expires_at < Utc::now() {
@@ -2056,14 +2181,14 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
                 error: "invalid_client".to_string(),
                 error_description: "Client not found".to_string(),
             })
-            .into_response()
+            .into_response();
         }
         Err(_) => {
             return Json(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Database error".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -2097,34 +2222,39 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     }
 
     // Načti uživatele
-    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
-        .bind(refresh_token.user_id)
-        .fetch_optional(&state.db_pool)
-        .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_grant".to_string(),
-                error_description: "User not found".to_string(),
-            })
-            .into_response()
-        }
-        Err(_) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
-        }
-    };
+    let user =
+        match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(refresh_token.user_id)
+            .fetch_optional(&state.db_pool)
+            .await
+        {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                return Json(ErrorResponse {
+                    error: "invalid_grant".to_string(),
+                    error_description: "User not found".to_string(),
+                })
+                .into_response();
+            }
+            Err(_) => {
+                return Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Database error".to_string(),
+                })
+                .into_response();
+            }
+        };
 
     let user_group_names = match client.groups_claim_mode.as_str() {
         "none" => vec![],
-        "direct" => get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+        "direct" => {
+            get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+                .await
+                .unwrap_or_default()
+        }
+        _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
             .await
             .unwrap_or_default(),
-        _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await.unwrap_or_default(),
     };
 
     // Apply client group filtering patterns (if any)
@@ -2159,9 +2289,14 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
             .await
             .unwrap_or_default();
-        build_custom_claims(&state.db_pool, client.id, &user_group_ids, &filtered_group_names)
-            .await
-            .unwrap_or_default()
+        build_custom_claims(
+            &state.db_pool,
+            client.id,
+            &user_group_ids,
+            &filtered_group_names,
+        )
+        .await
+        .unwrap_or_default()
     } else {
         std::collections::HashMap::new()
     };
@@ -2193,7 +2328,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
                 error: "server_error".to_string(),
                 error_description: "Failed to create access token".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -2208,7 +2343,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
                 error: "server_error".to_string(),
                 error_description: "Failed to start transaction".to_string(),
             })
-            .into_response()
+            .into_response();
         }
     };
 
@@ -2299,7 +2434,8 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
             "grant_type": "refresh_token",
             "client_id": client.client_id
         })),
-    ).await;
+    )
+    .await;
 
     Json(response).into_response()
 }
@@ -2339,10 +2475,9 @@ pub async fn handle_logout(
     let mut response = Html("<html><body><h1>Logged out</h1><p>You have been successfully logged out.</p></body></html>")
         .into_response();
 
-    response.headers_mut().insert(
-        SET_COOKIE,
-        cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert(SET_COOKIE, cookie.parse().unwrap());
 
     response
 }

@@ -5,10 +5,10 @@ use crate::auth::{
 use crate::client_group_filters::apply_client_group_filters;
 use crate::db::models::{DeviceCode, OAuthClient, OAuthClientGroupPattern, User};
 use axum::{
+    Form, Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
-    Form, Json,
 };
 use chrono::{Duration, Utc};
 use rand::RngExt;
@@ -18,10 +18,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::client_credentials::{ErrorResponse, OAuth2State};
-use super::ldap_role_sync::sync_ldap_roles_if_stale;
-use super::throttle;
+use super::ldap_role_sync::{load_ad_ldap_provider_for_user, sync_ldap_roles_if_stale};
 use super::templates;
-use super::utils::{resolve_oauth_client, ClientLookupError};
+use super::throttle;
+use super::utils::{ClientLookupError, resolve_oauth_client};
 use simple_idm_ad_auth::verify_ldap_password;
 
 #[derive(Debug, Deserialize)]
@@ -98,9 +98,7 @@ fn generate_user_code(length: usize, format: &str) -> String {
 
 /// Endpoint pro zobrazení HTML formuláře pro device verification
 /// GET /device?user_code=XXXX-XXXX
-pub async fn show_device_form(
-    Query(query): Query<DevicePageQuery>,
-) -> impl IntoResponse {
+pub async fn show_device_form(Query(query): Query<DevicePageQuery>) -> impl IntoResponse {
     Html(templates::device_verify_page(
         query.user_code.as_deref(),
         None,
@@ -115,40 +113,44 @@ pub async fn handle_device_authorization(
     Form(req): Form<DeviceAuthorizationRequest>,
 ) -> impl IntoResponse {
     // Ověř klienta
-    let client = match resolve_oauth_client(&state.db_pool, &req.client_id, req.tenant.as_deref()).await {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            return Json(ErrorResponse {
-                error: "invalid_client".to_string(),
-                error_description: "Client not found or inactive".to_string(),
-            })
-            .into_response()
-        }
-        Err(ClientLookupError::AmbiguousClientId) => {
-            return Json(ErrorResponse {
-                error: "invalid_request".to_string(),
-                error_description: "Ambiguous client_id. Provide tenant hint.".to_string(),
-            })
-            .into_response()
-        }
-        Err(ClientLookupError::InvalidTenantHint) => {
-            return Json(ErrorResponse {
-                error: "invalid_request".to_string(),
-                error_description: "Invalid tenant hint".to_string(),
-            })
-            .into_response()
-        }
-        Err(ClientLookupError::Database) => {
-            return Json(ErrorResponse {
-                error: "server_error".to_string(),
-                error_description: "Database error".to_string(),
-            })
-            .into_response()
-        }
-    };
+    let client =
+        match resolve_oauth_client(&state.db_pool, &req.client_id, req.tenant.as_deref()).await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                return Json(ErrorResponse {
+                    error: "invalid_client".to_string(),
+                    error_description: "Client not found or inactive".to_string(),
+                })
+                .into_response();
+            }
+            Err(ClientLookupError::AmbiguousClientId) => {
+                return Json(ErrorResponse {
+                    error: "invalid_request".to_string(),
+                    error_description: "Ambiguous client_id. Provide tenant hint.".to_string(),
+                })
+                .into_response();
+            }
+            Err(ClientLookupError::InvalidTenantHint) => {
+                return Json(ErrorResponse {
+                    error: "invalid_request".to_string(),
+                    error_description: "Invalid tenant hint".to_string(),
+                })
+                .into_response();
+            }
+            Err(ClientLookupError::Database) => {
+                return Json(ErrorResponse {
+                    error: "server_error".to_string(),
+                    error_description: "Database error".to_string(),
+                })
+                .into_response();
+            }
+        };
 
     // Zkontroluj, že klient podporuje device_code flow
-    if !client.grant_types.contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string()) {
+    if !client
+        .grant_types
+        .contains(&"urn:ietf:params:oauth:grant-type:device_code".to_string())
+    {
         return Json(ErrorResponse {
             error: "unauthorized_client".to_string(),
             error_description: "Client is not authorized for device flow".to_string(),
@@ -248,35 +250,34 @@ pub async fn handle_device_verify(
         default_tenant_id()
     };
     // Načti device code podle user_code
-    let device_code = match sqlx::query_as::<_, DeviceCode>(
-        "SELECT * FROM device_codes WHERE user_code = $1",
-    )
-    .bind(&req.user_code)
-    .fetch_optional(&state.db_pool)
-    .await
-    {
-        Ok(Some(dc)) => dc,
-        Ok(None) => {
-            return Html(templates::device_verify_page(
-                Some(&req.user_code),
-                Some("Invalid user code"),
-                None,
-            ))
-            .into_response()
-        }
-        Err(_) => {
-            return Html(templates::device_verify_page(
-                Some(&req.user_code),
-                Some("Database error"),
-                None,
-            ))
-            .into_response()
-        }
-    };
+    let device_code =
+        match sqlx::query_as::<_, DeviceCode>("SELECT * FROM device_codes WHERE user_code = $1")
+            .bind(&req.user_code)
+            .fetch_optional(&state.db_pool)
+            .await
+        {
+            Ok(Some(dc)) => dc,
+            Ok(None) => {
+                return Html(templates::device_verify_page(
+                    Some(&req.user_code),
+                    Some("Invalid user code"),
+                    None,
+                ))
+                .into_response();
+            }
+            Err(_) => {
+                return Html(templates::device_verify_page(
+                    Some(&req.user_code),
+                    Some("Database error"),
+                    None,
+                ))
+                .into_response();
+            }
+        };
 
     // Brute force protection: Zkontroluj počet failed attempts
     let failed_attempts: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM device_verification_attempts WHERE user_code = $1"
+        "SELECT COUNT(*) FROM device_verification_attempts WHERE user_code = $1",
     )
     .bind(&req.user_code)
     .fetch_one(&state.db_pool)
@@ -376,7 +377,7 @@ pub async fn handle_device_verify(
             }
             // Log failed attempt
             let _ = sqlx::query(
-                "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)"
+                "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)",
             )
             .bind(&req.user_code)
             .bind("unknown") // TODO: extract real IP from request
@@ -388,7 +389,7 @@ pub async fn handle_device_verify(
                 Some("Invalid credentials"),
                 None,
             ))
-            .into_response()
+            .into_response();
         }
         Err(_) => {
             return Html(templates::device_verify_page(
@@ -396,7 +397,7 @@ pub async fn handle_device_verify(
                 Some("Database error"),
                 None,
             ))
-            .into_response()
+            .into_response();
         }
     };
 
@@ -435,7 +436,7 @@ pub async fn handle_device_verify(
         }
         // Log failed attempt
         let _ = sqlx::query(
-            "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)"
+            "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)",
         )
         .bind(&req.user_code)
         .bind("unknown") // TODO: extract real IP from request
@@ -493,55 +494,40 @@ fn is_email_domain_allowed(email: &str, allowed_domains: &[String]) -> bool {
     allowed_domains.iter().any(|d| d == &domain)
 }
 
-fn should_use_ldap_for_email(state: &OAuth2State, email: &str) -> bool {
-    if state.ldap_auth.is_none() {
-        return false;
-    }
-    if state.ldap_auth_domains.is_empty() {
-        return true;
-    }
-    let domain = match email.rsplit_once('@') {
-        Some((_, d)) => d.trim().to_lowercase(),
-        None => return false,
-    };
-    state
-        .ldap_auth_domains
-        .iter()
-        .any(|d| d.eq_ignore_ascii_case(&domain))
-}
-
-async fn verify_user_password(
-    state: &OAuth2State,
-    user: &User,
-    password: &str,
-) -> bool {
+async fn verify_user_password(state: &OAuth2State, user: &User, password: &str) -> bool {
     if user.password_disabled || user.auth_mode.eq_ignore_ascii_case("federated") {
         return false;
     }
 
-    if should_use_ldap_for_email(state, &user.email) {
-        if let Some(cfg) = &state.ldap_auth {
-            match verify_ldap_password(cfg, &user.email, password).await {
-                Ok(()) => {
-                    if let Err(err) = sync_ldap_roles_if_stale(state, user, &user.email).await {
-                        tracing::warn!(
-                            user_id = %user.id,
-                            username = %user.username,
-                            "LDAP role sync warning: {}",
-                            err
-                        );
-                    }
-                    return true;
-                }
-                Err(err) => {
+    if user.auth_mode.eq_ignore_ascii_case("ad") {
+        let provider = match load_ad_ldap_provider_for_user(state, user).await {
+            Ok(Some(v)) => v,
+            Ok(None) => return false,
+            Err(err) => {
+                tracing::warn!(user_id = %user.id, username = %user.username, "LDAP provider load failed: {}", err);
+                return false;
+            }
+        };
+        match verify_ldap_password(&provider.config, &user.email, password).await {
+            Ok(()) => {
+                if let Err(err) = sync_ldap_roles_if_stale(state, user, &user.email).await {
                     tracing::warn!(
                         user_id = %user.id,
                         username = %user.username,
-                        "LDAP auth failed: {}",
+                        "LDAP role sync warning: {}",
                         err
                     );
-                    return false;
                 }
+                return true;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user.id,
+                    username = %user.username,
+                    "LDAP auth failed: {}",
+                    err
+                );
+                return false;
             }
         }
     }
@@ -596,35 +582,34 @@ pub async fn handle_device_token_internal(
     }
 
     // Načti device code
-    let device_code = match sqlx::query_as::<_, DeviceCode>(
-        "SELECT * FROM device_codes WHERE device_code = $1",
-    )
-    .bind(&req.device_code)
-    .fetch_optional(&state.db_pool)
-    .await
-    {
-        Ok(Some(dc)) => dc,
-        Ok(None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "invalid_grant".to_string(),
-                    error_description: "Invalid device code".to_string(),
-                }),
-            )
-                .into_response()
-        }
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Database error".to_string(),
-                }),
-            )
-                .into_response()
-        }
-    };
+    let device_code =
+        match sqlx::query_as::<_, DeviceCode>("SELECT * FROM device_codes WHERE device_code = $1")
+            .bind(&req.device_code)
+            .fetch_optional(&state.db_pool)
+            .await
+        {
+            Ok(Some(dc)) => dc,
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "invalid_grant".to_string(),
+                        error_description: "Invalid device code".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Database error".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
 
     // Zkontroluj expiraci
     if device_code.expires_at < Utc::now() {
@@ -655,7 +640,10 @@ pub async fn handle_device_token_internal(
             .into_response();
     }
 
-    tracing::info!("Device code authorized, exchanging for tokens: user_id={:?}", device_code.user_id);
+    tracing::info!(
+        "Device code authorized, exchanging for tokens: user_id={:?}",
+        device_code.user_id
+    );
 
     // Musí existovat user_id, pokud je autorizovaný
     let user_id = match device_code.user_id {
@@ -668,7 +656,7 @@ pub async fn handle_device_token_internal(
                     error_description: "Device authorized but no user_id".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -689,7 +677,7 @@ pub async fn handle_device_token_internal(
                     error_description: "Client not found".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
         Err(_) => {
             return (
@@ -699,45 +687,50 @@ pub async fn handle_device_token_internal(
                     error_description: "Database error".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
     // Načti uživatele
-    let user = match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
-        .bind(user_id)
-        .fetch_optional(&state.db_pool)
-        .await
-    {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "invalid_grant".to_string(),
-                    error_description: "User not found".to_string(),
-                }),
-            )
-                .into_response()
-        }
-        Err(_) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Database error".to_string(),
-                }),
-            )
-                .into_response()
-        }
-    };
+    let user =
+        match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(user_id)
+            .fetch_optional(&state.db_pool)
+            .await
+        {
+            Ok(Some(user)) => user,
+            Ok(None) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "invalid_grant".to_string(),
+                        error_description: "User not found".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+            Err(_) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Database error".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
 
     let user_group_names = match client.groups_claim_mode.as_str() {
         "none" => vec![],
-        "direct" => get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+        "direct" => {
+            get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+                .await
+                .unwrap_or_default()
+        }
+        _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
             .await
             .unwrap_or_default(),
-        _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await.unwrap_or_default(),
     };
 
     // Apply client group filtering patterns (if any)
@@ -773,9 +766,14 @@ pub async fn handle_device_token_internal(
         let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
             .await
             .unwrap_or_default();
-        build_custom_claims(&state.db_pool, client.id, &user_group_ids, &filtered_group_names)
-            .await
-            .unwrap_or_default()
+        build_custom_claims(
+            &state.db_pool,
+            client.id,
+            &user_group_ids,
+            &filtered_group_names,
+        )
+        .await
+        .unwrap_or_default()
     } else {
         std::collections::HashMap::new()
     };
@@ -810,7 +808,7 @@ pub async fn handle_device_token_internal(
                     error_description: "Failed to create access token".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 

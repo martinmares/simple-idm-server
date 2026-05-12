@@ -1,6 +1,6 @@
-use anyhow::{anyhow, Context, Result};
-use base64::engine::general_purpose::STANDARD as B64;
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as B64;
 use chacha20poly1305::aead::{Aead, KeyInit};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use rand::Rng;
@@ -16,8 +16,8 @@ const MAC_LEN: usize = 16;
 static MASTER_KEY: OnceLock<[u8; KEY_LEN]> = OnceLock::new();
 
 fn load_master_key() -> Result<[u8; KEY_LEN]> {
-    let raw = std::env::var("IDP_SECRETS_MASTER_KEY")
-        .context("IDP_SECRETS_MASTER_KEY is not set")?;
+    let raw =
+        std::env::var("IDP_SECRETS_MASTER_KEY").context("IDP_SECRETS_MASTER_KEY is not set")?;
 
     if let Ok(bytes) = B64.decode(raw.trim()) {
         if bytes.len() == KEY_LEN {
@@ -109,9 +109,7 @@ pub fn decrypt_secret(stored: &str) -> Result<String> {
         .context("Invalid encrypted secret payload")?;
 
     if bytes.len() < NONCE_LEN + MAC_LEN {
-        return Err(anyhow!(
-            "Encrypted secret too short (nonce+ciphertext+tag)"
-        ));
+        return Err(anyhow!("Encrypted secret too short (nonce+ciphertext+tag)"));
     }
 
     let nonce = XNonce::from_slice(&bytes[..NONCE_LEN]);

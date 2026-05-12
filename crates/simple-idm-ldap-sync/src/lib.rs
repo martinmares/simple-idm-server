@@ -43,11 +43,8 @@ pub fn apply_role_mappings(input: &SyncInput) -> SyncResult {
 
     let external_set: HashSet<String> = input.external_roles.iter().cloned().collect();
 
-    let mut mappings: Vec<&ExternalRoleMapping> = input
-        .mappings
-        .iter()
-        .filter(|m| m.is_active)
-        .collect();
+    let mut mappings: Vec<&ExternalRoleMapping> =
+        input.mappings.iter().filter(|m| m.is_active).collect();
 
     // Lower number = higher priority.
     mappings.sort_by_key(|m| m.priority);
@@ -138,7 +135,10 @@ mod tests {
         };
 
         let out = apply_role_mappings(&input);
-        assert_eq!(out.effective_groups, vec!["team:devops".to_string(), "users".to_string()]);
+        assert_eq!(
+            out.effective_groups,
+            vec!["team:devops".to_string(), "users".to_string()]
+        );
         assert_eq!(out.added_groups, vec!["team:devops".to_string()]);
         assert_eq!(out.removed_groups, Vec::<String>::new());
         assert_eq!(out.matched_external_roles, vec!["ad:devops".to_string()]);

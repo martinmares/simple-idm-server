@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use ldap3::{LdapConnAsync, Scope, SearchEntry};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -75,11 +75,7 @@ impl LdapAuthConfig {
 /// Behavior:
 /// - If `bind_dn` is configured, it performs service bind + search by `user_filter` then user bind.
 /// - If `bind_dn` is not configured, it attempts direct bind with `login` as DN/UPN.
-pub async fn verify_ldap_password(
-    cfg: &LdapAuthConfig,
-    login: &str,
-    password: &str,
-) -> Result<()> {
+pub async fn verify_ldap_password(cfg: &LdapAuthConfig, login: &str, password: &str) -> Result<()> {
     cfg.validate()?;
 
     if password.is_empty() {
@@ -201,7 +197,12 @@ async fn find_user_dn(ldap: &mut ldap3::Ldap, cfg: &LdapAuthConfig, login: &str)
         .replace("{1}", &escaped_login);
 
     let (entries, _res) = ldap
-        .search(&cfg.base_dn, Scope::Subtree, &filter, vec!["dn", "memberOf"])
+        .search(
+            &cfg.base_dn,
+            Scope::Subtree,
+            &filter,
+            vec!["dn", "memberOf"],
+        )
         .await
         .with_context(|| format!("LDAP search request failed with filter: {}", filter))?
         .success()

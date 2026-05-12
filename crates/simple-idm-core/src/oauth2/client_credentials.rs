@@ -1,19 +1,18 @@
-use crate::auth::{verify_password, JwtService};
+use super::throttle;
+use super::utils::{ClientLookupError, resolve_oauth_client};
+use crate::auth::{JwtService, verify_password};
 use crate::config::AuthProtectionConfig;
 use crate::config::DeviceFlowConfig;
 use crate::db::DbPool;
-use simple_idm_ad_auth::LdapAuthConfig;
 use axum::{
+    Json,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use super::throttle;
-use super::utils::{resolve_oauth_client, ClientLookupError};
 
 #[derive(Debug, Deserialize)]
 pub struct ClientCredentialsRequest {
@@ -48,11 +47,6 @@ pub struct OAuth2State {
     pub device_flow_config: DeviceFlowConfig,
     pub allow_username_login: bool,
     pub allowed_email_domains: Vec<String>,
-    pub ldap_auth: Option<LdapAuthConfig>,
-    pub ldap_auth_domains: Vec<String>,
-    pub ldap_role_sync_enabled: bool,
-    pub ldap_role_sync_ttl_seconds: u64,
-    pub ldap_role_sync_timeout_seconds: u64,
     pub trust_proxy_headers: bool,
     pub force_secure_cookies: bool,
     pub auth_protection: AuthProtectionConfig,
@@ -77,8 +71,8 @@ pub async fn handle_client_credentials(
                     StatusCode::TOO_MANY_REQUESTS,
                     Json(ErrorResponse {
                         error: "rate_limited".to_string(),
-                        error_description:
-                            "Too many failed attempts. Please wait and try again.".to_string(),
+                        error_description: "Too many failed attempts. Please wait and try again."
+                            .to_string(),
                     }),
                 )
                     .into_response();
@@ -109,82 +103,83 @@ pub async fn handle_client_credentials(
     }
 
     // Načti OAuth klienta z databáze
-    let client = match resolve_oauth_client(&state.db_pool, &req.client_id, req.tenant.as_deref()).await {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            if state.auth_protection.enabled {
-                for key in &throttle_keys {
-                    let _ = throttle::register_failure(
-                        &state.db_pool,
-                        "oauth2_client_credentials",
-                        key,
-                        &state.auth_protection,
-                    )
-                    .await;
+    let client =
+        match resolve_oauth_client(&state.db_pool, &req.client_id, req.tenant.as_deref()).await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                if state.auth_protection.enabled {
+                    for key in &throttle_keys {
+                        let _ = throttle::register_failure(
+                            &state.db_pool,
+                            "oauth2_client_credentials",
+                            key,
+                            &state.auth_protection,
+                        )
+                        .await;
+                    }
                 }
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "invalid_client".to_string(),
+                        error_description: "Client not found or inactive".to_string(),
+                    }),
+                )
+                    .into_response();
             }
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: "Client not found or inactive".to_string(),
-                }),
-            )
-                .into_response()
-        }
-        Err(ClientLookupError::AmbiguousClientId) => {
-            if state.auth_protection.enabled {
-                for key in &throttle_keys {
-                    let _ = throttle::register_failure(
-                        &state.db_pool,
-                        "oauth2_client_credentials",
-                        key,
-                        &state.auth_protection,
-                    )
-                    .await;
+            Err(ClientLookupError::AmbiguousClientId) => {
+                if state.auth_protection.enabled {
+                    for key in &throttle_keys {
+                        let _ = throttle::register_failure(
+                            &state.db_pool,
+                            "oauth2_client_credentials",
+                            key,
+                            &state.auth_protection,
+                        )
+                        .await;
+                    }
                 }
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "invalid_request".to_string(),
+                        error_description: "Ambiguous client_id. Provide tenant hint.".to_string(),
+                    }),
+                )
+                    .into_response();
             }
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "invalid_request".to_string(),
-                    error_description: "Ambiguous client_id. Provide tenant hint.".to_string(),
-                }),
-            )
-                .into_response()
-        }
-        Err(ClientLookupError::InvalidTenantHint) => {
-            if state.auth_protection.enabled {
-                for key in &throttle_keys {
-                    let _ = throttle::register_failure(
-                        &state.db_pool,
-                        "oauth2_client_credentials",
-                        key,
-                        &state.auth_protection,
-                    )
-                    .await;
+            Err(ClientLookupError::InvalidTenantHint) => {
+                if state.auth_protection.enabled {
+                    for key in &throttle_keys {
+                        let _ = throttle::register_failure(
+                            &state.db_pool,
+                            "oauth2_client_credentials",
+                            key,
+                            &state.auth_protection,
+                        )
+                        .await;
+                    }
                 }
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(ErrorResponse {
+                        error: "invalid_request".to_string(),
+                        error_description: "Invalid tenant hint".to_string(),
+                    }),
+                )
+                    .into_response();
             }
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
-                    error: "invalid_request".to_string(),
-                    error_description: "Invalid tenant hint".to_string(),
-                }),
-            )
-                .into_response()
-        }
-        Err(ClientLookupError::Database) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Database error".to_string(),
-                }),
-            )
-                .into_response()
-        }
-    };
+            Err(ClientLookupError::Database) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: "server_error".to_string(),
+                        error_description: "Database error".to_string(),
+                    }),
+                )
+                    .into_response();
+            }
+        };
 
     // Ověř client secret (client_credentials flow vyžaduje vždy secret)
     match &client.client_secret_hash {
@@ -215,7 +210,10 @@ pub async fn handle_client_credentials(
     }
 
     // Zkontroluj, že klient podporuje client_credentials flow
-    if !client.grant_types.contains(&"client_credentials".to_string()) {
+    if !client
+        .grant_types
+        .contains(&"client_credentials".to_string())
+    {
         if state.auth_protection.enabled {
             for key in &throttle_keys {
                 let _ = throttle::register_failure(
@@ -254,7 +252,7 @@ pub async fn handle_client_credentials(
         None, // žádný email
         None, // žádné preferred_username
         Some(scope.clone()),
-        vec![], // žádné skupiny
+        vec![],         // žádné skupiny
         HashMap::new(), // žádné custom claims
         state.access_token_expiry,
     ) {
@@ -279,13 +277,14 @@ pub async fn handle_client_credentials(
                     error_description: "Failed to create access token".to_string(),
                 }),
             )
-                .into_response()
+                .into_response();
         }
     };
 
     if state.auth_protection.enabled {
         for key in &throttle_keys {
-            let _ = throttle::clear_failures(&state.db_pool, "oauth2_client_credentials", key).await;
+            let _ =
+                throttle::clear_failures(&state.db_pool, "oauth2_client_credentials", key).await;
         }
     }
 

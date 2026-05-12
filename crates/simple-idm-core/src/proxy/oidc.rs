@@ -1,12 +1,12 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
+use openidconnect::OAuth2TokenResponse;
 use openidconnect::{
-    core::{CoreAuthenticationFlow, CoreIdToken, CoreIdTokenClaims, CoreProviderMetadata},
-    reqwest,
     AuthorizationCode, ClientId, ClientSecret, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge,
     PkceCodeVerifier, RedirectUrl, RefreshToken, Scope, TokenResponse as OidcTokenResponse,
+    core::{CoreAuthenticationFlow, CoreIdToken, CoreIdTokenClaims, CoreProviderMetadata},
+    reqwest,
 };
-use openidconnect::OAuth2TokenResponse;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -43,8 +43,8 @@ impl OidcClient {
             .context("Failed to build OIDC HTTP client")?;
 
         // Discover OIDC provider metadata
-        let issuer_url = IssuerUrl::new(config.oidc_issuer.clone())
-            .context("Invalid issuer URL")?;
+        let issuer_url =
+            IssuerUrl::new(config.oidc_issuer.clone()).context("Invalid issuer URL")?;
 
         let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
             .await
@@ -60,9 +60,12 @@ impl OidcClient {
     }
 
     pub async fn start_flow(&self, redirect_url: &str) -> Result<(String, FlowState)> {
-        let callback_redirect_url = format!("{}{}", self.config.public_base_url, self.config.redirect_path);
-        let callback_redirect_url = RedirectUrl::new(callback_redirect_url)
-            .context("Invalid redirect URL")?;
+        let callback_redirect_url = format!(
+            "{}{}",
+            self.config.public_base_url, self.config.redirect_path
+        );
+        let callback_redirect_url =
+            RedirectUrl::new(callback_redirect_url).context("Invalid redirect URL")?;
         let client = openidconnect::core::CoreClient::from_provider_metadata(
             self.provider_metadata.clone(),
             ClientId::new(self.config.client_id.clone()),
@@ -110,14 +113,12 @@ impl OidcClient {
         Ok((auth_url.to_string(), flow_state))
     }
 
-    pub async fn exchange_code(
-        &self,
-        code: &str,
-        flow_state: &FlowState,
-    ) -> Result<TokenResponse> {
-        let redirect_url = format!("{}{}", self.config.public_base_url, self.config.redirect_path);
-        let redirect_url = RedirectUrl::new(redirect_url)
-            .context("Invalid redirect URL")?;
+    pub async fn exchange_code(&self, code: &str, flow_state: &FlowState) -> Result<TokenResponse> {
+        let redirect_url = format!(
+            "{}{}",
+            self.config.public_base_url, self.config.redirect_path
+        );
+        let redirect_url = RedirectUrl::new(redirect_url).context("Invalid redirect URL")?;
         let client = openidconnect::core::CoreClient::from_provider_metadata(
             self.provider_metadata.clone(),
             ClientId::new(self.config.client_id.clone()),
@@ -140,11 +141,8 @@ impl OidcClient {
             .context("No ID token in response")?;
 
         // Verify ID token
-        let (standard_claims, raw_claims) = self.verify_id_token(
-            id_token,
-            &client.id_token_verifier(),
-            &flow_state.nonce,
-        )?;
+        let (standard_claims, raw_claims) =
+            self.verify_id_token(id_token, &client.id_token_verifier(), &flow_state.nonce)?;
 
         // Extract claims
         let subject = standard_claims.subject().to_string();
@@ -153,10 +151,13 @@ impl OidcClient {
         let username = self.extract_username(&standard_claims, &raw_claims)?;
 
         // Extract email
-        let email = standard_claims
-            .email()
-            .map(|e| e.as_str())
-            .and_then(|e| if e.is_empty() { None } else { Some(e.to_string()) });
+        let email = standard_claims.email().map(|e| e.as_str()).and_then(|e| {
+            if e.is_empty() {
+                None
+            } else {
+                Some(e.to_string())
+            }
+        });
 
         // Extract groups
         let groups = self.extract_groups(&raw_claims)?;
@@ -180,9 +181,11 @@ impl OidcClient {
     }
 
     pub async fn refresh_token(&self, refresh_token: &str) -> Result<RefreshResult> {
-        let redirect_url = format!("{}{}", self.config.public_base_url, self.config.redirect_path);
-        let redirect_url = RedirectUrl::new(redirect_url)
-            .context("Invalid redirect URL")?;
+        let redirect_url = format!(
+            "{}{}",
+            self.config.public_base_url, self.config.redirect_path
+        );
+        let redirect_url = RedirectUrl::new(redirect_url).context("Invalid redirect URL")?;
         let client = openidconnect::core::CoreClient::from_provider_metadata(
             self.provider_metadata.clone(),
             ClientId::new(self.config.client_id.clone()),
@@ -230,18 +233,21 @@ impl OidcClient {
         }
 
         // Decode payload (base64url)
-        let payload = base64::Engine::decode(
-            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-            parts[1]
-        ).context("Failed to decode JWT payload")?;
+        let payload =
+            base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, parts[1])
+                .context("Failed to decode JWT payload")?;
 
-        let claims: HashMap<String, Value> = serde_json::from_slice(&payload)
-            .context("Failed to parse JWT claims")?;
+        let claims: HashMap<String, Value> =
+            serde_json::from_slice(&payload).context("Failed to parse JWT claims")?;
 
         Ok(claims)
     }
 
-    fn extract_username(&self, standard_claims: &CoreIdTokenClaims, raw_claims: &HashMap<String, Value>) -> Result<String> {
+    fn extract_username(
+        &self,
+        standard_claims: &CoreIdTokenClaims,
+        raw_claims: &HashMap<String, Value>,
+    ) -> Result<String> {
         // Try username_claims in order
         for claim_name in &self.config.username_claims {
             if claim_name == "sub" {

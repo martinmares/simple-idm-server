@@ -1,5 +1,5 @@
-use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -46,9 +46,7 @@ pub struct ErrorResponse {
 /// Handler for /.well-known/jwks.json endpoint
 ///
 /// Returns the public key(s) in JWK format for JWT token verification
-pub async fn jwks_handler(
-    State(jwt_service): State<Arc<JwtService>>,
-) -> impl IntoResponse {
+pub async fn jwks_handler(State(jwt_service): State<Arc<JwtService>>) -> impl IntoResponse {
     match jwt_service.get_jwks() {
         Ok(jwks) => (StatusCode::OK, Json(jwks)).into_response(),
         Err(e) => {
@@ -69,11 +67,7 @@ pub async fn jwks_handler(
 ///
 /// Takes the RSA modulus (n) and exponent (e) as big-endian bytes
 /// and encodes them as base64url strings per RFC 7517
-pub fn rsa_components_to_jwk(
-    modulus: &[u8],
-    exponent: &[u8],
-    kid: Option<String>,
-) -> JsonWebKey {
+pub fn rsa_components_to_jwk(modulus: &[u8], exponent: &[u8], kid: Option<String>) -> JsonWebKey {
     // Encode as base64url (no padding)
     let n = URL_SAFE_NO_PAD.encode(modulus);
     let e = URL_SAFE_NO_PAD.encode(exponent);
