@@ -4,6 +4,9 @@ stages:
   - build
   - release
 
+default:
+  image: rust:1-bookworm
+
 variables:
   CARGO_TERM_COLOR: always
   GIT_DEPTH: "0"
