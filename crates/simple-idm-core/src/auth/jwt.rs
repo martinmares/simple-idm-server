@@ -273,20 +273,37 @@ impl JwtService {
 #[cfg(test)]
 mod tests {
     use super::JwtService;
-    use std::path::PathBuf;
-
-    fn repo_path(rel: &str) -> String {
-        let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        p.push("..");
-        p.push("..");
-        p.push(rel);
-        p.to_string_lossy().to_string()
-    }
+    use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+    use rsa::rand_core::OsRng;
+    use rsa::{RsaPrivateKey, RsaPublicKey};
+    use tempfile::tempdir;
 
     #[test]
     fn jwks_contains_active_and_additional_keys() {
-        let private_key = repo_path("keys/private.pem");
-        let public_key = repo_path("keys/public.pem");
+        let dir = tempdir().expect("temp dir");
+        let private_key_path = dir.path().join("private.pem");
+        let public_key_path = dir.path().join("public.pem");
+
+        let private_key = RsaPrivateKey::new(&mut OsRng, 2048).expect("rsa private key");
+        let public_key = RsaPublicKey::from(&private_key);
+        std::fs::write(
+            &private_key_path,
+            private_key
+                .to_pkcs8_pem(LineEnding::LF)
+                .expect("private key pem")
+                .as_bytes(),
+        )
+        .expect("write private key");
+        std::fs::write(
+            &public_key_path,
+            public_key
+                .to_public_key_pem(LineEnding::LF)
+                .expect("public key pem"),
+        )
+        .expect("write public key");
+
+        let private_key = private_key_path.to_string_lossy().to_string();
+        let public_key = public_key_path.to_string_lossy().to_string();
 
         let service = JwtService::new(
             &private_key,
