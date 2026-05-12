@@ -143,8 +143,7 @@ impl SshSignerConfig {
             let config_str = std::fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read config from {}: {}", path, e))?;
 
-            toml::from_str(&config_str)
-                .map_err(|e| format!("Failed to parse config: {}", e))?
+            toml::from_str(&config_str).map_err(|e| format!("Failed to parse config: {}", e))?
         } else {
             // Try default locations
             let default_paths = vec![
@@ -260,7 +259,10 @@ impl SshSignerConfig {
 
         // Validate required fields
         if config.oidc_issuer.is_empty() {
-            return Err("OIDC issuer is required (set via config file, env OIDC_ISSUER, or --oidc-issuer)".into());
+            return Err(
+                "OIDC issuer is required (set via config file, env OIDC_ISSUER, or --oidc-issuer)"
+                    .into(),
+            );
         }
         if config.expected_audience.is_empty() {
             return Err("Expected audience is required (set via config file, env EXPECTED_AUDIENCE, or --expected-audience)".into());

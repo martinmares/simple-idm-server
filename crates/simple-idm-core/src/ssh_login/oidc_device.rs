@@ -58,10 +58,8 @@ pub async fn device_flow(
 
     // Request device authorization
     let scope_str = scopes.join(" ");
-    let mut auth_form: Vec<(&str, String)> = vec![
-        ("client_id", client_id.to_string()),
-        ("scope", scope_str),
-    ];
+    let mut auth_form: Vec<(&str, String)> =
+        vec![("client_id", client_id.to_string()), ("scope", scope_str)];
     if let Some(tenant) = tenant.filter(|t| !t.trim().is_empty()) {
         auth_form.push(("tenant", tenant.to_string()));
     }
@@ -163,9 +161,7 @@ pub async fn device_flow(
         }
 
         // Success!
-        let id_token = response
-            .id_token
-            .ok_or("No ID token in response")?;
+        let id_token = response.id_token.ok_or("No ID token in response")?;
 
         println!("\n✅ Authentication successful!");
         tracing::info!("Device flow completed successfully");

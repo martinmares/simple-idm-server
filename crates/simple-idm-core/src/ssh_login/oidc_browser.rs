@@ -1,14 +1,14 @@
 use axum::{
+    Router,
     extract::{Query, State},
     response::Html,
     routing::get,
-    Router,
 };
 use openidconnect::{
-    core::{CoreClient, CoreProviderMetadata, CoreResponseType},
-    reqwest,
     AuthenticationFlow, AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce,
     PkceCodeChallenge, RedirectUrl, Scope,
+    core::{CoreClient, CoreProviderMetadata, CoreResponseType},
+    reqwest,
 };
 use serde::Deserialize;
 use std::sync::Arc;

@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use simple_idm_core::ssh_login::{commands, SshLoginConfig};
+use simple_idm_core::ssh_login::{SshLoginConfig, commands};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Parser)]
@@ -101,7 +101,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(tenant) = cli.tenant {
         let tenant = tenant.trim().to_string();
-        config.tenant = if tenant.is_empty() { None } else { Some(tenant) };
+        config.tenant = if tenant.is_empty() {
+            None
+        } else {
+            Some(tenant)
+        };
     }
     if let Some(signer_url) = cli.signer_url {
         config.signer_url = signer_url;

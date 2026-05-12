@@ -70,11 +70,7 @@ impl PrincipalMapper {
         principals.sort();
         principals.dedup();
 
-        tracing::debug!(
-            "Mapped principals for sub {}: {:?}",
-            claims.sub,
-            principals
-        );
+        tracing::debug!("Mapped principals for sub {}: {:?}", claims.sub, principals);
 
         Ok(principals)
     }

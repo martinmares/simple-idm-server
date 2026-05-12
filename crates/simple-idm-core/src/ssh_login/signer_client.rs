@@ -47,7 +47,10 @@ pub async fn request_certificate(
             .text()
             .await
             .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("Certificate request failed ({}): {}", status, error_text));
+        return Err(format!(
+            "Certificate request failed ({}): {}",
+            status, error_text
+        ));
     }
 
     let sign_response: SignResponse = response

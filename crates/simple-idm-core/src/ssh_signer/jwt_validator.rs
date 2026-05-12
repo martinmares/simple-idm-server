@@ -1,4 +1,4 @@
-use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,12 +61,7 @@ impl JwtValidator {
         let discovery_url = format!("{}/.well-known/openid-configuration", oidc_issuer);
         tracing::debug!("Fetching OIDC discovery from {}", discovery_url);
 
-        let discovery: OidcDiscovery = http_client
-            .get(&discovery_url)
-            .send()
-            .await?
-            .json()
-            .await?;
+        let discovery: OidcDiscovery = http_client.get(&discovery_url).send().await?.json().await?;
 
         tracing::info!("OIDC JWKS URI: {}", discovery.jwks_uri);
 
@@ -109,9 +104,10 @@ impl JwtValidator {
             .ok_or_else(|| "Token missing kid in header".to_string())?;
 
         // Get decoding key (from cache or fetch)
-        let decoding_key = self.get_decoding_key(&kid).await.map_err(|e| {
-            format!("Failed to get decoding key for kid {}: {}", kid, e)
-        })?;
+        let decoding_key = self
+            .get_decoding_key(&kid)
+            .await
+            .map_err(|e| format!("Failed to get decoding key for kid {}: {}", kid, e))?;
 
         // Validate token
         let mut validation = Validation::new(
@@ -164,14 +160,8 @@ impl JwtValidator {
         // Convert to DecodingKey
         let decoding_key = match jwks_key.kty.as_str() {
             "RSA" => {
-                let n = jwks_key
-                    .n
-                    .as_ref()
-                    .ok_or("Missing n in RSA key")?;
-                let e = jwks_key
-                    .e
-                    .as_ref()
-                    .ok_or("Missing e in RSA key")?;
+                let n = jwks_key.n.as_ref().ok_or("Missing n in RSA key")?;
+                let e = jwks_key.e.as_ref().ok_or("Missing e in RSA key")?;
 
                 DecodingKey::from_rsa_components(n, e)
                     .map_err(|e| format!("Failed to create RSA key: {}", e))?

@@ -143,7 +143,9 @@ impl CertSigner {
             "ecdsa-sha2-nistp521",
         ];
 
-        let has_valid_prefix = valid_prefixes.iter().any(|prefix| pubkey.starts_with(prefix));
+        let has_valid_prefix = valid_prefixes
+            .iter()
+            .any(|prefix| pubkey.starts_with(prefix));
 
         if !has_valid_prefix {
             return Err("Invalid public key format (unsupported key type)".to_string());
@@ -178,11 +180,23 @@ mod tests {
 
         // Ed25519 example
         let valid_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyDataHere user@host";
-        assert!(signer.as_ref().unwrap().validate_public_key(valid_key).is_ok());
+        assert!(
+            signer
+                .as_ref()
+                .unwrap()
+                .validate_public_key(valid_key)
+                .is_ok()
+        );
 
         // RSA example
         let rsa_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... user@host";
-        assert!(signer.as_ref().unwrap().validate_public_key(rsa_key).is_ok());
+        assert!(
+            signer
+                .as_ref()
+                .unwrap()
+                .validate_public_key(rsa_key)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -198,14 +212,22 @@ mod tests {
         .ok();
 
         // Missing key data
-        assert!(signer.as_ref().unwrap().validate_public_key("ssh-ed25519").is_err());
+        assert!(
+            signer
+                .as_ref()
+                .unwrap()
+                .validate_public_key("ssh-ed25519")
+                .is_err()
+        );
 
         // Invalid prefix
-        assert!(signer
-            .as_ref()
-            .unwrap()
-            .validate_public_key("invalid-key AAAAC3...")
-            .is_err());
+        assert!(
+            signer
+                .as_ref()
+                .unwrap()
+                .validate_public_key("invalid-key AAAAC3...")
+                .is_err()
+        );
 
         // Empty
         assert!(signer.as_ref().unwrap().validate_public_key("").is_err());

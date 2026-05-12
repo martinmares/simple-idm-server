@@ -1,5 +1,6 @@
-use super::{cert_checker, keypair, oidc_browser, oidc_device, signer_client, SshLoginConfig};
+use super::{SshLoginConfig, cert_checker, keypair, oidc_browser, oidc_device, signer_client};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
@@ -225,12 +226,33 @@ pub async fn ssh(
 
     let key_path = config.ssh_key_path();
 
+    run_ssh(&key_path, &ssh_args)
+}
+
+#[cfg(unix)]
+fn run_ssh(key_path: &std::path::Path, ssh_args: &[String]) -> Result<(), String> {
     let err = Command::new("ssh")
         .arg("-i")
-        .arg(&key_path)
-        .args(&ssh_args)
+        .arg(key_path)
+        .args(ssh_args)
         .exec(); // exec() nahradí current process → nikdy se nevrátí pokud uspěje
 
     // Pokud jsme se dostali sem, exec() selhal
     Err(format!("Failed to execute ssh: {}", err))
+}
+
+#[cfg(not(unix))]
+fn run_ssh(key_path: &std::path::Path, ssh_args: &[String]) -> Result<(), String> {
+    let status = Command::new("ssh")
+        .arg("-i")
+        .arg(key_path)
+        .args(ssh_args)
+        .status()
+        .map_err(|e| format!("Failed to execute ssh: {}", e))?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("ssh exited with status: {}", status))
+    }
 }

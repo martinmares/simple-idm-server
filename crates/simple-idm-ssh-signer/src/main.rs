@@ -1,11 +1,14 @@
-use axum::{routing::{get, post}, Router};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 use clap::Parser;
 use simple_idm_core::ssh_signer::{
+    SshSignerConfig,
     cert_signer::CertSigner,
-    handlers::{handle_sign, AppState},
+    handlers::{AppState, handle_sign},
     jwt_validator::JwtValidator,
     principal_mapper::PrincipalMapper,
-    SshSignerConfig,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;

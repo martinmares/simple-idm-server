@@ -61,8 +61,8 @@ impl SshLoginConfig {
         let content = std::fs::read_to_string(&config_path)
             .map_err(|e| format!("Failed to read config: {}", e))?;
 
-        let parsed: ConfigFileFormat = toml::from_str(&content)
-            .map_err(|e| format!("Failed to parse config: {}", e))?;
+        let parsed: ConfigFileFormat =
+            toml::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
 
         let config = match parsed {
             ConfigFileFormat::Legacy(config) => {
@@ -120,11 +120,19 @@ impl SshLoginConfig {
         }
         if let Ok(tenant) = std::env::var("TENANT") {
             let tenant = tenant.trim().to_string();
-            config.tenant = if tenant.is_empty() { None } else { Some(tenant) };
+            config.tenant = if tenant.is_empty() {
+                None
+            } else {
+                Some(tenant)
+            };
         }
         if let Ok(tenant) = std::env::var("OIDC_TENANT") {
             let tenant = tenant.trim().to_string();
-            config.tenant = if tenant.is_empty() { None } else { Some(tenant) };
+            config.tenant = if tenant.is_empty() {
+                None
+            } else {
+                Some(tenant)
+            };
         }
         if let Ok(signer_url) = std::env::var("SIGNER_URL") {
             config.signer_url = signer_url;
