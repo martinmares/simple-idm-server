@@ -69,7 +69,7 @@
           {% endif %}
         </td>
         <td>
-          <form method="post" action="/admin/ui/ad-role-mappings/{{ r.id }}/deactivate">
+          <form method="post" action="/admin/ui/ad-role-mappings/{{ r.id }}/deactivate" data-confirm="Safe delete role mapping for {{ r.external_role }}?" data-confirm-action="Safe delete">
             <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
           </form>
         </td>

@@ -1,14 +1,37 @@
 {% extends "admin/base.html" %}
 {% block content %}
 <div class="card mb-3">
-  <div class="card-header">
-    <h3 class="card-title">Create client</h3>
+  <div class="card-header d-flex align-items-center justify-content-between">
+    <div>
+      <h3 class="card-title mb-0">Clients</h3>
+      <div class="text-secondary small mt-1">OAuth2/OIDC clients and runtime group/claim settings.</div>
+    </div>
+    <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="collapse" data-bs-target="#create-client-panel">
+      <i class="ti ti-plus me-1"></i>Create client
+    </button>
   </div>
-  <div class="card-body">
+  <div class="card-body border-bottom">
+    <form method="get" action="/admin/ui/clients" class="row g-2 align-items-end">
+      <div class="col-md-8">
+        <label class="form-label">Filter</label>
+        <input class="form-control" name="q" value="{{ filter_q }}" placeholder="client_id, name, scope, grant, redirect URI..." autocomplete="off">
+        <div class="form-text">Use multiple words in any order, for example <code>proxy groups</code>.</div>
+      </div>
+      <div class="col-md-4">
+        <div class="btn-list">
+          <button class="btn btn-primary" type="submit">Apply</button>
+          <a class="btn btn-outline-secondary" href="/admin/ui/clients">Reset filters</a>
+        </div>
+      </div>
+    </form>
+  </div>
+  <div class="card-body collapse" id="create-client-panel">
+    <h4 class="mb-3">Create client</h4>
     <form method="post" action="/admin/ui/clients/create" class="row g-2">
       <div class="col-md-3"><input class="form-control" name="client_id" placeholder="client_id" required></div>
       <div class="col-md-3"><input class="form-control" name="name" placeholder="name" required></div>
-      <div class="col-md-6"><input class="form-control" name="redirect_uris" placeholder="uri1, uri2"></div>
+      <div class="col-md-3"><input class="form-control" name="redirect_uris" placeholder="uri1, uri2"></div>
+      <div class="col-md-3"><input class="form-control" name="client_secret" type="password" placeholder="secret for confidential clients" autocomplete="new-password"></div>
       <div class="col-md-12">
         <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. For CLI/public localhost clients, wildcard port is allowed only for client_id=cli-tools.</div>
       </div>
@@ -33,6 +56,26 @@
       </div>
       <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_public" type="checkbox" checked><label class="form-check-label">public</label></div>
       <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked><label class="form-check-label">active</label></div>
+      <div class="col-md-3">
+        <label class="form-label">Groups claim mode</label>
+        <select class="form-select" name="groups_claim_mode">
+          <option value="effective" selected>effective</option>
+          <option value="direct">direct</option>
+          <option value="none">none</option>
+        </select>
+      </div>
+      <div class="col-md-3 d-flex align-items-end">
+        <label class="form-check form-switch m-0">
+          <input class="form-check-input" name="include_claim_maps" type="checkbox" checked>
+          <span class="form-check-label">include claim maps</span>
+        </label>
+      </div>
+      <div class="col-md-3 d-flex align-items-end">
+        <label class="form-check form-switch m-0">
+          <input class="form-check-input" name="ignore_virtual_groups" type="checkbox">
+          <span class="form-check-label">ignore virtual groups</span>
+        </label>
+      </div>
       <div class="col-md-12"><button class="btn btn-primary" type="submit">Create</button></div>
     </form>
   </div>
@@ -57,12 +100,18 @@
         <div class="mb-2"><span class="text-muted">client_id:</span> <code>{{ r.client_id }}</code></div>
         <div class="mb-2"><span class="text-muted">redirect_uris:</span> {{ r.redirect_uris | join(", ") }}</div>
         <div class="mb-2"><span class="text-muted">grant_types:</span> {{ r.grant_types | join(", ") }}</div>
-        <div class="mb-3"><span class="text-muted">scope:</span> {{ r.scope }}</div>
+        <div class="mb-2"><span class="text-muted">scope:</span> {{ r.scope }}</div>
+        <div class="mb-3">
+          <span class="text-muted">groups:</span>
+          <span class="badge bg-blue-lt">{{ r.groups_claim_mode }}</span>
+          {% if r.include_claim_maps %}<span class="badge bg-green-lt">claim maps</span>{% else %}<span class="badge bg-secondary-lt">no claim maps</span>{% endif %}
+          {% if r.ignore_virtual_groups %}<span class="badge bg-yellow-lt">ignore virtual</span>{% endif %}
+        </div>
         <div class="d-flex gap-2">
           <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#client-edit-{{ r.id }}">
             Edit
           </button>
-          <form method="post" action="/admin/ui/clients/{{ r.id }}/deactivate">
+          <form method="post" action="/admin/ui/clients/{{ r.id }}/deactivate" data-confirm="Safe delete client '{{ r.client_id }}'?" data-confirm-action="Safe delete">
             <button class="btn btn-outline-danger btn-sm" type="submit">Safe delete</button>
           </form>
         </div>
@@ -89,6 +138,10 @@
                 <input class="form-control" name="name" value="{{ r.name }}" required>
               </div>
               <div class="col-md-6">
+                <label class="form-label">Replace client secret</label>
+                <input class="form-control" name="client_secret" type="password" autocomplete="new-password" placeholder="required when switching to confidential without an existing secret">
+              </div>
+              <div class="col-md-6">
                 <label class="form-label">Scope</label>
                 <div class="d-flex flex-wrap gap-2">
                   <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" {% if r.has_scope("openid") %}checked{% endif %}><span class="form-check-label">openid</span></label>
@@ -112,11 +165,87 @@
                   <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_device_code" value="on" {% if r.has_grant("urn:ietf:params:oauth:grant-type:device_code") %}checked{% endif %}><span class="form-check-label">device_code</span></label>
                 </div>
               </div>
-              <div class="col-md-12 d-flex justify-content-end mt-2">
-                <label class="form-check m-0">
-                  <input class="form-check-input" type="checkbox" name="is_active" {% if r.is_active %}checked{% endif %}>
-                  <span class="form-check-label">active</span>
+              <div class="col-md-4">
+                <label class="form-label">Groups claim mode</label>
+                <select class="form-select" name="groups_claim_mode">
+                  <option value="effective" {% if r.groups_claim_mode == "effective" %}selected{% endif %}>effective</option>
+                  <option value="direct" {% if r.groups_claim_mode == "direct" %}selected{% endif %}>direct</option>
+                  <option value="none" {% if r.groups_claim_mode == "none" %}selected{% endif %}>none</option>
+                </select>
+              </div>
+              <div class="col-md-4 d-flex align-items-end">
+                <label class="form-check form-switch m-0">
+                  <input class="form-check-input" type="checkbox" name="include_claim_maps" {% if r.include_claim_maps %}checked{% endif %}>
+                  <span class="form-check-label">include claim maps</span>
                 </label>
+              </div>
+              <div class="col-md-4 d-flex align-items-end">
+                <label class="form-check form-switch m-0">
+                  <input class="form-check-input" type="checkbox" name="ignore_virtual_groups" {% if r.ignore_virtual_groups %}checked{% endif %}>
+                  <span class="form-check-label">ignore virtual groups</span>
+                </label>
+              </div>
+              <div class="col-md-12 d-flex justify-content-end mt-2">
+                <div class="d-flex gap-3">
+                  <label class="form-check form-switch m-0">
+                    <input class="form-check-input" type="checkbox" name="is_public" {% if r.is_public %}checked{% endif %}>
+                    <span class="form-check-label">public client</span>
+                  </label>
+                  <label class="form-check form-switch m-0">
+                    <input class="form-check-input" type="checkbox" name="is_active" {% if r.is_active %}checked{% endif %}>
+                    <span class="form-check-label">active</span>
+                  </label>
+                </div>
+              </div>
+              <div class="col-md-12">
+                <div class="hr-text">Group filter patterns</div>
+                <div class="form-text mb-2">
+                  Restrict or expand groups emitted for this client. Lower priority number is evaluated first.
+                </div>
+                <div class="row g-2 align-items-end mb-3">
+                  <div class="col-md-6">
+                    <label class="form-label">Pattern</label>
+                    <input class="form-control" name="pattern" form="client-pattern-create-{{ r.id }}" placeholder="team:*" autocomplete="off">
+                  </div>
+                  <div class="col-md-3">
+                    <label class="form-label">Mode</label>
+                    <select class="form-select" name="mode" form="client-pattern-create-{{ r.id }}">
+                      <option value="include">include</option>
+                      <option value="exclude">exclude</option>
+                    </select>
+                  </div>
+                  <div class="col-md-2">
+                    <label class="form-label">Priority</label>
+                    <input class="form-control" name="priority" form="client-pattern-create-{{ r.id }}" type="number" value="100">
+                  </div>
+                  <div class="col-md-1">
+                    <button class="btn btn-outline-primary w-100" type="submit" form="client-pattern-create-{{ r.id }}">Add</button>
+                  </div>
+                </div>
+                <div class="vstack gap-2">
+                  {% for p in client_patterns %}
+                  {% if p.client_id == r.id %}
+                  <div class="row g-2 align-items-center">
+                    <div class="col-md-6">
+                      <input class="form-control form-control-sm" name="pattern" form="client-pattern-update-{{ p.id }}" value="{{ p.pattern }}">
+                    </div>
+                    <div class="col-md-2">
+                      <select class="form-select form-select-sm" name="mode" form="client-pattern-update-{{ p.id }}">
+                        <option value="include" {% if p.is_include %}selected{% endif %}>include</option>
+                        <option value="exclude" {% if !p.is_include %}selected{% endif %}>exclude</option>
+                      </select>
+                    </div>
+                    <div class="col-md-2">
+                      <input class="form-control form-control-sm" name="priority" form="client-pattern-update-{{ p.id }}" type="number" value="{{ p.priority }}">
+                    </div>
+                    <div class="col-md-2 d-flex gap-2">
+                      <button class="btn btn-outline-primary btn-sm flex-fill" type="submit" form="client-pattern-update-{{ p.id }}">Save</button>
+                      <button class="btn btn-outline-danger btn-sm" type="submit" form="client-pattern-delete-{{ p.id }}" data-confirm="Delete this client pattern?" data-confirm-action="Delete">Delete</button>
+                    </div>
+                  </div>
+                  {% endif %}
+                  {% endfor %}
+                </div>
               </div>
             </div>
           </div>
@@ -125,9 +254,63 @@
             <button class="btn btn-primary" type="submit">Save changes</button>
           </div>
         </form>
+        <form id="client-pattern-create-{{ r.id }}" method="post" action="/admin/ui/clients/{{ r.id }}/patterns/create"></form>
+        {% for p in client_patterns %}
+        {% if p.client_id == r.id %}
+        <form id="client-pattern-update-{{ p.id }}" method="post" action="/admin/ui/clients/{{ r.id }}/patterns/{{ p.id }}/update"></form>
+        <form id="client-pattern-delete-{{ p.id }}" method="post" action="/admin/ui/clients/{{ r.id }}/patterns/{{ p.id }}/deactivate"></form>
+        {% endif %}
+        {% endfor %}
       </div>
     </div>
   </div>
   {% endfor %}
+  {% if rows.len() == 0 %}
+  <div class="col-12">
+    <div class="empty">
+      <div class="empty-icon"><i class="ti ti-search"></i></div>
+      <p class="empty-title">No clients found</p>
+      <p class="empty-subtitle text-secondary">Adjust or reset the filter.</p>
+    </div>
+  </div>
+  {% endif %}
 </div>
+
+{% if deleted_rows.len() > 0 %}
+<div class="card mt-3">
+  <div class="card-header">
+    <h3 class="card-title mb-0">Recently deleted clients</h3>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>Client</th>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in deleted_rows %}
+        <tr>
+          <td><code>{{ r.client_id }}</code></td>
+          <td>{{ r.name }}</td>
+          <td>
+            <span class="badge {% if r.is_public %}bg-blue-lt{% else %}bg-orange-lt{% endif %}">
+              {% if r.is_public %}public{% else %}confidential{% endif %}
+            </span>
+          </td>
+          <td>
+            <form method="post" action="/admin/ui/clients/{{ r.id }}/restore">
+              <button class="btn btn-sm btn-outline-success" type="submit">Restore</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
 {% endblock %}

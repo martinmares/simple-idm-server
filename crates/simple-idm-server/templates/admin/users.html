@@ -8,6 +8,9 @@
   </div>
   <div class="btn-list">
     <a class="btn btn-sm btn-primary" href="{{ link }}" target="_blank" rel="noopener">Open onboarding</a>
+    <button class="btn btn-sm btn-outline-primary copy-link" type="button" data-copy-link="{{ link }}">
+      <i class="ti ti-copy me-1"></i>Copy to clipboard
+    </button>
   </div>
 </div>
 {% endif %}
@@ -19,6 +22,9 @@
   </div>
   <div class="btn-list">
     <a class="btn btn-sm btn-primary" href="{{ link }}" target="_blank" rel="noopener">Open invitation</a>
+    <button class="btn btn-sm btn-outline-primary copy-link" type="button" data-copy-link="{{ link }}">
+      <i class="ti ti-copy me-1"></i>Copy to clipboard
+    </button>
   </div>
 </div>
 {% endif %}
@@ -169,7 +175,7 @@
             <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#user-edit-{{ r.id }}">
               Edit
             </button>
-            {% if r.auth_mode == "mixed" %}
+            {% if r.auth_mode == "ad" %}
             <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#ad-map-{{ r.id }}">
               Map roles
             </button>
@@ -178,18 +184,34 @@
             </form>
             {% endif %}
             {% if r.auth_mode == "federated" %}
-            <form method="post" action="/admin/ui/users/{{ r.id }}/federated-invitation-link">
-              <button class="btn btn-sm btn-outline-primary" type="submit">Send invitation</button>
-            </form>
             {% if let Some(status) = r.federated_approval_status %}
               {% if status == "pending" %}
+              <form method="post" action="/admin/ui/users/{{ r.id }}/federated-invitation-link">
+                <button class="btn btn-sm btn-outline-primary" type="submit">Send invitation</button>
+              </form>
               <form method="post" action="/admin/ui/users/{{ r.id }}/federated-approve">
                 <button class="btn btn-sm btn-outline-success" type="submit">Approve</button>
               </form>
+              {% else if status == "approved" %}
+              <form method="post" action="/admin/ui/users/{{ r.id }}/federated-unlink" data-confirm="Unlink federated identity for {{ r.email }}? User will need a new invitation before federated login works again." data-confirm-action="Unlink" data-confirm-variant="warning">
+                <button class="btn btn-sm btn-outline-warning" type="submit">Unlink identity</button>
+              </form>
+              {% else %}
+              <form method="post" action="/admin/ui/users/{{ r.id }}/federated-invitation-link">
+                <button class="btn btn-sm btn-outline-primary" type="submit">Send invitation</button>
+              </form>
+              {% endif %}
+            {% else %}
+              {% if let Some(provider_slug) = r.auth_provider_slug %}
+              <form method="post" action="/admin/ui/users/{{ r.id }}/federated-invitation-link">
+                <button class="btn btn-sm btn-primary" type="submit">Create external identity</button>
+              </form>
+              {% else %}
+              <span class="badge bg-yellow-lt">set provider in Edit</span>
               {% endif %}
             {% endif %}
             {% endif %}
-            <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate">
+            <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate" data-confirm="Safe delete user '{{ r.username }}'?" data-confirm-action="Safe delete">
               <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
             </form>
           </div>
@@ -219,6 +241,40 @@
   </div>
 </div>
 
+{% if deleted_rows.len() > 0 %}
+<div class="card mt-3">
+  <div class="card-header">
+    <h3 class="card-title mb-0">Recently deleted users</h3>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Email</th>
+          <th>Auth</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in deleted_rows %}
+        <tr>
+          <td><code>{{ r.username }}</code></td>
+          <td>{{ r.email }}</td>
+          <td><span class="badge bg-secondary-lt">{{ r.auth_mode }}</span></td>
+          <td>
+            <form method="post" action="/admin/ui/users/{{ r.id }}/restore">
+              <button class="btn btn-sm btn-outline-success" type="submit">Restore</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
 <div class="modal modal-blur fade" id="create-user-modal" tabindex="-1" role="dialog" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
     <div class="modal-content">
@@ -226,12 +282,14 @@
         <h5 class="modal-title">Create user</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <form method="post" action="/admin/ui/users/create">
+      <form method="post" action="/admin/ui/users/create" autocomplete="off">
         <div class="modal-body">
+          <input type="text" name="sidm_autofill_username_trap" autocomplete="username" tabindex="-1" aria-hidden="true" style="position:absolute; left:-10000px; width:1px; height:1px; opacity:0;">
+          <input type="password" name="sidm_autofill_password_trap" autocomplete="current-password" tabindex="-1" aria-hidden="true" style="position:absolute; left:-10000px; width:1px; height:1px; opacity:0;">
           <div class="row g-3">
             <div class="col-md-4">
               <label class="form-label">Username</label>
-              <input class="form-control" name="username" placeholder="username" required>
+              <input class="form-control" name="username" placeholder="username" autocomplete="new-password" autocapitalize="off" spellcheck="false" required>
             </div>
             <div class="col-md-4">
               <label class="form-label">Email</label>
@@ -246,8 +304,17 @@
               </select>
             </div>
             <div class="col-md-6">
+              <label class="form-label">Auth provider</label>
+              <select class="form-select" name="auth_provider_id">
+                <option value="">none / local</option>
+                {% for p in identity_providers %}
+                <option value="{{ p.id }}">{{ p.slug }} ({{ p.provider_type }})</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-6">
               <label class="form-label">Password</label>
-              <input class="form-control" name="password" type="password" placeholder="required for local auth">
+              <input class="form-control" name="password" type="password" autocomplete="new-password" placeholder="required for local auth">
             </div>
             <div class="col-md-3">
               <label class="form-label">First name</label>
@@ -293,7 +360,7 @@
         <h5 class="modal-title">AD onboarding tokens</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <form method="post" action="/admin/ui/ad-onboarding/delete">
+      <form method="post" action="/admin/ui/ad-onboarding/delete" data-confirm="Delete selected AD onboarding tokens?" data-confirm-action="Delete selected">
         <div class="modal-body">
           <div class="row g-2 align-items-center mb-2">
             <div class="col-md-4">
@@ -395,13 +462,13 @@
 
 {% for r in rows %}
 <div class="modal modal-blur fade" id="user-edit-{{ r.id }}" tabindex="-1" role="dialog" aria-hidden="true">
-  <div class="modal-dialog modal-md modal-dialog-centered" role="document">
+  <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
     <div class="modal-content">
       <div class="modal-header">
         <h5 class="modal-title">Edit user: {{ r.username }}</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <form method="post" action="/admin/ui/users/{{ r.id }}/update">
+      <form method="post" action="/admin/ui/users/{{ r.id }}/update" autocomplete="off">
         <div class="modal-body">
             <div class="row g-3">
               <div class="col-md-12">
@@ -412,11 +479,46 @@
                 <label class="form-label">Auth type</label>
                 <select class="form-select" name="auth_mode">
                   <option value="local" {% if r.auth_mode == "local" %}selected{% endif %}>local</option>
-                  <option value="ad" {% if r.auth_mode == "mixed" %}selected{% endif %}>ad</option>
+                  <option value="ad" {% if r.auth_mode == "ad" %}selected{% endif %}>ad</option>
                   <option value="federated" {% if r.auth_mode == "federated" %}selected{% endif %}>federated</option>
                 </select>
               </div>
               <div class="col-md-12">
+                <label class="form-label">Auth provider</label>
+                <select class="form-select" name="auth_provider_id">
+                  <option value="">none / local</option>
+                  {% for p in identity_providers %}
+                  <option value="{{ p.id }}" {% if r.is_auth_provider(p.id) %}selected{% endif %}>{{ p.slug }} ({{ p.provider_type }})</option>
+                  {% endfor %}
+                </select>
+                {% if let Some(provider_slug) = r.auth_provider_slug %}
+                <div class="form-text">current provider: <code>{{ provider_slug }}</code></div>
+                {% endif %}
+              </div>
+              <div class="col-md-12">
+                {% if r.auth_mode == "federated" %}
+                <label class="form-label">Federated identity</label>
+                <div class="border rounded p-3 bg-body-tertiary">
+                  {% if let Some(provider) = r.federated_provider_slug %}
+                  <div class="mb-1">provider: <code>{{ provider }}</code></div>
+                  {% else %}
+                  <div class="mb-1">provider: <span class="text-secondary">-</span></div>
+                  {% endif %}
+                  {% if let Some(status) = r.federated_approval_status %}
+                  <div class="mb-1">status: <code>{{ status }}</code></div>
+                  {% else %}
+                  <div class="mb-1">status: <span class="text-secondary">not linked</span></div>
+                  {% endif %}
+                  {% if let Some(subject) = r.federated_subject %}
+                  <div>subject: <code>{{ subject }}</code></div>
+                  {% else %}
+                  <div>subject: <span class="text-secondary">-</span></div>
+                  {% endif %}
+                </div>
+                <div class="form-text">
+                  Federated identity is created by sending an invitation and completing Google login. The Google <code>issuer + sub</code> cannot be entered manually here.
+                </div>
+                {% else %}
                 <label class="form-label">External identity</label>
                 <input class="form-control" value="{% if let Some(ext_id) = r.external_user_id %}{{ ext_id }}{% else %}-{% endif %}" disabled>
                 <div class="form-text">
@@ -444,31 +546,32 @@
                     -
                   {% endif %}
                 </div>
+                {% endif %}
               </div>
               <div class="col-md-6">
                 <label class="form-label">First name</label>
-                <input class="form-control" value="{{ r.first_name.clone().unwrap_or("".to_string()) }}" disabled>
+                <input class="form-control" name="first_name" value="{{ r.first_name.clone().unwrap_or("".to_string()) }}">
               </div>
               <div class="col-md-6">
                 <label class="form-label">Last name</label>
-                <input class="form-control" value="{{ r.last_name.clone().unwrap_or("".to_string()) }}" disabled>
+                <input class="form-control" name="last_name" value="{{ r.last_name.clone().unwrap_or("".to_string()) }}">
               </div>
               <div class="col-md-6">
                 <label class="form-label">Recovery email</label>
-                <input class="form-control" value="{{ r.recovery_email.clone().unwrap_or("".to_string()) }}" disabled>
+                <input class="form-control" name="recovery_email" type="email" value="{{ r.recovery_email.clone().unwrap_or("".to_string()) }}">
               </div>
               <div class="col-md-6">
-                <label class="form-label">Phone</label>
-                <input class="form-control" value="{{ r.phone_e164.clone().unwrap_or("".to_string()) }}" disabled>
+                <label class="form-label">Phone (E.164)</label>
+                <input class="form-control" name="phone_e164" value="{{ r.phone_e164.clone().unwrap_or("".to_string()) }}" placeholder="+420...">
               </div>
               <div class="col-md-12">
                 <label class="form-label">Note</label>
-                <input class="form-control" value="{{ r.note.clone().unwrap_or("".to_string()) }}" disabled>
+                <input class="form-control" name="note" value="{{ r.note.clone().unwrap_or("".to_string()) }}">
               </div>
               <div class="col-md-12">
                 <label class="form-label">New password (optional)</label>
                 <div class="input-group">
-                  <input class="form-control user-password-input" id="user-password-{{ r.id }}" type="password" name="password" placeholder="Leave empty to keep current password">
+                  <input class="form-control user-password-input" id="user-password-{{ r.id }}" type="password" name="password" autocomplete="new-password" placeholder="Leave empty to keep current password">
                   <button class="btn btn-outline-secondary user-password-generate" type="button" data-target="user-password-{{ r.id }}" title="Generate password">
                     <i class="ti ti-wand"></i>
                   </button>

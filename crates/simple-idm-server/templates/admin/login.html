@@ -15,6 +15,7 @@
         <div class="alert alert-danger">{{ err }}</div>
         {% endif %}
         <form method="post" action="/admin/ui/login">
+          <input type="hidden" name="next" value="{{ next }}">
           <div class="mb-3">
             <label class="form-label">Admin token (Bearer)</label>
             <input class="form-control" type="password" name="token" required>

@@ -1,25 +1,20 @@
-
 use axum::{
-    middleware,
+    Router, middleware,
     routing::{delete, get, post, put},
-    Router,
 };
 use clap::Parser;
-use tower_governor::{
-    governor::GovernorConfigBuilder,
-    key_extractor::SmartIpKeyExtractor,
-    GovernorLayer,
+use simple_idm_core::{
+    admin, auth, config, db, group_patterns, jwks, oauth2, oidc, onboarding_cleanup,
+    password_reset, security_headers, soft_delete_cleanup,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
+use tower_governor::{
+    GovernorLayer, governor::GovernorConfigBuilder, key_extractor::SmartIpKeyExtractor,
+};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use simple_idm_core::{
-    admin, auth, config, db, group_patterns, jwks, oauth2, oidc, password_reset,
-    security_headers, soft_delete_cleanup,
-};
-use simple_idm_ad_auth::{LdapAuthConfig, LdapTlsMode};
 mod web_admin;
 
 fn install_rustls_provider() {
@@ -67,7 +62,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(brand_domain) = cli.ui_brand_domain {
         let domain = brand_domain.trim().to_string();
-        config.ui.brand_domain = if domain.is_empty() { None } else { Some(domain) };
+        config.ui.brand_domain = if domain.is_empty() {
+            None
+        } else {
+            Some(domain)
+        };
     }
     if let Some(page_title) = cli.ui_page_title {
         let title = page_title.trim().to_string();
@@ -94,10 +93,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|| "-".to_string()),
         config.ui.page_title
     );
-    tracing::info!(
-        "Database: {}",
-        redact_database_url(&config.database.url)
-    );
+    tracing::info!("Database: {}", redact_database_url(&config.database.url));
 
     // Připoj se k databázi
     let db_pool = db::create_pool(&config.database.url).await?;
@@ -116,45 +112,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.jwt.additional_public_keys.clone(),
     )?);
 
-    // Vytvoř OAuth2 state
-    let ldap_auth = if config.ad_auth.enabled {
-        let tls_mode = match config.ad_auth.tls_mode.as_str() {
-            "ldaps" => LdapTlsMode::Ldaps,
-            "starttls" => LdapTlsMode::StartTls,
-            other => {
-                tracing::warn!(
-                    "Unknown AD_AUTH_TLS_MODE='{}', using 'ldaps'",
-                    other
-                );
-                LdapTlsMode::Ldaps
-            }
-        };
-        Some(LdapAuthConfig {
-            host: config.ad_auth.host.clone(),
-            port: config.ad_auth.port,
-            base_dn: config.ad_auth.base_dn.clone(),
-            bind_dn: config.ad_auth.bind_dn.clone(),
-            bind_password: config.ad_auth.bind_password.clone(),
-            user_filter: config.ad_auth.user_filter.clone(),
-            tls_mode,
-            timeout_seconds: config.ad_auth.timeout_seconds,
-            allow_insecure: config.ad_auth.allow_insecure,
-        })
-    } else {
-        None
-    };
-
-    if ldap_auth.is_some() {
-        tracing::info!(
-            "AD/LDAP auth enabled (domains: {})",
-            if config.ad_auth.domains.is_empty() {
-                "*"
-            } else {
-                "configured"
-            }
-        );
-    }
-
     let oauth_state = Arc::new(oauth2::OAuth2State {
         db_pool: db_pool.clone(),
         jwt_service: jwt_service.clone(),
@@ -164,11 +121,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         device_flow_config: config.device_flow.clone(),
         allow_username_login: config.identity.allow_username_login,
         allowed_email_domains: config.identity.allowed_email_domains.clone(),
-        ldap_auth,
-        ldap_auth_domains: config.ad_auth.domains.clone(),
-        ldap_role_sync_enabled: config.ad_auth.role_sync_enabled,
-        ldap_role_sync_ttl_seconds: config.ad_auth.role_sync_ttl_seconds,
-        ldap_role_sync_timeout_seconds: config.ad_auth.role_sync_timeout_seconds,
         trust_proxy_headers: config.security.trust_proxy_headers,
         force_secure_cookies: config.security.force_secure_cookies,
         auth_protection: config.auth_protection.clone(),
@@ -229,6 +181,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     }
 
+    let onboarding_cleanup_interval = std::env::var("ONBOARDING_TOKEN_CLEANUP_INTERVAL_SECONDS")
+        .unwrap_or_else(|_| "3600".to_string())
+        .parse()
+        .unwrap_or(3600);
+    if onboarding_cleanup_interval > 0 {
+        let cleanup_pool = db_pool.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                "Onboarding token cleanup scheduler enabled (interval {}s)",
+                onboarding_cleanup_interval
+            );
+            let mut interval =
+                tokio::time::interval(Duration::from_secs(onboarding_cleanup_interval));
+            loop {
+                interval.tick().await;
+                tracing::info!("Running onboarding token cleanup");
+                onboarding_cleanup::cleanup_onboarding_tokens(&cleanup_pool).await;
+            }
+        });
+    }
+
     let group_patterns_sync_interval = config.group_patterns.sync_interval_seconds;
     if group_patterns_sync_interval > 0 {
         let sync_pool = db_pool.clone();
@@ -257,8 +230,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 purge_interval_seconds,
                 retention_days
             );
-            let mut interval =
-                tokio::time::interval(Duration::from_secs(purge_interval_seconds));
+            let mut interval = tokio::time::interval(Duration::from_secs(purge_interval_seconds));
             loop {
                 interval.tick().await;
                 tracing::info!("Running soft-delete purge");
@@ -274,8 +246,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         oauth_state: oauth_state.clone(),
         admin_auth: admin_auth.clone(),
         secure_cookies: config.security.force_secure_cookies,
-        ad_onboarding_token_ttl_seconds: config.ad_auth.onboarding_token_ttl_seconds as i64,
-        federated_invitation_token_ttl_seconds: config.ad_auth.onboarding_token_ttl_seconds as i64,
+        ad_onboarding_token_ttl_seconds: config.onboarding.token_ttl_seconds as i64,
+        federated_invitation_token_ttl_seconds: config.onboarding.token_ttl_seconds as i64,
         admin_sessions: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
@@ -285,7 +257,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/admin/tenants", post(admin::handlers::create_tenant))
         .route("/admin/tenants", get(admin::handlers::list_tenants))
         .route("/admin/tenants/{id}", put(admin::handlers::update_tenant))
-        .route("/admin/tenants/{id}", delete(admin::handlers::delete_tenant))
+        .route(
+            "/admin/tenants/{id}",
+            delete(admin::handlers::delete_tenant),
+        )
         .route(
             "/admin/tenants/{tenant_id}/domains",
             post(admin::handlers::create_tenant_domain),

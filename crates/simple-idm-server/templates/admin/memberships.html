@@ -1,0 +1,693 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<style>
+  .membership-shell {
+    display: grid;
+    gap: 1rem;
+  }
+
+  .membership-section {
+    border: 1px solid var(--tblr-border-color);
+    border-radius: var(--tblr-border-radius);
+    background: var(--tblr-bg-surface);
+  }
+
+  .membership-section-header {
+    padding: .85rem 1rem;
+    border-bottom: 1px solid var(--tblr-border-color);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .membership-grid {
+    display: grid;
+    grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
+    min-height: 360px;
+  }
+
+  .membership-picker {
+    border-right: 1px solid var(--tblr-border-color);
+    padding: 1rem;
+  }
+
+  .membership-list {
+    max-height: 300px;
+    overflow: auto;
+    display: grid;
+    gap: .35rem;
+    margin-top: .75rem;
+  }
+
+  .membership-list-item {
+    display: block;
+    border: 1px solid transparent;
+    border-radius: var(--tblr-border-radius);
+    padding: .55rem .65rem;
+    color: inherit;
+    text-decoration: none;
+  }
+
+  .membership-list-item:hover,
+  .membership-list-item.active {
+    border-color: var(--tblr-primary);
+    background: color-mix(in srgb, var(--tblr-bg-surface) 88%, var(--tblr-primary) 12%);
+    text-decoration: none;
+  }
+
+  .membership-detail {
+    padding: 1rem;
+    min-width: 0;
+  }
+
+  .membership-detail-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1rem;
+  }
+
+  .membership-muted {
+    color: var(--tblr-secondary);
+    font-size: .85rem;
+  }
+
+  .membership-modal-list {
+    max-height: 420px;
+    overflow: auto;
+    display: grid;
+    gap: .35rem;
+  }
+
+  .membership-check-row {
+    border: 1px solid var(--tblr-border-color);
+    border-radius: var(--tblr-border-radius);
+    padding: .6rem .75rem;
+  }
+
+  .membership-select-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(260px, .85fr);
+    gap: 1rem;
+  }
+
+  .membership-selected-panel {
+    border: 1px solid var(--tblr-border-color);
+    border-radius: var(--tblr-border-radius);
+    padding: .75rem;
+    background: var(--tblr-bg-surface);
+  }
+
+  .membership-selected-list {
+    min-height: 180px;
+    max-height: 360px;
+    overflow: auto;
+    display: grid;
+    align-content: start;
+    gap: .35rem;
+  }
+
+  .membership-selected-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: .75rem;
+    border: 1px solid var(--tblr-border-color);
+    border-radius: var(--tblr-border-radius);
+    padding: .45rem .55rem;
+  }
+
+  @media (max-width: 992px) {
+    .membership-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .membership-select-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .membership-picker {
+      border-right: 0;
+      border-bottom: 1px solid var(--tblr-border-color);
+    }
+  }
+</style>
+
+<div class="membership-shell">
+  <section class="membership-section" id="by-user">
+    <div class="membership-section-header">
+      <div>
+        <h3 class="mb-0">Users</h3>
+        <div class="membership-muted">Select a user and manage assigned groups.</div>
+      </div>
+      {% if let Some(u) = selected_user %}
+      <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#add-groups-modal">
+        <i class="ti ti-plus"></i>
+        Add to group
+      </button>
+      {% endif %}
+    </div>
+
+    <div class="membership-grid">
+      <aside class="membership-picker">
+        <input class="form-control membership-filter" data-filter-target="membership-users-list" data-query-param="user_filter" value="{{ user_filter }}" placeholder="Filter user ...">
+        <div class="membership-list" id="membership-users-list">
+          {% for u in users %}
+          <a class="membership-list-item membership-select-link {% if u.selected %}active{% endif %}"
+             href="/admin/ui/memberships?user_id={{ u.id }}{% if let Some(g) = selected_group %}&group_id={{ g.id }}{% endif %}#by-user"
+             data-filter-text="{{ u.username }} {{ u.email }} {% if let Some(first) = u.first_name %}{{ first }}{% endif %} {% if let Some(last) = u.last_name %}{{ last }}{% endif %}">
+            <div class="fw-semibold">{{ u.username }}</div>
+            <div class="membership-muted">{{ u.email }}</div>
+          </a>
+          {% endfor %}
+        </div>
+      </aside>
+
+      <main class="membership-detail">
+        {% if let Some(u) = selected_user %}
+        <div class="membership-detail-head">
+          <div>
+            <h3 class="mb-1">{{ u.username }}</h3>
+            <div class="membership-muted">
+              {{ u.email }}
+              {% if !u.is_active %}<span class="badge bg-red-lt ms-2">inactive</span>{% endif %}
+              <span class="badge bg-secondary-lt ms-2">{{ u.auth_mode }}</span>
+            </div>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <form method="post"
+                action="/admin/ui/memberships/users/{{ u.id }}/groups/remove"
+                class="membership-bulk-remove-form"
+                data-source-checkbox=".assigned-group-check"
+                data-target-input="group_ids_csv"
+                data-confirm-label="Remove selected groups from {{ u.username }}?">
+            <input type="hidden" name="group_ids_csv" value="">
+            <div class="d-flex justify-content-end mb-2">
+              <button class="btn btn-outline-danger btn-sm" type="submit">
+                <i class="ti ti-unlink"></i>
+                Remove selected
+              </button>
+            </div>
+            <table class="table table-vcenter card-table">
+              <thead>
+                <tr>
+                  <th class="w-1"><input class="form-check-input membership-check-all" type="checkbox" data-target-checkbox=".assigned-group-check"></th>
+                  <th class="w-1">#</th>
+                  <th>Group</th>
+                  <th>Description</th>
+                  <th class="text-end">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for g in selected_user_groups %}
+                <tr>
+                  <td><input class="form-check-input assigned-group-check" type="checkbox" value="{{ g.id }}"></td>
+                  <td>{{ g.ordinal }}</td>
+                  <td>
+                    <span class="fw-semibold">{{ g.name }}</span>
+                    {% if g.is_virtual %}<span class="badge bg-azure-lt ms-2">virtual</span>{% endif %}
+                  </td>
+                  <td>
+                    {% if let Some(d) = g.description %}{{ d }}{% else %}<span class="text-secondary">-</span>{% endif %}
+                  </td>
+                  <td class="text-end">
+                    <button class="btn btn-outline-danger btn-sm"
+                            type="submit"
+                            formaction="/admin/ui/memberships/users/{{ u.id }}/groups/{{ g.id }}/remove"
+                            data-confirm="Remove group {{ g.name }} from {{ u.username }}?"
+                            data-confirm-action="Remove">
+                      <i class="ti ti-unlink"></i>
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </form>
+        </div>
+
+        <div class="card mt-3">
+          <div class="card-header">
+            <div>
+              <h4 class="card-title mb-0">Dynamic group rules</h4>
+              <div class="membership-muted">Pattern-based group membership for this user. Lower priority number is evaluated first.</div>
+            </div>
+          </div>
+          <div class="card-body">
+            <form method="post" action="/admin/ui/users/{{ u.id }}/patterns/create" class="row g-2 align-items-end mb-3">
+              <div class="col-md-6">
+                <label class="form-label">Pattern</label>
+                <input class="form-control" name="pattern" placeholder="team:*" autocomplete="off" required>
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">Mode</label>
+                <select class="form-select" name="mode">
+                  <option value="include">include</option>
+                  <option value="exclude">exclude</option>
+                </select>
+              </div>
+              <div class="col-md-2">
+                <label class="form-label">Priority</label>
+                <input class="form-control" name="priority" type="number" value="100">
+              </div>
+              <div class="col-md-2">
+                <button class="btn btn-outline-primary w-100" type="submit">
+                  <i class="ti ti-plus"></i>
+                  Add rule
+                </button>
+              </div>
+            </form>
+
+            <div class="table-responsive">
+              <table class="table table-vcenter card-table">
+                <thead>
+                  <tr>
+                    <th>Pattern</th>
+                    <th>Mode</th>
+                    <th>Priority</th>
+                    <th class="text-end">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for p in selected_user_patterns %}
+                  <tr>
+                    <td>
+                      <input class="form-control form-control-sm" name="pattern" form="user-pattern-update-{{ p.id }}" value="{{ p.pattern }}" required>
+                    </td>
+                    <td>
+                      <select class="form-select form-select-sm" name="mode" form="user-pattern-update-{{ p.id }}">
+                        <option value="include" {% if p.is_include %}selected{% endif %}>include</option>
+                        <option value="exclude" {% if !p.is_include %}selected{% endif %}>exclude</option>
+                      </select>
+                    </td>
+                    <td>
+                      <input class="form-control form-control-sm" name="priority" form="user-pattern-update-{{ p.id }}" type="number" value="{{ p.priority }}">
+                    </td>
+                    <td class="text-end">
+                      <div class="btn-list justify-content-end">
+                        <button class="btn btn-outline-primary btn-sm" type="submit" form="user-pattern-update-{{ p.id }}">Save</button>
+                        <button class="btn btn-outline-danger btn-sm" type="submit" form="user-pattern-delete-{{ p.id }}" data-confirm="Delete user group pattern {{ p.pattern }}?" data-confirm-action="Delete">Delete</button>
+                      </div>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                  {% if selected_user_patterns.len() == 0 %}
+                  <tr>
+                    <td colspan="4" class="text-secondary">No dynamic group rules.</td>
+                  </tr>
+                  {% endif %}
+                </tbody>
+              </table>
+              {% for p in selected_user_patterns %}
+              <form id="user-pattern-update-{{ p.id }}" method="post" action="/admin/ui/users/{{ u.id }}/patterns/{{ p.id }}/update"></form>
+              <form id="user-pattern-delete-{{ p.id }}" method="post" action="/admin/ui/users/{{ u.id }}/patterns/{{ p.id }}/deactivate"></form>
+              {% endfor %}
+            </div>
+          </div>
+        </div>
+        {% else %}
+        <div class="empty">
+          <p class="empty-title">No user selected</p>
+        </div>
+        {% endif %}
+      </main>
+    </div>
+  </section>
+
+  <section class="membership-section" id="by-group">
+    <div class="membership-section-header">
+      <div>
+        <h3 class="mb-0">Groups</h3>
+        <div class="membership-muted">Select a group and manage assigned users.</div>
+      </div>
+      {% if let Some(g) = selected_group %}
+      <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#add-users-modal">
+        <i class="ti ti-plus"></i>
+        Add users
+      </button>
+      {% endif %}
+    </div>
+
+    <div class="membership-grid">
+      <aside class="membership-picker">
+        <input class="form-control membership-filter" data-filter-target="membership-groups-list" data-query-param="group_filter" value="{{ group_filter }}" placeholder="Filter group ...">
+        <div class="membership-list" id="membership-groups-list">
+          {% for g in groups %}
+          <a class="membership-list-item membership-select-link {% if g.selected %}active{% endif %}"
+             href="/admin/ui/memberships?{% if let Some(u) = selected_user %}user_id={{ u.id }}&{% endif %}group_id={{ g.id }}#by-group"
+             data-filter-text="{{ g.name }} {% if let Some(d) = g.description %}{{ d }}{% endif %}">
+            <div class="fw-semibold">
+              {{ g.name }}
+              {% if g.is_virtual %}<span class="badge bg-azure-lt ms-2">virtual</span>{% endif %}
+            </div>
+            <div class="membership-muted">{% if let Some(d) = g.description %}{{ d }}{% else %}-{% endif %}</div>
+          </a>
+          {% endfor %}
+        </div>
+      </aside>
+
+      <main class="membership-detail">
+        {% if let Some(g) = selected_group %}
+        <div class="membership-detail-head">
+          <div>
+            <h3 class="mb-1">{{ g.name }}</h3>
+            <div class="membership-muted">
+              {% if let Some(d) = g.description %}{{ d }}{% else %}No description{% endif %}
+              {% if g.is_virtual %}<span class="badge bg-azure-lt ms-2">virtual</span>{% endif %}
+            </div>
+          </div>
+        </div>
+
+        <div class="table-responsive">
+          <form method="post"
+                action="/admin/ui/memberships/groups/{{ g.id }}/users/remove"
+                class="membership-bulk-remove-form"
+                data-source-checkbox=".assigned-user-check"
+                data-target-input="user_ids_csv"
+                data-confirm-label="Remove selected users from {{ g.name }}?">
+            <input type="hidden" name="user_ids_csv" value="">
+            <div class="d-flex justify-content-end mb-2">
+              <button class="btn btn-outline-danger btn-sm" type="submit">
+                <i class="ti ti-user-x"></i>
+                Remove selected
+              </button>
+            </div>
+            <table class="table table-vcenter card-table">
+              <thead>
+                <tr>
+                  <th class="w-1"><input class="form-check-input membership-check-all" type="checkbox" data-target-checkbox=".assigned-user-check"></th>
+                  <th class="w-1">#</th>
+                  <th>User</th>
+                  <th>Name</th>
+                  <th>Email</th>
+                  <th class="text-end">Action</th>
+                </tr>
+              </thead>
+              <tbody>
+              {% for u in selected_group_users %}
+                <tr>
+                  <td><input class="form-check-input assigned-user-check" type="checkbox" value="{{ u.id }}"></td>
+                  <td>{{ u.ordinal }}</td>
+                  <td>
+                    <span class="fw-semibold">{{ u.username }}</span>
+                    {% if !u.is_active %}<span class="badge bg-red-lt ms-2">inactive</span>{% endif %}
+                    <span class="badge bg-secondary-lt ms-2">{{ u.auth_mode }}</span>
+                  </td>
+                  <td>
+                    {% if let Some(first) = u.first_name %}{{ first }}{% endif %}
+                    {% if let Some(last) = u.last_name %}{{ last }}{% endif %}
+                  </td>
+                  <td>{{ u.email }}</td>
+                  <td class="text-end">
+                    <button class="btn btn-outline-danger btn-sm"
+                            type="submit"
+                            formaction="/admin/ui/memberships/groups/{{ g.id }}/users/{{ u.id }}/remove"
+                            data-confirm="Remove user {{ u.username }} from {{ g.name }}?"
+                            data-confirm-action="Remove">
+                      <i class="ti ti-user-x"></i>
+                      Remove
+                    </button>
+                  </td>
+                </tr>
+              {% endfor %}
+              </tbody>
+            </table>
+          </form>
+        </div>
+        {% else %}
+        <div class="empty">
+          <p class="empty-title">No group selected</p>
+        </div>
+        {% endif %}
+      </main>
+    </div>
+  </section>
+</div>
+
+{% if let Some(u) = selected_user %}
+<div class="modal modal-blur fade" id="add-groups-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <form class="modal-content membership-add-form"
+          method="post"
+          action="/admin/ui/memberships/users/{{ u.id }}/groups/add"
+          data-source-checkbox=".add-group-check"
+          data-target-input="group_ids_csv">
+      <div class="modal-header">
+        <h5 class="modal-title">Add {{ u.username }} to groups</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <input class="form-control membership-filter mb-3" data-filter-target="available-groups-list" placeholder="Filter groups ...">
+        <input type="hidden" name="group_ids_csv" value="">
+        <div class="membership-select-grid">
+          <div>
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <div class="fw-semibold">Available groups</div>
+              <button class="btn btn-outline-primary btn-sm membership-add-visible" type="button" data-list-id="available-groups-list">Add visible</button>
+            </div>
+            <div class="membership-modal-list" id="available-groups-list">
+              {% for g in available_groups %}
+              <label class="membership-check-row" data-filter-text="{{ g.name }} {% if let Some(d) = g.description %}{{ d }}{% endif %}" data-selected-label="{{ g.name }}">
+                <input class="form-check-input add-group-check me-2" type="checkbox" value="{{ g.id }}">
+                <span class="fw-semibold">{{ g.name }}</span>
+                {% if g.is_virtual %}<span class="badge bg-azure-lt ms-2">virtual</span>{% endif %}
+                <span class="membership-muted ms-2">{% if let Some(d) = g.description %}{{ d }}{% endif %}</span>
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="membership-selected-panel">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <div class="fw-semibold">Selected</div>
+              <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-primary-lt membership-selected-count">0</span>
+                <button class="btn btn-outline-secondary btn-sm membership-selected-clear" type="button">Clear</button>
+              </div>
+            </div>
+            <input class="form-control form-control-sm membership-selected-filter mb-2" placeholder="Filter selected ...">
+            <div class="membership-selected-list text-secondary small" data-empty-text="No groups selected."></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{% if let Some(g) = selected_group %}
+<div class="modal modal-blur fade" id="add-users-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <form class="modal-content membership-add-form"
+          method="post"
+          action="/admin/ui/memberships/groups/{{ g.id }}/users/add"
+          data-source-checkbox=".add-user-check"
+          data-target-input="user_ids_csv">
+      <div class="modal-header">
+        <h5 class="modal-title">Add users to {{ g.name }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <input class="form-control membership-filter mb-3" data-filter-target="available-users-list" placeholder="Filter users ...">
+        <input type="hidden" name="user_ids_csv" value="">
+        <div class="membership-select-grid">
+          <div>
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <div class="fw-semibold">Available users</div>
+              <button class="btn btn-outline-primary btn-sm membership-add-visible" type="button" data-list-id="available-users-list">Add visible</button>
+            </div>
+            <div class="membership-modal-list" id="available-users-list">
+              {% for u in available_users %}
+              <label class="membership-check-row" data-filter-text="{{ u.username }} {{ u.email }} {% if let Some(first) = u.first_name %}{{ first }}{% endif %} {% if let Some(last) = u.last_name %}{{ last }}{% endif %}" data-selected-label="{{ u.username }} <{{ u.email }}>" data-email="{{ u.email }}">
+                <input class="form-check-input add-user-check me-2" type="checkbox" value="{{ u.id }}">
+                <span class="fw-semibold">{{ u.username }}</span>
+                <span class="membership-muted ms-2">{{ u.email }}</span>
+                {% if !u.is_active %}<span class="badge bg-red-lt ms-2">inactive</span>{% endif %}
+              </label>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="membership-selected-panel">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <div class="fw-semibold">Selected</div>
+              <div class="d-flex align-items-center gap-2">
+                <span class="badge bg-primary-lt membership-selected-count">0</span>
+                <button class="btn btn-outline-secondary btn-sm membership-selected-clear" type="button">Clear</button>
+              </div>
+            </div>
+            <input class="form-control form-control-sm membership-selected-filter mb-2" placeholder="Filter selected ...">
+            <div class="membership-selected-list text-secondary small" data-empty-text="No users selected."></div>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+        <button class="btn btn-primary" type="submit">Add</button>
+      </div>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+<script>
+(() => {
+  const normalize = (value) => value.toLocaleLowerCase().trim();
+  const matchWords = (text, query) => {
+    const words = normalize(query).split(/\s+/).filter(Boolean);
+    if (words.length === 0) return true;
+    const haystack = normalize(text);
+    return words.every((word) => haystack.includes(word));
+  };
+
+  document.querySelectorAll('.membership-filter').forEach((input) => {
+    const target = document.getElementById(input.dataset.filterTarget);
+    if (!target) return;
+    const applyFilter = () => {
+      target.querySelectorAll('[data-filter-text]').forEach((item) => {
+        item.hidden = !matchWords(item.dataset.filterText || '', input.value);
+      });
+    };
+    input.addEventListener('input', applyFilter);
+    applyFilter();
+  });
+
+  document.querySelectorAll('.membership-select-link').forEach((link) => {
+    link.addEventListener('click', () => {
+      const url = new URL(link.href, window.location.href);
+      document.querySelectorAll('.membership-filter[data-query-param]').forEach((input) => {
+        const param = input.dataset.queryParam;
+        if (!param) return;
+        const value = input.value.trim();
+        if (value) {
+          url.searchParams.set(param, value);
+        } else {
+          url.searchParams.delete(param);
+        }
+      });
+      link.href = url.pathname + url.search + url.hash;
+    });
+  });
+
+  document.querySelectorAll('.membership-add-form').forEach((form) => {
+    const selectedList = form.querySelector('.membership-selected-list');
+    const selectedCount = form.querySelector('.membership-selected-count');
+    const selectedFilter = form.querySelector('.membership-selected-filter');
+    const sourceSelector = form.dataset.sourceCheckbox;
+
+    const renderSelected = () => {
+      const checked = Array.from(form.querySelectorAll(`${sourceSelector}:checked`));
+      selectedCount.textContent = String(checked.length);
+      selectedList.innerHTML = '';
+      if (checked.length === 0) {
+        selectedList.textContent = selectedList.dataset.emptyText || 'Nothing selected.';
+        return;
+      }
+
+      checked.forEach((checkbox) => {
+        const row = checkbox.closest('[data-selected-label]');
+        const item = document.createElement('div');
+        item.className = 'membership-selected-item';
+        item.dataset.selectedText = row?.dataset.selectedLabel || checkbox.value;
+
+        const label = document.createElement('span');
+        label.textContent = item.dataset.selectedText;
+
+        const remove = document.createElement('button');
+        remove.className = 'btn btn-outline-danger btn-sm';
+        remove.type = 'button';
+        remove.innerHTML = '<i class="ti ti-x"></i>';
+        remove.addEventListener('click', () => {
+          checkbox.checked = false;
+          renderSelected();
+        });
+
+        item.append(label, remove);
+        selectedList.append(item);
+      });
+
+      const query = selectedFilter?.value || '';
+      selectedList.querySelectorAll('.membership-selected-item').forEach((item) => {
+        item.hidden = !matchWords(item.dataset.selectedText || '', query);
+      });
+    };
+
+    form.querySelectorAll(sourceSelector).forEach((checkbox) => {
+      checkbox.addEventListener('change', renderSelected);
+    });
+
+    form.querySelectorAll('.membership-add-visible').forEach((button) => {
+      button.addEventListener('click', () => {
+        const list = document.getElementById(button.dataset.listId);
+        if (!list) return;
+        list.querySelectorAll(`${sourceSelector}`).forEach((checkbox) => {
+          if (!checkbox.closest('[data-filter-text]')?.hidden) {
+            checkbox.checked = true;
+          }
+        });
+        renderSelected();
+      });
+    });
+
+    form.querySelector('.membership-selected-clear')?.addEventListener('click', () => {
+      form.querySelectorAll(sourceSelector).forEach((checkbox) => {
+        checkbox.checked = false;
+      });
+      renderSelected();
+    });
+
+    selectedFilter?.addEventListener('input', renderSelected);
+    renderSelected();
+
+    form.addEventListener('submit', (event) => {
+      const selected = Array.from(form.querySelectorAll(`${form.dataset.sourceCheckbox}:checked`))
+        .map((checkbox) => checkbox.value)
+        .filter(Boolean);
+      form.querySelector(`input[name="${form.dataset.targetInput}"]`).value = selected.join(',');
+      if (selected.length === 0) {
+        event.preventDefault();
+        window.alert('Nothing selected.');
+      }
+    });
+  });
+
+  document.querySelectorAll('.membership-check-all').forEach((checkbox) => {
+    checkbox.addEventListener('change', () => {
+      document.querySelectorAll(checkbox.dataset.targetCheckbox || '').forEach((target) => {
+        target.checked = checkbox.checked;
+      });
+    });
+  });
+
+  document.querySelectorAll('.membership-bulk-remove-form').forEach((form) => {
+    form.addEventListener('submit', (event) => {
+      delete form.dataset.confirm;
+      delete form.dataset.confirmAction;
+      const submitter = event.submitter;
+      if (submitter?.dataset.confirm) {
+        return;
+      }
+
+      const selected = Array.from(form.querySelectorAll(`${form.dataset.sourceCheckbox}:checked`))
+        .map((checkbox) => checkbox.value)
+        .filter(Boolean);
+      form.querySelector(`input[name="${form.dataset.targetInput}"]`).value = selected.join(',');
+      if (selected.length === 0) {
+        event.preventDefault();
+        window.alert('Nothing selected.');
+        return;
+      }
+      form.dataset.confirm = form.dataset.confirmLabel || `Remove ${selected.length} selected items?`;
+      form.dataset.confirmAction = 'Remove selected';
+    });
+  });
+})();
+</script>
+{% endblock %}

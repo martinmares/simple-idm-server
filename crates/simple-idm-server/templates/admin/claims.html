@@ -1,0 +1,681 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="row g-3">
+  <div class="col-12" id="by-client">
+    <div class="card">
+      <div class="card-header d-flex align-items-center justify-content-between">
+        <div>
+          <h3 class="card-title mb-0">Claim rules by client</h3>
+          <div class="text-secondary small mt-1">Select a client, then manage claim rules. A rule can apply to every user or only to users in one group.</div>
+        </div>
+        {% if let Some(client) = selected_client %}
+        <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-client-claim">
+          <i class="ti ti-plus me-1"></i>Add claim rule
+        </button>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-4 col-lg-3">
+            <div class="input-group mb-2">
+              <input class="form-control claim-side-filter" placeholder="Filter clients..." autocomplete="off">
+              <button class="btn btn-outline-secondary claim-side-reset" type="button" title="Reset filter">
+                <i class="ti ti-x"></i>
+              </button>
+            </div>
+            <div class="list-group list-group-flush border rounded overflow-auto" style="max-height: 48vh;">
+              {% for r in client_rows %}
+              <a class="list-group-item list-group-item-action claim-side-item {% if r.selected %}active{% endif %}" href="/admin/ui/claims?client_id={{ r.id }}{% if let Some(group) = selected_group %}{% if let Some(group_id) = group.id %}&group_id={{ group_id }}{% endif %}{% endif %}#by-client">
+                <div class="d-flex justify-content-between gap-2">
+                  <span>{{ r.name }}</span>
+                  <span class="badge {% if r.selected %}bg-white text-primary{% else %}bg-blue-lt{% endif %}">{{ r.claims_count }}</span>
+                </div>
+              </a>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="col-md-8 col-lg-9">
+            {% if let Some(client) = selected_client %}
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <div>
+                <h4 class="mb-0">{{ client.name }}</h4>
+                <div class="text-secondary small">{{ selected_client_claim_maps.len() }} claim rules</div>
+              </div>
+            </div>
+            <div class="table-responsive border rounded">
+              <table class="table table-vcenter card-table mb-0">
+                <thead>
+                  <tr>
+                    <th class="w-1">#</th>
+                    <th>Group</th>
+                    <th>Claim</th>
+                    <th>Kind</th>
+                    <th>Value</th>
+                    <th class="text-end">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for item in selected_client_claim_maps %}
+                  <tr>
+                    <td class="text-secondary">{{ item.ordinal }}</td>
+                    <td><span class="badge bg-secondary-lt">{{ item.row.group_scope() }}</span></td>
+                    <td><code>{{ item.row.claim_name }}</code></td>
+                    <td><span class="badge bg-blue-lt">{{ item.row.claim_value_kind }}</span></td>
+                    <td><code class="small">{{ item.row.claim_value_display() }}</code></td>
+                    <td class="text-end">
+                      <div class="btn-list justify-content-end">
+                        <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#edit-client-claim-{{ item.row.id }}">Edit</button>
+                        <form method="post" action="/admin/ui/client-claims/{{ item.row.id }}/deactivate" data-confirm="Deactivate claim rule {{ item.row.claim_name }}?" data-confirm-action="Deactivate">
+                          <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+                        </form>
+                      </div>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                  {% if selected_client_claim_maps.len() == 0 %}
+                  <tr>
+                    <td colspan="6">
+                      <div class="empty py-4">
+                        <div class="empty-icon"><i class="ti ti-key"></i></div>
+                        <p class="empty-title">No claim rules for this client</p>
+                      </div>
+                    </td>
+                  </tr>
+                  {% endif %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="empty"><div class="empty-title">No client selected</div></div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-12" id="by-group">
+    <div class="card">
+      <div class="card-header d-flex align-items-center justify-content-between">
+        <div>
+          <h3 class="card-title mb-0">Group usage</h3>
+          <div class="text-secondary small mt-1">Secondary view: select a group and inspect client claim rules that use it as a condition.</div>
+        </div>
+        {% if let Some(group) = selected_group %}
+        <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-group-claim">
+          <i class="ti ti-plus me-1"></i>Add client claim rule for group
+        </button>
+        {% endif %}
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-4 col-lg-3">
+            <div class="input-group mb-2">
+              <input class="form-control claim-side-filter" placeholder="Filter groups..." autocomplete="off">
+              <button class="btn btn-outline-secondary claim-side-reset" type="button" title="Reset filter">
+                <i class="ti ti-x"></i>
+              </button>
+            </div>
+            <div class="list-group list-group-flush border rounded overflow-auto" style="max-height: 48vh;">
+              {% for r in group_rows %}
+              {% if let Some(id) = r.id %}
+              <a class="list-group-item list-group-item-action claim-side-item {% if r.selected %}active{% endif %}" href="/admin/ui/claims?{% if let Some(client) = selected_client %}client_id={{ client.id }}&{% endif %}group_id={{ id }}#by-group">
+                <div class="d-flex justify-content-between gap-2">
+                  <span>{{ r.name }}</span>
+                  <span class="badge {% if r.selected %}bg-white text-primary{% else %}bg-blue-lt{% endif %}">{{ r.claims_count }}</span>
+                </div>
+              </a>
+              {% endif %}
+              {% endfor %}
+            </div>
+          </div>
+          <div class="col-md-8 col-lg-9">
+            {% if let Some(group) = selected_group %}
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <div>
+                <h4 class="mb-0">{{ group.name }}</h4>
+                <div class="text-secondary small">{{ selected_group_claim_maps.len() }} claim rules</div>
+              </div>
+            </div>
+            <div class="table-responsive border rounded">
+              <table class="table table-vcenter card-table mb-0">
+                <thead>
+                  <tr>
+                    <th class="w-1">#</th>
+                    <th>Client</th>
+                    <th>Claim</th>
+                    <th>Kind</th>
+                    <th>Value</th>
+                    <th class="text-end">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for item in selected_group_claim_maps %}
+                  <tr>
+                    <td class="text-secondary">{{ item.ordinal }}</td>
+                    <td>{{ item.row.client_name }}</td>
+                    <td><code>{{ item.row.claim_name }}</code></td>
+                    <td><span class="badge bg-blue-lt">{{ item.row.claim_value_kind }}</span></td>
+                    <td><code class="small">{{ item.row.claim_value_display() }}</code></td>
+                    <td class="text-end">
+                      <div class="btn-list justify-content-end">
+                        <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#edit-group-claim-{{ item.row.id }}">Edit</button>
+                        <form method="post" action="/admin/ui/group-claims/{{ item.row.id }}/deactivate" data-confirm="Deactivate claim rule {{ item.row.claim_name }}?" data-confirm-action="Deactivate">
+                          <button class="btn btn-sm btn-outline-danger" type="submit">Delete</button>
+                        </form>
+                      </div>
+                    </td>
+                  </tr>
+                  {% endfor %}
+                  {% if selected_group_claim_maps.len() == 0 %}
+                  <tr>
+                    <td colspan="6">
+                      <div class="empty py-4">
+                        <div class="empty-icon"><i class="ti ti-key"></i></div>
+                        <p class="empty-title">No claim rules for this group</p>
+                      </div>
+                    </td>
+                  </tr>
+                  {% endif %}
+                </tbody>
+              </table>
+            </div>
+            {% else %}
+            <div class="empty"><div class="empty-title">No group selected</div></div>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+{% if deleted_claim_maps.len() > 0 %}
+<div class="card mt-3">
+  <div class="card-header">
+    <h3 class="card-title mb-0">Recently deleted claim rules</h3>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>Client</th>
+          <th>Group</th>
+          <th>Claim</th>
+          <th>Kind</th>
+          <th>Value</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in deleted_claim_maps %}
+        <tr>
+          <td>{{ r.client_name }}</td>
+          <td><span class="badge bg-secondary-lt">{{ r.group_scope() }}</span></td>
+          <td><code>{{ r.claim_name }}</code></td>
+          <td><span class="badge bg-blue-lt">{{ r.claim_value_kind }}</span></td>
+          <td><code class="small">{{ r.claim_value_display() }}</code></td>
+          <td>
+            <form method="post" action="/admin/ui/claim-maps/{{ r.id }}/restore">
+              <button class="btn btn-sm btn-outline-success" type="submit">Restore</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% if let Some(client) = selected_client %}
+<div class="modal modal-blur fade" id="create-client-claim" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-md modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Add client claim rule for {{ client.name }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/client-claims/create">
+        <input type="hidden" name="client_id" value="{{ client.id }}">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-12">
+              <div class="alert alert-info mb-0">
+                This creates a rule for client <strong>{{ client.name }}</strong>. The group field only limits when the claim is emitted.
+              </div>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Applies to group</label>
+              <select class="form-select" name="group_id">
+                <option value="">Every user (no group condition)</option>
+                {% for g in groups %}
+                <option value="{{ g.0 }}">{{ g.1 }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-7">
+              <label class="form-label">Claim name</label>
+              <input class="form-control" name="claim_name" placeholder="proxy_groups" required>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">Value kind</label>
+              <select class="form-select claim-kind-select" name="claim_value_kind">
+                <option value="single">single</option>
+                <option value="array">array</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Claim value</label>
+              <input type="hidden" name="claim_value" class="claim-value-hidden">
+              <div class="claim-single-editor">
+                <input class="form-control claim-single-input" placeholder="value">
+              </div>
+              <div class="claim-array-editor d-none">
+                <div class="claim-array-items vstack gap-2"></div>
+                <button class="btn btn-outline-secondary btn-sm mt-2 claim-array-add" type="button">
+                  <i class="ti ti-plus me-1"></i>Add value
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" type="button" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Add claim rule</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if let Some(group) = selected_group %}
+{% if let Some(group_id) = group.id %}
+<div class="modal modal-blur fade" id="create-group-claim" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-md modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Add client claim rule for group {{ group.name }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/client-claims/create">
+        <input type="hidden" name="group_id" value="{{ group_id }}">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-12">
+              <div class="alert alert-info mb-0">
+                This still creates a client claim rule. Group <strong>{{ group.name }}</strong> is preselected as the condition.
+              </div>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Client</label>
+              <select class="form-select" name="client_id" required>
+                {% for c in clients %}
+                <option value="{{ c.0 }}">{{ c.1 }}</option>
+                {% endfor %}
+              </select>
+            </div>
+            <div class="col-md-7">
+              <label class="form-label">Claim name</label>
+              <input class="form-control" name="claim_name" placeholder="proxy_groups" required>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">Value kind</label>
+              <select class="form-select claim-kind-select" name="claim_value_kind">
+                <option value="single">single</option>
+                <option value="array">array</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Claim value</label>
+              <input type="hidden" name="claim_value" class="claim-value-hidden">
+              <div class="claim-single-editor">
+                <input class="form-control claim-single-input" placeholder="value">
+              </div>
+              <div class="claim-array-editor d-none">
+                <div class="claim-array-items vstack gap-2"></div>
+                <button class="btn btn-outline-secondary btn-sm mt-2 claim-array-add" type="button">
+                  <i class="ti ti-plus me-1"></i>Add value
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" type="button" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Add claim rule</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endif %}
+
+{% for item in selected_client_claim_maps %}
+<div class="modal modal-blur fade" id="edit-client-claim-{{ item.row.id }}" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-md modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Edit claim rule</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/client-claims/{{ item.row.id }}/update">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-12">
+              <div class="alert alert-info mb-0">
+                This rule belongs to client <strong>{{ item.row.client_name }}</strong> and applies to <strong>{{ item.row.group_scope() }}</strong>.
+              </div>
+            </div>
+            <div class="col-md-7">
+              <label class="form-label">Claim name</label>
+              <input class="form-control" name="claim_name" value="{{ item.row.claim_name }}" required>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">Value kind</label>
+              <select class="form-select claim-kind-select" name="claim_value_kind">
+                <option value="single" {% if item.row.claim_value_kind == "single" %}selected{% endif %}>single</option>
+                <option value="array" {% if item.row.claim_value_kind == "array" %}selected{% endif %}>array</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Claim value</label>
+              <input type="hidden" name="claim_value" class="claim-value-hidden">
+              <div class="claim-single-editor">
+                <input class="form-control claim-single-input" value="{% if item.row.claim_value_kind == "single" %}{{ item.row.claim_value_display() }}{% endif %}" placeholder="value">
+              </div>
+              <div class="claim-array-editor d-none" data-values="{{ item.row.claim_value_array_csv() }}">
+                <div class="claim-array-items vstack gap-2"></div>
+                <button class="btn btn-outline-secondary btn-sm mt-2 claim-array-add" type="button">
+                  <i class="ti ti-plus me-1"></i>Add value
+                </button>
+              </div>
+            </div>
+            <div class="col-12">
+              <div class="hr-text">Claim patterns</div>
+              <div class="form-text mb-2">
+                Limit this claim rule to matching groups. Lower priority number is evaluated first.
+              </div>
+              <div class="row g-2 align-items-end mb-3">
+                <div class="col-md-6">
+                  <label class="form-label">Pattern</label>
+                  <input class="form-control" name="pattern" form="client-claim-pattern-create-{{ item.row.id }}" placeholder="team:*" autocomplete="off">
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label">Mode</label>
+                  <select class="form-select" name="mode" form="client-claim-pattern-create-{{ item.row.id }}">
+                    <option value="include">include</option>
+                    <option value="exclude">exclude</option>
+                  </select>
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label">Priority</label>
+                  <input class="form-control" name="priority" form="client-claim-pattern-create-{{ item.row.id }}" type="number" value="100">
+                </div>
+                <div class="col-md-1">
+                  <button class="btn btn-outline-primary w-100" type="submit" form="client-claim-pattern-create-{{ item.row.id }}">Add</button>
+                </div>
+              </div>
+              <div class="vstack gap-2">
+                {% for p in claim_patterns %}
+                {% if p.claim_map_id == item.row.id %}
+                <div class="row g-2 align-items-center">
+                  <div class="col-md-6">
+                    <input class="form-control form-control-sm" name="pattern" form="client-claim-pattern-update-{{ p.id }}" value="{{ p.pattern }}">
+                  </div>
+                  <div class="col-md-2">
+                    <select class="form-select form-select-sm" name="mode" form="client-claim-pattern-update-{{ p.id }}">
+                      <option value="include" {% if p.is_include %}selected{% endif %}>include</option>
+                      <option value="exclude" {% if !p.is_include %}selected{% endif %}>exclude</option>
+                    </select>
+                  </div>
+                  <div class="col-md-2">
+                    <input class="form-control form-control-sm" name="priority" form="client-claim-pattern-update-{{ p.id }}" type="number" value="{{ p.priority }}">
+                  </div>
+                  <div class="col-md-2 d-flex gap-2">
+                    <button class="btn btn-outline-primary btn-sm flex-fill" type="submit" form="client-claim-pattern-update-{{ p.id }}">Save</button>
+                    <button class="btn btn-outline-danger btn-sm" type="submit" form="client-claim-pattern-delete-{{ p.id }}" data-confirm="Delete this claim pattern?" data-confirm-action="Delete">Delete</button>
+                  </div>
+                </div>
+                {% endif %}
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" type="button" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Save changes</button>
+        </div>
+      </form>
+      <form id="client-claim-pattern-create-{{ item.row.id }}" method="post" action="/admin/ui/claim-maps/{{ item.row.id }}/patterns/create"></form>
+      {% for p in claim_patterns %}
+      {% if p.claim_map_id == item.row.id %}
+      <form id="client-claim-pattern-update-{{ p.id }}" method="post" action="/admin/ui/claim-maps/{{ item.row.id }}/patterns/{{ p.id }}/update"></form>
+      <form id="client-claim-pattern-delete-{{ p.id }}" method="post" action="/admin/ui/claim-maps/{{ item.row.id }}/patterns/{{ p.id }}/deactivate"></form>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+{% for item in selected_group_claim_maps %}
+<div class="modal modal-blur fade" id="edit-group-claim-{{ item.row.id }}" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-md modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Edit claim rule</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/group-claims/{{ item.row.id }}/update">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-12">
+              <div class="alert alert-info mb-0">
+                This rule belongs to client <strong>{{ item.row.client_name }}</strong> and applies to <strong>{{ item.row.group_scope() }}</strong>.
+              </div>
+            </div>
+            <div class="col-md-7">
+              <label class="form-label">Claim name</label>
+              <input class="form-control" name="claim_name" value="{{ item.row.claim_name }}" required>
+            </div>
+            <div class="col-md-5">
+              <label class="form-label">Value kind</label>
+              <select class="form-select claim-kind-select" name="claim_value_kind">
+                <option value="single" {% if item.row.claim_value_kind == "single" %}selected{% endif %}>single</option>
+                <option value="array" {% if item.row.claim_value_kind == "array" %}selected{% endif %}>array</option>
+              </select>
+            </div>
+            <div class="col-12">
+              <label class="form-label">Claim value</label>
+              <input type="hidden" name="claim_value" class="claim-value-hidden">
+              <div class="claim-single-editor">
+                <input class="form-control claim-single-input" value="{% if item.row.claim_value_kind == "single" %}{{ item.row.claim_value_display() }}{% endif %}" placeholder="value">
+              </div>
+              <div class="claim-array-editor d-none" data-values="{{ item.row.claim_value_array_csv() }}">
+                <div class="claim-array-items vstack gap-2"></div>
+                <button class="btn btn-outline-secondary btn-sm mt-2 claim-array-add" type="button">
+                  <i class="ti ti-plus me-1"></i>Add value
+                </button>
+              </div>
+            </div>
+            <div class="col-12">
+              <div class="hr-text">Claim patterns</div>
+              <div class="form-text mb-2">
+                Limit this claim rule to matching groups. Lower priority number is evaluated first.
+              </div>
+              <div class="row g-2 align-items-end mb-3">
+                <div class="col-md-6">
+                  <label class="form-label">Pattern</label>
+                  <input class="form-control" name="pattern" form="group-claim-pattern-create-{{ item.row.id }}" placeholder="team:*" autocomplete="off">
+                </div>
+                <div class="col-md-3">
+                  <label class="form-label">Mode</label>
+                  <select class="form-select" name="mode" form="group-claim-pattern-create-{{ item.row.id }}">
+                    <option value="include">include</option>
+                    <option value="exclude">exclude</option>
+                  </select>
+                </div>
+                <div class="col-md-2">
+                  <label class="form-label">Priority</label>
+                  <input class="form-control" name="priority" form="group-claim-pattern-create-{{ item.row.id }}" type="number" value="100">
+                </div>
+                <div class="col-md-1">
+                  <button class="btn btn-outline-primary w-100" type="submit" form="group-claim-pattern-create-{{ item.row.id }}">Add</button>
+                </div>
+              </div>
+              <div class="vstack gap-2">
+                {% for p in claim_patterns %}
+                {% if p.claim_map_id == item.row.id %}
+                <div class="row g-2 align-items-center">
+                  <div class="col-md-6">
+                    <input class="form-control form-control-sm" name="pattern" form="group-claim-pattern-update-{{ p.id }}" value="{{ p.pattern }}">
+                  </div>
+                  <div class="col-md-2">
+                    <select class="form-select form-select-sm" name="mode" form="group-claim-pattern-update-{{ p.id }}">
+                      <option value="include" {% if p.is_include %}selected{% endif %}>include</option>
+                      <option value="exclude" {% if !p.is_include %}selected{% endif %}>exclude</option>
+                    </select>
+                  </div>
+                  <div class="col-md-2">
+                    <input class="form-control form-control-sm" name="priority" form="group-claim-pattern-update-{{ p.id }}" type="number" value="{{ p.priority }}">
+                  </div>
+                  <div class="col-md-2 d-flex gap-2">
+                    <button class="btn btn-outline-primary btn-sm flex-fill" type="submit" form="group-claim-pattern-update-{{ p.id }}">Save</button>
+                    <button class="btn btn-outline-danger btn-sm" type="submit" form="group-claim-pattern-delete-{{ p.id }}" data-confirm="Delete this claim pattern?" data-confirm-action="Delete">Delete</button>
+                  </div>
+                </div>
+                {% endif %}
+                {% endfor %}
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button class="btn" type="button" data-bs-dismiss="modal">Cancel</button>
+          <button class="btn btn-primary" type="submit">Save changes</button>
+        </div>
+      </form>
+      <form id="group-claim-pattern-create-{{ item.row.id }}" method="post" action="/admin/ui/claim-maps/{{ item.row.id }}/patterns/create"></form>
+      {% for p in claim_patterns %}
+      {% if p.claim_map_id == item.row.id %}
+      <form id="group-claim-pattern-update-{{ p.id }}" method="post" action="/admin/ui/claim-maps/{{ item.row.id }}/patterns/{{ p.id }}/update"></form>
+      <form id="group-claim-pattern-delete-{{ p.id }}" method="post" action="/admin/ui/claim-maps/{{ item.row.id }}/patterns/{{ p.id }}/deactivate"></form>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+<script>
+document.addEventListener('input', (event) => {
+  const input = event.target.closest('.claim-side-filter');
+  if (!input) return;
+  const terms = input.value.toLowerCase().split(/\s+/).map((v) => v.trim()).filter(Boolean);
+  const listRoot = input.closest('.col-md-4, .col-lg-3') || input.parentElement;
+  listRoot.querySelectorAll('.claim-side-item').forEach((item) => {
+    const text = item.textContent.toLowerCase();
+    item.style.display = terms.every((term) => text.includes(term)) ? '' : 'none';
+  });
+});
+
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('.claim-side-reset');
+  if (!button) return;
+  const root = button.closest('.col-md-4, .col-lg-3') || button.parentElement;
+  const input = root.querySelector('.claim-side-filter');
+  if (!input) return;
+  input.value = '';
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.focus();
+});
+
+function addClaimArrayItem(editor, value) {
+  const list = editor.querySelector('.claim-array-items');
+  if (!list) return;
+  const row = document.createElement('div');
+  row.className = 'd-flex gap-2 claim-array-row';
+  row.innerHTML = `
+    <input class="form-control claim-array-input" value="">
+    <button class="btn btn-outline-danger claim-array-remove" type="button" title="Remove value">
+      <i class="ti ti-x"></i>
+    </button>
+  `;
+  row.querySelector('.claim-array-input').value = value || '';
+  list.appendChild(row);
+}
+
+function syncClaimValueForm(form) {
+  const kind = form.querySelector('.claim-kind-select')?.value || 'single';
+  const hidden = form.querySelector('.claim-value-hidden');
+  const singleEditor = form.querySelector('.claim-single-editor');
+  const arrayEditor = form.querySelector('.claim-array-editor');
+  const singleInput = form.querySelector('.claim-single-input');
+  if (!hidden || !singleEditor || !arrayEditor) return;
+
+  const isArray = kind === 'array';
+  singleEditor.classList.toggle('d-none', isArray);
+  arrayEditor.classList.toggle('d-none', !isArray);
+
+  if (isArray && arrayEditor.querySelectorAll('.claim-array-input').length === 0) {
+    addClaimArrayItem(arrayEditor, singleInput?.value || '');
+  }
+
+  hidden.value = isArray
+    ? Array.from(arrayEditor.querySelectorAll('.claim-array-input')).map((input) => input.value.trim()).filter(Boolean).join(',')
+    : (singleInput?.value || '').trim();
+}
+
+document.querySelectorAll('form').forEach((form) => {
+  if (!form.querySelector('.claim-value-hidden')) return;
+  const arrayEditor = form.querySelector('.claim-array-editor');
+  if (arrayEditor) {
+    const raw = arrayEditor.getAttribute('data-values') || '';
+    raw.split('\n').map((v) => v.trim()).filter(Boolean).forEach((v) => addClaimArrayItem(arrayEditor, v));
+  }
+  syncClaimValueForm(form);
+});
+
+document.addEventListener('change', (event) => {
+  const select = event.target.closest('.claim-kind-select');
+  if (!select) return;
+  syncClaimValueForm(select.closest('form'));
+});
+
+document.addEventListener('input', (event) => {
+  const input = event.target.closest('.claim-single-input, .claim-array-input');
+  if (!input) return;
+  syncClaimValueForm(input.closest('form'));
+});
+
+document.addEventListener('click', (event) => {
+  const add = event.target.closest('.claim-array-add');
+  if (add) {
+    addClaimArrayItem(add.closest('.claim-array-editor'), '');
+    syncClaimValueForm(add.closest('form'));
+    return;
+  }
+  const remove = event.target.closest('.claim-array-remove');
+  if (remove) {
+    const form = remove.closest('form');
+    remove.closest('.claim-array-row')?.remove();
+    syncClaimValueForm(form);
+  }
+});
+
+document.addEventListener('submit', (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement) || !form.querySelector('.claim-value-hidden')) return;
+  syncClaimValueForm(form);
+  const hidden = form.querySelector('.claim-value-hidden');
+  if (!hidden.value.trim()) {
+    event.preventDefault();
+    alert('Claim value is required.');
+  }
+});
+</script>
+{% endblock %}

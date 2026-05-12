@@ -1,159 +1,148 @@
 {% extends "admin/base.html" %}
 {% block content %}
-<div class="card mb-3">
-  <div class="card-body">
-    <div class="d-flex flex-wrap gap-2 align-items-center">
-      <span class="dashboard-subtitle mb-0">Managed domains</span>
-      <span class="badge bg-cyan-lt text-cyan">
-        <i class="ti ti-world me-1"></i>{{ managed_domains.len() }}
-      </span>
-    </div>
-    <div class="d-flex flex-wrap gap-2">
-      {% if managed_domains.len() == 0 %}
-      <span class="badge bg-secondary-lt">No active domain configured</span>
-      {% else %}
-      {% for d in managed_domains %}
-      <span class="badge bg-blue-lt">{{ d }}</span>
-      {% endfor %}
-      {% endif %}
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-body">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+          <div>
+            <div class="dashboard-subtitle">Admin overview</div>
+            <h2 class="mb-1">Simple IDM control plane</h2>
+            <div class="text-secondary">Users, groups, clients, identity providers and claim rules in one place.</div>
+          </div>
+          <div class="d-flex flex-wrap gap-2 justify-content-end">
+            {% if managed_domains.len() == 0 %}
+            <a class="badge bg-secondary-lt text-decoration-none" href="/admin/ui/tenants">No active domain configured</a>
+            {% else %}
+            {% for d in managed_domains %}
+            <a class="badge bg-blue-lt text-decoration-none" href="/admin/ui/tenants"><i class="ti ti-world me-1"></i>{{ d }}</a>
+            {% endfor %}
+            {% endif %}
+          </div>
+        </div>
+      </div>
     </div>
   </div>
-</div>
 
-<div class="row g-3">
-  <div class="col-sm-6 col-lg-3">
-    <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/users">
+  <div class="col-sm-6 col-xl-3">
+    <a class="card dashboard-card text-reset text-decoration-none h-100" href="/admin/ui/users">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
+        <div class="d-flex justify-content-between align-items-start">
           <div>
-            <div class="dashboard-subtitle">Users total</div>
-            <div class="dashboard-kpi mb-0">{{ users_total }}</div>
+            <div class="dashboard-subtitle">Users</div>
+            <div class="dashboard-kpi">{{ users_total }}</div>
+            <div class="text-secondary small">{{ users_active }} active</div>
           </div>
           <span class="dashboard-icon bg-blue-lt text-blue"><i class="ti ti-users"></i></span>
         </div>
       </div>
     </a>
   </div>
-  <div class="col-sm-6 col-lg-3">
-    <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/users?status=active">
+  <div class="col-sm-6 col-xl-3">
+    <a class="card dashboard-card text-reset text-decoration-none h-100" href="/admin/ui/groups">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <div class="dashboard-subtitle">Users active</div>
-            <div class="dashboard-kpi mb-0">{{ users_active }}</div>
-          </div>
-          <span class="dashboard-icon bg-green-lt text-green"><i class="ti ti-user-check"></i></span>
-        </div>
-      </div>
-    </a>
-  </div>
-  <div class="col-sm-6 col-lg-3">
-    <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/groups">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
+        <div class="d-flex justify-content-between align-items-start">
           <div>
             <div class="dashboard-subtitle">Groups</div>
-            <div class="dashboard-kpi mb-0">{{ groups_total }}</div>
+            <div class="dashboard-kpi">{{ groups_total }}</div>
+            <div class="text-secondary small">Membership and hierarchy</div>
           </div>
           <span class="dashboard-icon bg-violet-lt text-violet"><i class="ti ti-users-group"></i></span>
         </div>
       </div>
     </a>
   </div>
-  <div class="col-sm-6 col-lg-3">
-    <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/clients">
+  <div class="col-sm-6 col-xl-3">
+    <a class="card dashboard-card text-reset text-decoration-none h-100" href="/admin/ui/clients">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
+        <div class="d-flex justify-content-between align-items-start">
           <div>
             <div class="dashboard-subtitle">Clients</div>
-            <div class="dashboard-kpi mb-0">{{ clients_total }}</div>
+            <div class="dashboard-kpi">{{ clients_total }}</div>
+            <div class="text-secondary small">OAuth2/OIDC apps</div>
           </div>
           <span class="dashboard-icon bg-orange-lt text-orange"><i class="ti ti-apps"></i></span>
         </div>
       </div>
     </a>
   </div>
-
-  <div class="col-sm-6 col-lg-4">
-    <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/users?q=&status=all&note=">
+  <div class="col-sm-6 col-xl-3">
+    <a class="card dashboard-card text-reset text-decoration-none h-100" href="/admin/ui/claims">
       <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
+        <div class="d-flex justify-content-between align-items-start">
           <div>
-            <div class="dashboard-subtitle">Auth type: local</div>
-            <div class="dashboard-kpi mb-0">{{ users_local }}</div>
-          </div>
-          <span class="dashboard-icon bg-azure-lt text-azure"><i class="ti ti-lock"></i></span>
-        </div>
-      </div>
-    </a>
-  </div>
-  <div class="col-sm-6 col-lg-4">
-    <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/users">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <div class="dashboard-subtitle">Auth type: ad</div>
-            <div class="dashboard-kpi mb-0">{{ users_ad }}</div>
-          </div>
-          <span class="dashboard-icon bg-indigo-lt text-indigo"><i class="ti ti-building-bank"></i></span>
-        </div>
-      </div>
-    </a>
-  </div>
-  <div class="col-sm-6 col-lg-4">
-    <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/users">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <div class="dashboard-subtitle">Auth type: federated</div>
-            <div class="dashboard-kpi mb-0">{{ users_federated }}</div>
-          </div>
-          <span class="dashboard-icon bg-pink-lt text-pink"><i class="ti ti-link"></i></span>
-        </div>
-      </div>
-    </a>
-  </div>
-
-  <div class="col-sm-6 col-lg-4">
-    <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/client-claims">
-      <div class="card-body">
-        <div class="d-flex justify-content-between align-items-center">
-          <div>
-            <div class="dashboard-subtitle">Claim maps</div>
-            <div class="dashboard-kpi mb-0">{{ claim_maps_total }}</div>
+            <div class="dashboard-subtitle">Claim rules</div>
+            <div class="dashboard-kpi">{{ claim_maps_total }}</div>
+            <div class="text-secondary small">Client claim emission</div>
           </div>
           <span class="dashboard-icon bg-red-lt text-red"><i class="ti ti-key"></i></span>
         </div>
       </div>
     </a>
   </div>
-</div>
 
-<div class="card mt-3">
-  <div class="card-header">
-    <h3 class="card-title">Quick actions</h3>
+  <div class="col-lg-8">
+    <div class="card h-100">
+      <div class="card-header">
+        <h3 class="card-title">Identity model</h3>
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          <div class="col-md-4">
+            <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/users">
+              <div class="card-body">
+                <span class="dashboard-icon bg-azure-lt text-azure mb-3"><i class="ti ti-lock"></i></span>
+                <div class="dashboard-subtitle">Local password</div>
+                <div class="dashboard-kpi">{{ users_local }}</div>
+              </div>
+            </a>
+          </div>
+          <div class="col-md-4">
+            <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/users">
+              <div class="card-body">
+                <span class="dashboard-icon bg-indigo-lt text-indigo mb-3"><i class="ti ti-building-bank"></i></span>
+                <div class="dashboard-subtitle">AD/LDAP delegated</div>
+                <div class="dashboard-kpi">{{ users_ad }}</div>
+              </div>
+            </a>
+          </div>
+          <div class="col-md-4">
+            <a class="card dashboard-card text-reset text-decoration-none" href="/admin/ui/users">
+              <div class="card-body">
+                <span class="dashboard-icon bg-pink-lt text-pink mb-3"><i class="ti ti-link"></i></span>
+                <div class="dashboard-subtitle">Federated OIDC</div>
+                <div class="dashboard-kpi">{{ users_federated }}</div>
+              </div>
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
   </div>
-  <div class="card-body">
-    <div class="row g-2">
-      <div class="col-sm-6 col-lg-3">
-        <a href="/admin/ui/users" class="btn btn-outline-primary w-100">
-          <i class="ti ti-users me-1"></i> Manage users
-        </a>
+
+  <div class="col-lg-4">
+    <div class="card h-100">
+      <div class="card-header">
+        <h3 class="card-title">Operations</h3>
       </div>
-      <div class="col-sm-6 col-lg-3">
-        <a href="/admin/ui/groups" class="btn btn-outline-violet w-100">
-          <i class="ti ti-users-group me-1"></i> Manage groups
-        </a>
-      </div>
-      <div class="col-sm-6 col-lg-3">
-        <a href="/admin/ui/clients" class="btn btn-outline-orange w-100">
-          <i class="ti ti-apps me-1"></i> Manage clients
-        </a>
-      </div>
-      <div class="col-sm-6 col-lg-3">
-        <a href="/admin/ui/client-claims" class="btn btn-outline-red w-100">
-          <i class="ti ti-key me-1"></i> Manage claim maps
-        </a>
+      <div class="card-body">
+        <div class="vstack gap-2">
+          <a href="/admin/ui/memberships" class="btn btn-outline-primary w-100 justify-content-start">
+            <i class="ti ti-arrows-join me-2"></i>Manage memberships
+          </a>
+          <a href="/admin/ui/identity-providers" class="btn btn-outline-cyan w-100 justify-content-start">
+            <i class="ti ti-shield-check me-2"></i>Identity providers <span class="badge bg-cyan-lt ms-auto">{{ providers_total }}</span>
+          </a>
+          <a href="/admin/ui/tenants" class="btn btn-outline-blue w-100 justify-content-start">
+            <i class="ti ti-world-cog me-2"></i>Tenants / domains
+          </a>
+          <a href="/admin/ui/claims" class="btn btn-outline-red w-100 justify-content-start">
+            <i class="ti ti-key me-2"></i>Claim rules
+          </a>
+          <a href="/admin/ui/clients" class="btn btn-outline-orange w-100 justify-content-start">
+            <i class="ti ti-apps me-2"></i>OAuth clients
+          </a>
+        </div>
       </div>
     </div>
   </div>

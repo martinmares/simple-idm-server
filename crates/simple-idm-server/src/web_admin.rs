@@ -1,29 +1,29 @@
 use askama::Template;
 use axum::{
+    Router,
     extract::{Form, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
-    Router,
 };
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rand::RngExt;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde_json::json;
+use sha2::Digest;
 use simple_idm_core::{
     admin::middleware::AdminAuth,
     db::{DbPool, models::User},
     oauth2::{self, OAuth2State},
-    secret_crypto::decrypt_secret,
+    secret_crypto::{decrypt_secret, encrypt_secret},
 };
-use sha2::Digest;
 use sqlx::{FromRow, Row};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use tokio::sync::RwLock;
 use url::Url;
 use uuid::Uuid;
@@ -45,6 +45,7 @@ pub struct WebAdminState {
 #[derive(Debug, Deserialize)]
 pub struct LoginForm {
     token: String,
+    next: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,6 +54,7 @@ pub struct UserCreateForm {
     email: String,
     password: Option<String>,
     auth_mode: Option<String>,
+    auth_provider_id: Option<Uuid>,
     is_active: Option<String>,
     first_name: Option<String>,
     last_name: Option<String>,
@@ -66,12 +68,32 @@ pub struct UserUpdateForm {
     email: String,
     password: Option<String>,
     auth_mode: Option<String>,
+    auth_provider_id: Option<Uuid>,
     is_active: Option<String>,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    recovery_email: Option<String>,
+    phone_e164: Option<String>,
+    note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct UserAdMappingsApplyForm {
     mappings_json: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatternCreateForm {
+    pattern: String,
+    mode: String,
+    priority: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PatternUpdateForm {
+    pattern: String,
+    mode: String,
+    priority: Option<i32>,
 }
 
 #[derive(Debug, Clone)]
@@ -100,8 +122,131 @@ pub struct GroupUpdateForm {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct GroupReparentForm {
+    parent_group_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TenantUpdateForm {
+    name: String,
+    mode: String,
+    is_active: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TenantDomainCreateForm {
+    tenant_id: Uuid,
+    domain: String,
+    is_primary: Option<String>,
+    is_active: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TenantDomainUpdateForm {
+    domain: String,
+    is_primary: Option<String>,
+    is_active: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MembershipsQuery {
+    message: Option<String>,
+    error: Option<String>,
+    user_id: Option<Uuid>,
+    group_id: Option<Uuid>,
+    user_filter: Option<String>,
+    group_filter: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MembershipAddGroupsForm {
+    group_ids_csv: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MembershipAddUsersForm {
+    user_ids_csv: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MembershipRemoveGroupsForm {
+    group_ids_csv: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MembershipRemoveUsersForm {
+    user_ids_csv: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IdentityProviderCreateForm {
+    slug: String,
+    provider_type: String,
+    issuer: String,
+    client_id: String,
+    client_secret: String,
+    auth_url: Option<String>,
+    token_url: Option<String>,
+    jwks_url: Option<String>,
+    scope_openid: Option<String>,
+    scope_profile: Option<String>,
+    scope_email: Option<String>,
+    hd_domain: Option<String>,
+    ad_host: Option<String>,
+    ad_port: Option<i32>,
+    ad_base_dn: Option<String>,
+    ad_user_filter: Option<String>,
+    ad_tls_mode: Option<String>,
+    ad_timeout_seconds: Option<i64>,
+    ad_allow_insecure: Option<String>,
+    ad_domains: Option<String>,
+    ad_bind_dn: Option<String>,
+    ad_bind_password: Option<String>,
+    ad_role_sync_enabled: Option<String>,
+    ad_role_sync_ttl_seconds: Option<i64>,
+    ad_role_sync_timeout_seconds: Option<i64>,
+    is_active: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct IdentityProviderUpdateForm {
+    slug: String,
+    provider_type: String,
+    issuer: String,
+    client_id: String,
+    client_secret: Option<String>,
+    auth_url: Option<String>,
+    token_url: Option<String>,
+    jwks_url: Option<String>,
+    scope_openid: Option<String>,
+    scope_profile: Option<String>,
+    scope_email: Option<String>,
+    hd_domain: Option<String>,
+    ad_host: Option<String>,
+    ad_port: Option<i32>,
+    ad_base_dn: Option<String>,
+    ad_user_filter: Option<String>,
+    ad_tls_mode: Option<String>,
+    ad_timeout_seconds: Option<i64>,
+    ad_allow_insecure: Option<String>,
+    ad_domains: Option<String>,
+    ad_bind_dn: Option<String>,
+    ad_bind_password: Option<String>,
+    ad_role_sync_enabled: Option<String>,
+    ad_role_sync_ttl_seconds: Option<i64>,
+    ad_role_sync_timeout_seconds: Option<i64>,
+    is_active: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FederatedInvitationForm {
+    idp_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ClientCreateForm {
     client_id: String,
+    client_secret: Option<String>,
     name: String,
     redirect_uris: String,
     #[serde(default, deserialize_with = "deserialize_string_or_seq")]
@@ -119,6 +264,9 @@ pub struct ClientCreateForm {
     scope_email: Option<String>,
     scope_groups: Option<String>,
     scope_offline_access: Option<String>,
+    groups_claim_mode: Option<String>,
+    include_claim_maps: Option<String>,
+    ignore_virtual_groups: Option<String>,
     is_public: Option<String>,
     is_active: Option<String>,
 }
@@ -126,6 +274,7 @@ pub struct ClientCreateForm {
 #[derive(Debug, Deserialize)]
 pub struct ClientUpdateForm {
     client_id: String,
+    client_secret: Option<String>,
     name: String,
     redirect_uris: String,
     #[serde(default, deserialize_with = "deserialize_string_or_seq")]
@@ -143,6 +292,10 @@ pub struct ClientUpdateForm {
     scope_email: Option<String>,
     scope_groups: Option<String>,
     scope_offline_access: Option<String>,
+    groups_claim_mode: Option<String>,
+    include_claim_maps: Option<String>,
+    ignore_virtual_groups: Option<String>,
+    is_public: Option<String>,
     is_active: Option<String>,
 }
 
@@ -150,6 +303,13 @@ pub struct ClientUpdateForm {
 pub struct ClaimMapCreateForm {
     client_id: String,
     group_id: Option<String>,
+    claim_name: String,
+    claim_value: String,
+    claim_value_kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ClaimMapUpdateForm {
     claim_name: String,
     claim_value: String,
     claim_value_kind: String,
@@ -166,6 +326,7 @@ pub struct AdOnboardingForm {
 struct PageQuery {
     message: Option<String>,
     error: Option<String>,
+    next: Option<String>,
     ad_link: Option<String>,
     federated_link: Option<String>,
     q: Option<String>,
@@ -174,6 +335,19 @@ struct PageQuery {
     #[serde(default, deserialize_with = "deserialize_opt_string_or_seq")]
     letters: Option<Vec<String>>,
     page: Option<u32>,
+    client_id: Option<Uuid>,
+    group_id: Option<Uuid>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditQuery {
+    message: Option<String>,
+    error: Option<String>,
+    action: Option<String>,
+    resource_type: Option<String>,
+    outcome: Option<String>,
+    q: Option<String>,
+    range: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -281,6 +455,7 @@ struct UserAdMappingModalData {
 struct ExistingAdMappingRow {
     id: Uuid,
     tenant_id: Uuid,
+    idp_id: Option<Uuid>,
     external_role: String,
     group_id: Uuid,
     group_name: String,
@@ -327,6 +502,8 @@ struct UserRow {
     last_sign_in_at: Option<DateTime<Utc>>,
     note: Option<String>,
     auth_mode: String,
+    auth_provider_id: Option<Uuid>,
+    auth_provider_slug: Option<String>,
     is_active: bool,
     external_user_id: Option<String>,
     external_user_id_type: Option<String>,
@@ -339,12 +516,113 @@ struct UserRow {
     federated_approval_status: Option<String>,
 }
 
+impl UserRow {
+    fn is_auth_provider(&self, id: &Uuid) -> bool {
+        self.auth_provider_id.as_ref() == Some(id)
+    }
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct UserGroupPatternRow {
+    id: Uuid,
+    pattern: String,
+    is_include: bool,
+    priority: i32,
+}
+
 #[derive(Debug, Clone, FromRow)]
 struct GroupRow {
     id: Uuid,
     name: String,
     description: Option<String>,
     is_virtual: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GroupTreeRow {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    is_virtual: bool,
+    depth: usize,
+    parent_id: Option<Uuid>,
+}
+
+impl GroupTreeRow {
+    fn indent_px(&self) -> usize {
+        self.depth * 22
+    }
+
+    fn branch_px(&self) -> usize {
+        self.depth * 10
+    }
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct TenantRow {
+    id: Uuid,
+    slug: String,
+    name: String,
+    mode: String,
+    is_active: bool,
+    users_count: i64,
+    groups_count: i64,
+    clients_count: i64,
+    domains_count: i64,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct TenantDomainRow {
+    id: Uuid,
+    tenant_slug: String,
+    tenant_name: String,
+    domain: String,
+    is_primary: bool,
+    is_active: bool,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct IdentityProviderRow {
+    id: Uuid,
+    slug: String,
+    provider_type: String,
+    issuer: String,
+    client_id: String,
+    auth_url: Option<String>,
+    token_url: Option<String>,
+    jwks_url: Option<String>,
+    scopes: Vec<String>,
+    hd_domain: Option<String>,
+    is_active: bool,
+    ad_host: Option<String>,
+    ad_port: Option<i32>,
+    ad_base_dn: Option<String>,
+    ad_user_filter: Option<String>,
+    ad_tls_mode: Option<String>,
+    ad_timeout_seconds: Option<i64>,
+    ad_allow_insecure: Option<bool>,
+    ad_domains: Option<Vec<String>>,
+    ad_bind_dn: Option<String>,
+    ad_role_sync_enabled: Option<bool>,
+    ad_role_sync_ttl_seconds: Option<i64>,
+    ad_role_sync_timeout_seconds: Option<i64>,
+}
+
+impl IdentityProviderRow {
+    fn scopes_csv(&self) -> String {
+        self.scopes.join(", ")
+    }
+
+    fn has_scope(&self, scope: &str) -> bool {
+        self.scopes.iter().any(|s| s == scope)
+    }
+
+    fn ad_domains_csv(&self) -> String {
+        self.ad_domains
+            .as_ref()
+            .map(|v| v.join(", "))
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -357,6 +635,9 @@ struct ClientRow {
     scope: String,
     is_active: bool,
     is_public: bool,
+    groups_claim_mode: String,
+    include_claim_maps: bool,
+    ignore_virtual_groups: bool,
 }
 
 impl ClientRow {
@@ -370,7 +651,19 @@ impl ClientRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+struct ClientGroupPatternRow {
+    id: Uuid,
+    client_id: Uuid,
+    pattern: String,
+    is_include: bool,
+    priority: i32,
+}
+
+#[derive(Debug, Clone, FromRow)]
 struct ClaimMapRow {
+    id: Uuid,
+    client_id: Uuid,
+    group_id: Option<Uuid>,
     client_name: String,
     group_name: Option<String>,
     claim_name: String,
@@ -378,29 +671,180 @@ struct ClaimMapRow {
     claim_value_kind: String,
 }
 
+impl ClaimMapRow {
+    fn claim_value_display(&self) -> String {
+        match &self.claim_value {
+            Some(serde_json::Value::String(v)) => v.clone(),
+            Some(serde_json::Value::Array(values)) => values
+                .iter()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+            Some(serde_json::Value::Null) | None => String::new(),
+            Some(v) => v.to_string(),
+        }
+    }
+
+    fn claim_value_array_csv(&self) -> String {
+        match &self.claim_value {
+            Some(serde_json::Value::Array(values)) => values
+                .iter()
+                .map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+            Some(serde_json::Value::String(v)) => v.clone(),
+            Some(serde_json::Value::Null) | None => String::new(),
+            Some(v) => v.to_string(),
+        }
+    }
+
+    fn group_scope(&self) -> String {
+        self.group_name.clone().unwrap_or_else(|| "*".to_string())
+    }
+}
+
 #[derive(Debug, Clone, FromRow)]
 struct UserGroupRow {
+    user_id: Uuid,
     username: String,
     email: String,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    auth_mode: String,
+    is_active: bool,
+    group_id: Uuid,
     group_name: String,
+    group_description: Option<String>,
+    group_is_virtual: bool,
 }
 
 #[derive(Debug, Clone)]
-struct GroupUsersRow {
-    group_name: String,
-    users: String,
+struct MembershipUserOption {
+    id: Uuid,
+    username: String,
+    email: String,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    auth_mode: String,
+    is_active: bool,
+    selected: bool,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct MembershipUserRecord {
+    id: Uuid,
+    username: String,
+    email: String,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    auth_mode: String,
+    is_active: bool,
+}
+
+#[derive(Debug, Clone)]
+struct MembershipGroupOption {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    is_virtual: bool,
+    selected: bool,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct MembershipGroupRecord {
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    is_virtual: bool,
+}
+
+#[derive(Debug, Clone)]
+struct UserAssignedGroupRow {
+    ordinal: usize,
+    id: Uuid,
+    name: String,
+    description: Option<String>,
+    is_virtual: bool,
+}
+
+#[derive(Debug, Clone)]
+struct GroupAssignedUserRow {
+    ordinal: usize,
+    id: Uuid,
+    username: String,
+    email: String,
+    first_name: Option<String>,
+    last_name: Option<String>,
+    auth_mode: String,
+    is_active: bool,
 }
 
 #[derive(Debug, Clone)]
 struct ClientClaimsRow {
-    client_name: String,
-    claims: String,
+    id: Uuid,
+    name: String,
+    selected: bool,
+    claims_count: usize,
 }
 
 #[derive(Debug, Clone)]
 struct GroupClaimsRow {
-    group_name: String,
-    claims: String,
+    id: Option<Uuid>,
+    name: String,
+    selected: bool,
+    claims_count: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ClientClaimMapView {
+    ordinal: usize,
+    row: ClaimMapRow,
+}
+
+#[derive(Debug, Clone)]
+struct GroupClaimMapView {
+    ordinal: usize,
+    row: ClaimMapRow,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct ClaimMapPatternRow {
+    id: Uuid,
+    claim_map_id: Uuid,
+    pattern: String,
+    is_include: bool,
+    priority: i32,
+}
+
+#[derive(Debug, Clone, FromRow)]
+struct AuditEventRow {
+    created_at: DateTime<Utc>,
+    action: String,
+    resource_type: String,
+    resource_id: Option<Uuid>,
+    outcome: String,
+    actor_sub: Option<String>,
+    actor_client_id: Option<String>,
+    details: Option<serde_json::Value>,
+}
+
+impl AuditEventRow {
+    fn has_actor(&self) -> bool {
+        self.actor_sub.is_some() || self.actor_client_id.is_some()
+    }
+
+    fn details_display(&self) -> String {
+        self.details
+            .as_ref()
+            .and_then(|value| serde_json::to_string_pretty(value).ok())
+            .unwrap_or_else(|| "-".to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -408,24 +852,26 @@ enum AdminSection {
     Dashboard,
     Users,
     Groups,
-    UserGroups,
-    GroupUsers,
+    Memberships,
     Clients,
-    ClientClaims,
-    GroupClaims,
+    IdentityProviders,
+    Tenants,
+    Claims,
+    Audit,
 }
 
 impl AdminSection {
-    fn all() -> [Self; 8] {
+    fn all() -> [Self; 9] {
         [
             Self::Dashboard,
             Self::Users,
             Self::Groups,
-            Self::UserGroups,
-            Self::GroupUsers,
+            Self::Memberships,
             Self::Clients,
-            Self::ClientClaims,
-            Self::GroupClaims,
+            Self::IdentityProviders,
+            Self::Tenants,
+            Self::Claims,
+            Self::Audit,
         ]
     }
 
@@ -434,11 +880,12 @@ impl AdminSection {
             Self::Dashboard => "Dashboard",
             Self::Users => "Users",
             Self::Groups => "Groups",
-            Self::UserGroups => "User groups",
-            Self::GroupUsers => "Group users",
+            Self::Memberships => "Memberships",
             Self::Clients => "Clients",
-            Self::ClientClaims => "Client claims",
-            Self::GroupClaims => "Group claims",
+            Self::IdentityProviders => "Identity providers",
+            Self::Tenants => "Tenants / domains",
+            Self::Claims => "Claims",
+            Self::Audit => "Audit",
         }
     }
 
@@ -447,11 +894,12 @@ impl AdminSection {
             Self::Dashboard => "/admin/ui/",
             Self::Users => "/admin/ui/users",
             Self::Groups => "/admin/ui/groups",
-            Self::UserGroups => "/admin/ui/user-groups",
-            Self::GroupUsers => "/admin/ui/group-users",
+            Self::Memberships => "/admin/ui/memberships",
             Self::Clients => "/admin/ui/clients",
-            Self::ClientClaims => "/admin/ui/client-claims",
-            Self::GroupClaims => "/admin/ui/group-claims",
+            Self::IdentityProviders => "/admin/ui/identity-providers",
+            Self::Tenants => "/admin/ui/tenants",
+            Self::Claims => "/admin/ui/claims",
+            Self::Audit => "/admin/ui/audit",
         }
     }
 }
@@ -460,6 +908,7 @@ impl AdminSection {
 #[template(path = "admin/login.html")]
 struct LoginTemplate<'a> {
     error: Option<&'a str>,
+    next: String,
 }
 
 #[derive(Template)]
@@ -471,8 +920,10 @@ struct UsersTemplate {
     ad_link: Option<String>,
     federated_link: Option<String>,
     rows: Vec<UserRow>,
+    deleted_rows: Vec<UserRow>,
     ad_modal_data: Vec<UserAdMappingModalData>,
     ad_onboarding_tokens: Vec<AdOnboardingTokenView>,
+    identity_providers: Vec<IdentityProviderRow>,
     filter_q: String,
     filter_status: String,
     filter_note: String,
@@ -524,25 +975,49 @@ struct GroupsTemplate {
     sections: Vec<NavItem>,
     message: Option<String>,
     error: Option<String>,
-    rows: Vec<GroupRow>,
+    tree_rows: Vec<GroupTreeRow>,
+    deleted_rows: Vec<GroupRow>,
 }
 
 #[derive(Template)]
-#[template(path = "admin/user_groups.html")]
-struct UserGroupsTemplate {
+#[template(path = "admin/tenants.html")]
+struct TenantsTemplate {
     sections: Vec<NavItem>,
     message: Option<String>,
     error: Option<String>,
-    rows: Vec<UserGroupRow>,
+    tenants: Vec<TenantRow>,
+    domains: Vec<TenantDomainRow>,
+    deleted_domains: Vec<TenantDomainRow>,
 }
 
 #[derive(Template)]
-#[template(path = "admin/group_users.html")]
-struct GroupUsersTemplate {
+#[template(path = "admin/identity_providers.html")]
+struct IdentityProvidersTemplate {
     sections: Vec<NavItem>,
     message: Option<String>,
     error: Option<String>,
-    rows: Vec<GroupUsersRow>,
+    rows: Vec<IdentityProviderRow>,
+    deleted_rows: Vec<IdentityProviderRow>,
+    filter_q: String,
+}
+
+#[derive(Template)]
+#[template(path = "admin/memberships.html")]
+struct MembershipsTemplate {
+    sections: Vec<NavItem>,
+    message: Option<String>,
+    error: Option<String>,
+    users: Vec<MembershipUserOption>,
+    groups: Vec<MembershipGroupOption>,
+    selected_user: Option<MembershipUserOption>,
+    selected_group: Option<MembershipGroupOption>,
+    selected_user_groups: Vec<UserAssignedGroupRow>,
+    selected_user_patterns: Vec<UserGroupPatternRow>,
+    selected_group_users: Vec<GroupAssignedUserRow>,
+    available_groups: Vec<MembershipGroupOption>,
+    available_users: Vec<MembershipUserOption>,
+    user_filter: String,
+    group_filter: String,
 }
 
 #[derive(Template)]
@@ -552,26 +1027,41 @@ struct ClientsTemplate {
     message: Option<String>,
     error: Option<String>,
     rows: Vec<ClientRow>,
+    deleted_rows: Vec<ClientRow>,
+    client_patterns: Vec<ClientGroupPatternRow>,
+    filter_q: String,
 }
 
 #[derive(Template)]
-#[template(path = "admin/client_claims.html")]
-struct ClientClaimsTemplate {
+#[template(path = "admin/claims.html")]
+struct ClaimsTemplate {
     sections: Vec<NavItem>,
     message: Option<String>,
     error: Option<String>,
-    rows: Vec<ClientClaimsRow>,
-    clients: Vec<(Uuid, String)>,
+    client_rows: Vec<ClientClaimsRow>,
     groups: Vec<(Uuid, String)>,
+    selected_client: Option<ClientClaimsRow>,
+    selected_client_claim_maps: Vec<ClientClaimMapView>,
+    group_rows: Vec<GroupClaimsRow>,
+    clients: Vec<(Uuid, String)>,
+    selected_group: Option<GroupClaimsRow>,
+    selected_group_claim_maps: Vec<GroupClaimMapView>,
+    deleted_claim_maps: Vec<ClaimMapRow>,
+    claim_patterns: Vec<ClaimMapPatternRow>,
 }
 
 #[derive(Template)]
-#[template(path = "admin/group_claims.html")]
-struct GroupClaimsTemplate {
+#[template(path = "admin/audit.html")]
+struct AuditTemplate {
     sections: Vec<NavItem>,
     message: Option<String>,
     error: Option<String>,
-    rows: Vec<GroupClaimsRow>,
+    rows: Vec<AuditEventRow>,
+    filter_action: String,
+    filter_resource_type: String,
+    filter_outcome: String,
+    filter_q: String,
+    filter_range: String,
 }
 
 #[derive(Clone)]
@@ -631,13 +1121,17 @@ struct DashboardTemplate {
     users_federated: i64,
     groups_total: i64,
     clients_total: i64,
+    providers_total: i64,
     claim_maps_total: i64,
     managed_domains: Vec<String>,
 }
 
 pub fn router(state: WebAdminState) -> Router {
     Router::new()
-        .route("/ad/onboarding", get(ad_onboarding_page).post(ad_onboarding_submit))
+        .route(
+            "/ad/onboarding",
+            get(ad_onboarding_page).post(ad_onboarding_submit),
+        )
         .route("/federated/onboarding", get(federated_onboarding_start))
         .route(
             "/federated/onboarding/{provider}/callback",
@@ -646,26 +1140,49 @@ pub fn router(state: WebAdminState) -> Router {
         .route("/admin/ui/static/users.js", get(users_js))
         .route("/admin/ui", get(ui_dashboard))
         .route("/admin/ui/", get(ui_dashboard))
+        .route("/admin/ui/audit", get(audit_page))
         .route("/admin/ui/login", get(login_page).post(login_submit))
         .route("/admin/ui/logout", post(logout_submit))
         .route("/admin/ui/users", get(users_page))
         .route("/admin/ui/ad-onboarding", get(ad_onboarding_tokens_page))
         .route("/admin/ui/ad-roles", get(ad_roles_page))
         .route("/admin/ui/ad-role-mappings", get(ad_role_mappings_page))
-        .route("/admin/ui/ad-role-mappings/create", post(ad_role_mappings_create))
+        .route(
+            "/admin/ui/ad-role-mappings/create",
+            post(ad_role_mappings_create),
+        )
         .route(
             "/admin/ui/ad-role-mappings/{id}/deactivate",
             post(ad_role_mappings_deactivate),
         )
         .route("/admin/ui/users/create", post(users_create))
-        .route("/admin/ui/users/import", get(users_import_page).post(users_import_submit))
+        .route(
+            "/admin/ui/users/import",
+            get(users_import_page).post(users_import_submit),
+        )
         .route("/admin/ui/users/{id}/update", post(users_update))
+        .route(
+            "/admin/ui/users/{id}/patterns/create",
+            post(user_patterns_create),
+        )
+        .route(
+            "/admin/ui/users/{user_id}/patterns/{pattern_id}/update",
+            post(user_patterns_update),
+        )
+        .route(
+            "/admin/ui/users/{user_id}/patterns/{pattern_id}/deactivate",
+            post(user_patterns_deactivate),
+        )
         .route("/admin/ui/users/{id}/deactivate", post(users_deactivate))
+        .route("/admin/ui/users/{id}/restore", post(users_restore))
         .route(
             "/admin/ui/ad-onboarding/delete",
             post(ad_onboarding_tokens_bulk_delete),
         )
-        .route("/admin/ui/users/{id}/ad-mappings/apply", post(users_ad_mappings_apply))
+        .route(
+            "/admin/ui/users/{id}/ad-mappings/apply",
+            post(users_ad_mappings_apply),
+        )
         .route(
             "/admin/ui/users/{id}/ad-onboarding-link",
             post(users_ad_onboarding_link),
@@ -678,25 +1195,143 @@ pub fn router(state: WebAdminState) -> Router {
             "/admin/ui/users/{id}/federated-approve",
             post(users_federated_approve),
         )
+        .route(
+            "/admin/ui/users/{id}/federated-unlink",
+            post(users_federated_unlink),
+        )
         .route("/admin/ui/groups", get(groups_page))
         .route("/admin/ui/groups/create", post(groups_create))
         .route("/admin/ui/groups/{id}/update", post(groups_update))
+        .route("/admin/ui/groups/{id}/reparent", post(groups_reparent))
         .route("/admin/ui/groups/{id}/deactivate", post(groups_deactivate))
-        .route("/admin/ui/user-groups", get(user_groups_page))
-        .route("/admin/ui/group-users", get(group_users_page))
+        .route("/admin/ui/groups/{id}/restore", post(groups_restore))
+        .route("/admin/ui/tenants", get(tenants_page))
+        .route("/admin/ui/tenants/{id}/update", post(tenants_update))
+        .route(
+            "/admin/ui/tenant-domains/create",
+            post(tenant_domains_create),
+        )
+        .route(
+            "/admin/ui/tenant-domains/{id}/update",
+            post(tenant_domains_update),
+        )
+        .route(
+            "/admin/ui/tenant-domains/{id}/deactivate",
+            post(tenant_domains_deactivate),
+        )
+        .route(
+            "/admin/ui/tenant-domains/{id}/restore",
+            post(tenant_domains_restore),
+        )
+        .route("/admin/ui/identity-providers", get(identity_providers_page))
+        .route(
+            "/admin/ui/identity-providers/create",
+            post(identity_providers_create),
+        )
+        .route(
+            "/admin/ui/identity-providers/{id}/update",
+            post(identity_providers_update),
+        )
+        .route(
+            "/admin/ui/identity-providers/{id}/deactivate",
+            post(identity_providers_deactivate),
+        )
+        .route(
+            "/admin/ui/identity-providers/{id}/restore",
+            post(identity_providers_restore),
+        )
+        .route("/admin/ui/memberships", get(memberships_page))
+        .route(
+            "/admin/ui/memberships/users/{user_id}/groups/add",
+            post(memberships_add_groups_to_user),
+        )
+        .route(
+            "/admin/ui/memberships/users/{user_id}/groups/{group_id}/remove",
+            post(memberships_remove_group_from_user),
+        )
+        .route(
+            "/admin/ui/memberships/users/{user_id}/groups/remove",
+            post(memberships_remove_groups_from_user),
+        )
+        .route(
+            "/admin/ui/memberships/groups/{group_id}/users/add",
+            post(memberships_add_users_to_group),
+        )
+        .route(
+            "/admin/ui/memberships/groups/{group_id}/users/{user_id}/remove",
+            post(memberships_remove_user_from_group),
+        )
+        .route(
+            "/admin/ui/memberships/groups/{group_id}/users/remove",
+            post(memberships_remove_users_from_group),
+        )
+        .route("/admin/ui/user-groups", get(user_groups_redirect))
+        .route("/admin/ui/group-users", get(group_users_redirect))
         .route("/admin/ui/clients", get(clients_page))
         .route("/admin/ui/clients/create", post(clients_create))
         .route("/admin/ui/clients/{id}/update", post(clients_update))
-        .route("/admin/ui/clients/{id}/deactivate", post(clients_deactivate))
-        .route("/admin/ui/client-claims", get(client_claims_page))
+        .route(
+            "/admin/ui/clients/{id}/patterns/create",
+            post(client_patterns_create),
+        )
+        .route(
+            "/admin/ui/clients/{client_id}/patterns/{pattern_id}/update",
+            post(client_patterns_update),
+        )
+        .route(
+            "/admin/ui/clients/{client_id}/patterns/{pattern_id}/deactivate",
+            post(client_patterns_deactivate),
+        )
+        .route(
+            "/admin/ui/clients/{id}/deactivate",
+            post(clients_deactivate),
+        )
+        .route("/admin/ui/clients/{id}/restore", post(clients_restore))
+        .route("/admin/ui/claims", get(claims_page))
+        .route("/admin/ui/client-claims", get(client_claims_redirect))
         .route("/admin/ui/client-claims/create", post(client_claims_create))
-        .route("/admin/ui/group-claims", get(group_claims_page))
+        .route(
+            "/admin/ui/client-claims/{id}/update",
+            post(claim_maps_update),
+        )
+        .route(
+            "/admin/ui/client-claims/{id}/deactivate",
+            post(claim_maps_deactivate),
+        )
+        .route(
+            "/admin/ui/claim-maps/{id}/patterns/create",
+            post(claim_patterns_create),
+        )
+        .route(
+            "/admin/ui/claim-maps/{claim_map_id}/patterns/{pattern_id}/update",
+            post(claim_patterns_update),
+        )
+        .route(
+            "/admin/ui/claim-maps/{claim_map_id}/patterns/{pattern_id}/deactivate",
+            post(claim_patterns_deactivate),
+        )
+        .route(
+            "/admin/ui/claim-maps/{id}/restore",
+            post(claim_maps_restore),
+        )
+        .route("/admin/ui/group-claims", get(group_claims_redirect))
+        .route(
+            "/admin/ui/group-claims/{id}/update",
+            post(claim_maps_update),
+        )
+        .route(
+            "/admin/ui/group-claims/{id}/deactivate",
+            post(claim_maps_deactivate),
+        )
         .with_state(state)
 }
 
 async fn users_js() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(
+            header::CONTENT_TYPE,
+            "application/javascript; charset=utf-8",
+        )],
         USERS_PAGE_JS,
     )
 }
@@ -737,6 +1372,14 @@ document.addEventListener('DOMContentLoaded', function() {
     const noteInput = filterForm.querySelector('input[name="note"]');
     let lastFocusName = null;
     let lastFocusPos = null;
+    let filterRequestSeq = 0;
+    let resultsInteractionSeq = 0;
+
+    document.addEventListener('pointerdown', (e) => {
+      if (e.target instanceof Element && e.target.closest('#users-results')) {
+        resultsInteractionSeq += 1;
+      }
+    }, true);
 
     function getSelectedLetters() {
       return Array.from(filterForm.querySelectorAll('.letter-filter:checked')).map(el => el.value);
@@ -785,7 +1428,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const hasQueryState =
       params.has('q') || params.has('status') || params.has('note') || params.has('letters');
     const hasUiMessageState =
-      params.has('message') || params.has('error') || params.has('ad_link');
+      params.has('message') || params.has('error') || params.has('ad_link') || params.has('federated_link');
 
     function captureFocusState(el) {
       if (!el || !el.name) return;
@@ -809,6 +1452,8 @@ document.addEventListener('DOMContentLoaded', function() {
     async function navigateWithFilters(focusName) {
       updateLettersHidden();
       persistFilters();
+      const requestSeq = ++filterRequestSeq;
+      const interactionSeq = resultsInteractionSeq;
       const p = new URLSearchParams();
       p.set('q', (qInput?.value || '').trim());
       p.set('status', statusSelect?.value || 'all');
@@ -838,6 +1483,9 @@ document.addEventListener('DOMContentLoaded', function() {
         const nextResults = parsed.getElementById('users-results');
         if (!nextResults) {
           window.location.assign(url);
+          return;
+        }
+        if (requestSeq !== filterRequestSeq || interactionSeq !== resultsInteractionSeq) {
           return;
         }
         resultsRoot.replaceWith(nextResults);
@@ -949,6 +1597,25 @@ document.addEventListener('DOMContentLoaded', function() {
       } catch (_) {
         input.select();
         document.execCommand('copy');
+      }
+      return;
+    }
+    const linkCopy = e.target.closest('.copy-link');
+    if (linkCopy) {
+      const value = linkCopy.getAttribute('data-copy-link');
+      if (!value) return;
+      try {
+        await navigator.clipboard.writeText(value);
+      } catch (_) {
+        const textarea = document.createElement('textarea');
+        textarea.value = value;
+        textarea.setAttribute('readonly', 'readonly');
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        document.execCommand('copy');
+        textarea.remove();
       }
     }
   });
@@ -1214,7 +1881,8 @@ document.addEventListener('DOMContentLoaded', function() {
 "#;
 
 fn parse_checkbox(v: &Option<String>) -> bool {
-    v.as_deref().is_some_and(|x| x == "on" || x == "true" || x == "1")
+    v.as_deref()
+        .is_some_and(|x| x == "on" || x == "true" || x == "1")
 }
 
 fn parse_google_signin_datetime(raw: &str) -> Option<DateTime<Utc>> {
@@ -1241,6 +1909,22 @@ fn normalize_opt_form(raw: Option<String>) -> Option<String> {
     raw.map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }
 
+fn looks_like_email(value: &str) -> bool {
+    let value = value.trim();
+    let Some((local, domain)) = value.split_once('@') else {
+        return false;
+    };
+    !local.is_empty() && domain.contains('.') && !domain.starts_with('.') && !domain.ends_with('.')
+}
+
+fn looks_like_e164(value: &str) -> bool {
+    let value = value.trim();
+    value.starts_with('+')
+        && value.len() >= 8
+        && value.len() <= 16
+        && value[1..].chars().all(|c| c.is_ascii_digit())
+}
+
 fn username_from_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
@@ -1256,8 +1940,7 @@ fn random_import_password() -> String {
 fn normalize_auth_mode(raw: Option<&str>) -> String {
     match raw.unwrap_or("local").trim().to_lowercase().as_str() {
         "federated" => "federated".to_string(),
-        "mixed" => "mixed".to_string(),
-        "ad" => "mixed".to_string(),
+        "ad" | "mixed" => "ad".to_string(),
         _ => "local".to_string(),
     }
 }
@@ -1392,6 +2075,69 @@ fn selected_scopes_from_flags(
     v
 }
 
+fn normalize_groups_claim_mode(raw: Option<&str>) -> String {
+    match raw.unwrap_or("effective").trim().to_lowercase().as_str() {
+        "direct" => "direct".to_string(),
+        "none" => "none".to_string(),
+        _ => "effective".to_string(),
+    }
+}
+
+fn pattern_mode_to_bool(mode: &str) -> bool {
+    !mode.trim().eq_ignore_ascii_case("exclude")
+}
+
+fn pattern_priority(value: Option<i32>) -> i32 {
+    value.unwrap_or(100)
+}
+
+fn selected_oidc_provider_scopes(
+    openid: &Option<String>,
+    profile: &Option<String>,
+    email: &Option<String>,
+) -> Vec<String> {
+    let mut scopes = Vec::new();
+    if parse_checkbox(openid) {
+        scopes.push("openid".to_string());
+    }
+    if parse_checkbox(profile) {
+        scopes.push("profile".to_string());
+    }
+    if parse_checkbox(email) {
+        scopes.push("email".to_string());
+    }
+    if scopes.is_empty() {
+        vec![
+            "openid".to_string(),
+            "profile".to_string(),
+            "email".to_string(),
+        ]
+    } else if scopes.iter().any(|s| s == "openid") {
+        scopes
+    } else {
+        let mut with_openid = vec!["openid".to_string()];
+        with_openid.extend(scopes);
+        with_openid
+    }
+}
+
+fn csv_to_vec(raw: Option<&str>) -> Vec<String> {
+    raw.unwrap_or_default()
+        .split(',')
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+        .collect()
+}
+
+fn normalize_provider_type(raw: &str) -> String {
+    match raw.trim().to_lowercase().as_str() {
+        "ad_ldap" => "ad_ldap".to_string(),
+        "google" => "google".to_string(),
+        "oidc" => "oidc".to_string(),
+        _ => "oidc".to_string(),
+    }
+}
+
 fn deserialize_string_or_seq<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
 where
     D: Deserializer<'de>,
@@ -1459,6 +2205,181 @@ fn redirect_with(path: &str, key: &str, value: &str) -> Redirect {
     Redirect::to(&format!("{path}{sep}{key}={encoded}"))
 }
 
+fn default_tenant_id() -> Uuid {
+    Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid default tenant UUID")
+}
+
+fn parse_csv_list(input: Option<&str>) -> Vec<String> {
+    input
+        .unwrap_or_default()
+        .split(',')
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .map(|v| v.to_string())
+        .collect()
+}
+
+fn parse_uuid_csv(input: Option<&str>) -> Vec<Uuid> {
+    parse_csv_list(input)
+        .into_iter()
+        .filter_map(|id| Uuid::parse_str(&id).ok())
+        .collect()
+}
+
+fn parse_parent_group_id(input: Option<&str>) -> Result<Option<Uuid>, String> {
+    match input.map(str::trim).filter(|v| !v.is_empty()) {
+        Some(v) if v.eq_ignore_ascii_case("root") => Ok(None),
+        Some(v) => Uuid::parse_str(v)
+            .map(Some)
+            .map_err(|_| "Invalid parent_group_id".to_string()),
+        None => Ok(None),
+    }
+}
+
+fn normalize_domain(input: &str) -> Result<String, String> {
+    let domain = input
+        .trim()
+        .trim_start_matches('@')
+        .trim_end_matches('.')
+        .to_ascii_lowercase();
+
+    if domain.is_empty() {
+        return Err("Domain is required".to_string());
+    }
+    if domain.contains("://") || domain.contains('/') || domain.contains('\\') {
+        return Err("Domain must be a bare DNS name, for example datalite.cz".to_string());
+    }
+    if !domain.contains('.') {
+        return Err("Domain must contain at least one dot".to_string());
+    }
+    if domain
+        .split('.')
+        .any(|label| label.is_empty() || label.starts_with('-') || label.ends_with('-'))
+    {
+        return Err("Domain contains an invalid DNS label".to_string());
+    }
+    if !domain
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '.')
+    {
+        return Err("Domain can contain only letters, digits, hyphen and dot".to_string());
+    }
+
+    Ok(domain)
+}
+
+async fn would_create_group_cycle(
+    db_pool: &DbPool,
+    parent_id: Uuid,
+    child_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![child_id];
+
+    while let Some(current) = stack.pop() {
+        if current == parent_id {
+            return Ok(true);
+        }
+        if !visited.insert(current) {
+            continue;
+        }
+        let children = sqlx::query_scalar::<_, Uuid>(
+            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1",
+        )
+        .bind(current)
+        .fetch_all(db_pool)
+        .await?;
+        stack.extend(children);
+    }
+
+    Ok(false)
+}
+
+fn build_group_tree_rows(rows: &[GroupRow], relations: &[(Uuid, Uuid)]) -> Vec<GroupTreeRow> {
+    let mut by_id: HashMap<Uuid, &GroupRow> = HashMap::new();
+    let mut children: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
+    let mut parent_of: HashMap<Uuid, Uuid> = HashMap::new();
+
+    for row in rows {
+        by_id.insert(row.id, row);
+    }
+    for (parent, child) in relations {
+        children.entry(*parent).or_default().push(*child);
+        parent_of.insert(*child, *parent);
+    }
+    for ids in children.values_mut() {
+        ids.sort_by_key(|id| by_id.get(id).map(|r| r.name.clone()).unwrap_or_default());
+    }
+
+    let mut roots = rows
+        .iter()
+        .filter(|r| !parent_of.contains_key(&r.id))
+        .map(|r| r.id)
+        .collect::<Vec<_>>();
+    roots.sort_by_key(|id| by_id.get(id).map(|r| r.name.clone()).unwrap_or_default());
+
+    let mut out = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+
+    fn walk(
+        current: Uuid,
+        depth: usize,
+        by_id: &HashMap<Uuid, &GroupRow>,
+        children: &HashMap<Uuid, Vec<Uuid>>,
+        parent_of: &HashMap<Uuid, Uuid>,
+        visited: &mut std::collections::HashSet<Uuid>,
+        out: &mut Vec<GroupTreeRow>,
+    ) {
+        if !visited.insert(current) {
+            return;
+        }
+        let Some(row) = by_id.get(&current) else {
+            return;
+        };
+        out.push(GroupTreeRow {
+            id: row.id,
+            name: row.name.clone(),
+            description: row.description.clone(),
+            is_virtual: row.is_virtual,
+            depth,
+            parent_id: parent_of.get(&current).copied(),
+        });
+        if let Some(kids) = children.get(&current) {
+            for child in kids {
+                walk(*child, depth + 1, by_id, children, parent_of, visited, out);
+            }
+        }
+    }
+
+    for root in roots {
+        walk(
+            root,
+            0,
+            &by_id,
+            &children,
+            &parent_of,
+            &mut visited,
+            &mut out,
+        );
+    }
+
+    for row in rows {
+        if !visited.contains(&row.id) {
+            walk(
+                row.id,
+                0,
+                &by_id,
+                &children,
+                &parent_of,
+                &mut visited,
+                &mut out,
+            );
+        }
+    }
+
+    out
+}
+
 fn users_return_path_from_referer(headers: &HeaderMap) -> String {
     let referer = headers
         .get(header::REFERER)
@@ -1508,6 +2429,171 @@ fn users_return_path_from_referer(headers: &HeaderMap) -> String {
     }
 }
 
+fn user_patterns_return_path_from_referer(headers: &HeaderMap, user_id: Uuid) -> String {
+    let membership_fallback = format!("/admin/ui/memberships?user_id={user_id}#by-user");
+    let referer = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if referer.contains("/admin/ui/memberships") {
+        memberships_return_path_from_referer(headers, &membership_fallback)
+    } else {
+        users_return_path_from_referer(headers)
+    }
+}
+
+fn public_origin_from_headers(headers: &HeaderMap) -> String {
+    if let Some(origin) = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Url::parse(v).ok())
+        .and_then(|url| {
+            let host = url.host_str()?;
+            Some(match url.port() {
+                Some(port) => format!("{}://{}:{}", url.scheme(), host, port),
+                None => format!("{}://{}", url.scheme(), host),
+            })
+        })
+    {
+        return origin;
+    }
+
+    let forwarded_proto = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let forwarded_host = headers
+        .get("x-forwarded-host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
+    let host = forwarded_host.or_else(|| headers.get(header::HOST).and_then(|v| v.to_str().ok()));
+
+    if let Some(host) = host {
+        let proto = forwarded_proto.unwrap_or("http");
+        return format!("{proto}://{host}");
+    }
+
+    std::env::var("JWT_ISSUER")
+        .unwrap_or_else(|_| "http://localhost:8080".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn public_url_from_headers(headers: &HeaderMap, path_and_query: &str) -> String {
+    format!("{}{}", public_origin_from_headers(headers), path_and_query)
+}
+
+fn memberships_return_path_from_referer(headers: &HeaderMap, fallback: &str) -> String {
+    let referer = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let raw_path = if referer.starts_with("http://") || referer.starts_with("https://") {
+        match url::Url::parse(referer) {
+            Ok(u) => {
+                let mut p = u.path().to_string();
+                if let Some(q) = u.query() {
+                    p.push('?');
+                    p.push_str(q);
+                }
+                p
+            }
+            Err(_) => fallback.to_string(),
+        }
+    } else if referer.starts_with('/') {
+        referer.to_string()
+    } else {
+        fallback.to_string()
+    };
+
+    if !raw_path.starts_with("/admin/ui/memberships") {
+        return fallback.to_string();
+    }
+
+    if let Some((path, query)) = raw_path.split_once('?') {
+        let mut kept = Vec::new();
+        for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+            let key = k.as_ref();
+            if matches!(key, "user_id" | "group_id" | "user_filter" | "group_filter") {
+                kept.push((k.into_owned(), v.into_owned()));
+            }
+        }
+        if kept.is_empty() {
+            path.to_string()
+        } else {
+            let qs = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(kept.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                .finish();
+            format!("{path}?{qs}")
+        }
+    } else {
+        raw_path
+    }
+}
+
+fn q_return_path_from_referer(headers: &HeaderMap, prefix: &str, fallback: &str) -> String {
+    scoped_return_path_from_referer(headers, prefix, fallback, &["q"])
+}
+
+fn scoped_return_path_from_referer(
+    headers: &HeaderMap,
+    prefix: &str,
+    fallback: &str,
+    kept_keys: &[&str],
+) -> String {
+    let referer = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    let raw_path = if referer.starts_with("http://") || referer.starts_with("https://") {
+        match url::Url::parse(referer) {
+            Ok(u) => {
+                let mut p = u.path().to_string();
+                if let Some(q) = u.query() {
+                    p.push('?');
+                    p.push_str(q);
+                }
+                p
+            }
+            Err(_) => fallback.to_string(),
+        }
+    } else if referer.starts_with('/') {
+        referer.to_string()
+    } else {
+        fallback.to_string()
+    };
+
+    if !raw_path.starts_with(prefix) {
+        return fallback.to_string();
+    }
+
+    if let Some((path, query)) = raw_path.split_once('?') {
+        let mut kept = Vec::new();
+        for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
+            let key = k.as_ref();
+            if kept_keys.contains(&key) {
+                kept.push((k.into_owned(), v.into_owned()));
+            }
+        }
+        if kept.is_empty() {
+            path.to_string()
+        } else {
+            let qs = url::form_urlencoded::Serializer::new(String::new())
+                .extend_pairs(kept.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                .finish();
+            format!("{path}?{qs}")
+        }
+    } else {
+        raw_path
+    }
+}
+
 fn render_template<T: Template>(tmpl: T) -> Response {
     match tmpl.render() {
         Ok(body) => Html(body).into_response(),
@@ -1533,6 +2619,52 @@ fn onboarding_token_hash(token: &str) -> String {
     hasher.update(token.as_bytes());
     let digest = hasher.finalize();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+}
+
+fn sanitize_admin_next(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = if raw.starts_with("http://") || raw.starts_with("https://") {
+        let url = Url::parse(raw).ok()?;
+        let mut out = url.path().to_string();
+        if let Some(query) = url.query() {
+            out.push('?');
+            out.push_str(query);
+        }
+        out
+    } else {
+        raw.to_string()
+    };
+
+    if !path.starts_with("/admin/ui") || path.starts_with("/admin/ui/login") {
+        return None;
+    }
+    Some(path)
+}
+
+fn admin_next_from_referer(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(sanitize_admin_next)
+}
+
+fn admin_login_url(headers: &HeaderMap, error: Option<&str>) -> String {
+    let mut params = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(error) = error {
+        params.append_pair("error", error);
+    }
+    if let Some(next) = admin_next_from_referer(headers) {
+        params.append_pair("next", &next);
+    }
+    let query = params.finish();
+    if query.is_empty() {
+        "/admin/ui/login".to_string()
+    } else {
+        format!("/admin/ui/login?{query}")
+    }
 }
 
 fn build_federated_csrf_cookie(token: Option<&str>, secure: bool) -> String {
@@ -1674,9 +2806,12 @@ async fn validate_admin_token(state: &WebAdminState, token: &str) -> bool {
     false
 }
 
-async fn require_admin_token(state: &WebAdminState, headers: &HeaderMap) -> Result<String, Redirect> {
+async fn require_admin_token(
+    state: &WebAdminState,
+    headers: &HeaderMap,
+) -> Result<String, Redirect> {
     let Some(session_id) = session_id_from_cookie(headers) else {
-        return Err(Redirect::to("/admin/ui/login"));
+        return Err(Redirect::to(&admin_login_url(headers, None)));
     };
 
     let session = {
@@ -1684,12 +2819,15 @@ async fn require_admin_token(state: &WebAdminState, headers: &HeaderMap) -> Resu
         sessions.get(&session_id).cloned()
     };
     let Some((token, expires_at)) = session else {
-        return Err(Redirect::to("/admin/ui/login"));
+        return Err(Redirect::to(&admin_login_url(headers, None)));
     };
     if Utc::now() >= expires_at {
         let mut sessions = state.admin_sessions.write().await;
         sessions.remove(&session_id);
-        return Err(Redirect::to("/admin/ui/login?error=Session%20expired"));
+        return Err(Redirect::to(&admin_login_url(
+            headers,
+            Some("Session expired"),
+        )));
     }
 
     if validate_admin_token(state, &token).await {
@@ -1697,7 +2835,10 @@ async fn require_admin_token(state: &WebAdminState, headers: &HeaderMap) -> Resu
     } else {
         let mut sessions = state.admin_sessions.write().await;
         sessions.remove(&session_id);
-        Err(Redirect::to("/admin/ui/login?error=Invalid%20admin%20token"))
+        Err(Redirect::to(&admin_login_url(
+            headers,
+            Some("Invalid admin token"),
+        )))
     }
 }
 
@@ -1710,12 +2851,11 @@ async fn ui_dashboard(
         return redir.into_response();
     }
 
-    let users_total = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL",
-    )
-    .fetch_one(&state.db_pool)
-    .await
-    .unwrap_or(0);
+    let users_total =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL")
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
     let users_active = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND is_active = true",
     )
@@ -1729,7 +2869,7 @@ async fn ui_dashboard(
     .await
     .unwrap_or(0);
     let users_ad = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND auth_mode = 'mixed'",
+        "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND auth_mode = 'ad'",
     )
     .fetch_one(&state.db_pool)
     .await
@@ -1740,24 +2880,27 @@ async fn ui_dashboard(
     .fetch_one(&state.db_pool)
     .await
     .unwrap_or(0);
-    let groups_total = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM groups WHERE deleted_at IS NULL",
+    let groups_total =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM groups WHERE deleted_at IS NULL")
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
+    let clients_total =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM oauth_clients WHERE deleted_at IS NULL")
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
+    let providers_total = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM identity_providers WHERE deleted_at IS NULL",
     )
     .fetch_one(&state.db_pool)
     .await
     .unwrap_or(0);
-    let clients_total = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM oauth_clients WHERE deleted_at IS NULL",
-    )
-    .fetch_one(&state.db_pool)
-    .await
-    .unwrap_or(0);
-    let claim_maps_total = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM claim_maps WHERE deleted_at IS NULL",
-    )
-    .fetch_one(&state.db_pool)
-    .await
-    .unwrap_or(0);
+    let claim_maps_total =
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM claim_maps WHERE deleted_at IS NULL")
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
     let managed_domains = sqlx::query_scalar::<_, String>(
         r#"
         SELECT domain
@@ -1781,21 +2924,103 @@ async fn ui_dashboard(
         users_federated,
         groups_total,
         clients_total,
+        providers_total,
         claim_maps_total,
         managed_domains,
     })
 }
 
-async fn login_page(Query(query): Query<PageQuery>) -> Response {
-    render_template(LoginTemplate {
-        error: query.error.as_deref(),
+async fn audit_page(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Query(query): Query<AuditQuery>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let filter_action = query.action.unwrap_or_default();
+    let filter_resource_type = query.resource_type.unwrap_or_default();
+    let filter_outcome = match query.outcome.unwrap_or_default().as_str() {
+        "success" => "success".to_string(),
+        "failure" => "failure".to_string(),
+        _ => String::new(),
+    };
+    let filter_q = query.q.unwrap_or_default();
+    let filter_range = match query.range.unwrap_or_else(|| "all".to_string()).as_str() {
+        "1h" => "1h".to_string(),
+        "24h" => "24h".to_string(),
+        "7d" => "7d".to_string(),
+        "30d" => "30d".to_string(),
+        "all" => "all".to_string(),
+        _ => "24h".to_string(),
+    };
+
+    let rows = match sqlx::query_as::<_, AuditEventRow>(
+        r#"
+        SELECT created_at, action, resource_type, resource_id, outcome, actor_sub, actor_client_id, details
+        FROM audit_events
+        WHERE ($1::text = '' OR action ILIKE '%' || $1 || '%')
+          AND ($2::text = '' OR resource_type ILIKE '%' || $2 || '%')
+          AND ($3::text = '' OR outcome = $3)
+          AND (
+            $4::text = '' OR
+            COALESCE(actor_sub, '') ILIKE '%' || $4 || '%' OR
+            COALESCE(actor_client_id, '') ILIKE '%' || $4 || '%' OR
+            COALESCE(details::text, '') ILIKE '%' || $4 || '%'
+          )
+          AND (
+            $5::text = 'all' OR
+            ($5::text = '1h' AND created_at >= NOW() - INTERVAL '1 hour') OR
+            ($5::text = '24h' AND created_at >= NOW() - INTERVAL '24 hours') OR
+            ($5::text = '7d' AND created_at >= NOW() - INTERVAL '7 days') OR
+            ($5::text = '30d' AND created_at >= NOW() - INTERVAL '30 days')
+          )
+        ORDER BY created_at DESC
+        LIMIT 200
+        "#,
+    )
+    .bind(filter_action.trim())
+    .bind(filter_resource_type.trim())
+    .bind(filter_outcome.trim())
+    .bind(filter_q.trim())
+    .bind(filter_range.trim())
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/admin/ui/audit", "error", &format!("DB error: {e}"))
+                .into_response();
+        }
+    };
+
+    render_template(AuditTemplate {
+        sections: nav_items(AdminSection::Audit),
+        message: query.message,
+        error: query.error,
+        rows,
+        filter_action,
+        filter_resource_type,
+        filter_outcome,
+        filter_q,
+        filter_range,
     })
 }
 
-async fn login_submit(
-    State(state): State<WebAdminState>,
-    Form(form): Form<LoginForm>,
-) -> Response {
+async fn login_page(Query(query): Query<PageQuery>) -> Response {
+    let next = query
+        .next
+        .as_deref()
+        .and_then(sanitize_admin_next)
+        .unwrap_or_else(|| "/admin/ui/".to_string());
+    render_template(LoginTemplate {
+        error: query.error.as_deref(),
+        next,
+    })
+}
+
+async fn login_submit(State(state): State<WebAdminState>, Form(form): Form<LoginForm>) -> Response {
     if !validate_admin_token(&state, &form.token).await {
         return Redirect::to("/admin/ui/login?error=Invalid%20admin%20token").into_response();
     }
@@ -1817,11 +3042,13 @@ async fn login_submit(
         session_id, ADMIN_SESSION_TTL_SECONDS, secure
     );
 
-    (
-        [(header::SET_COOKIE, cookie)],
-        Redirect::to("/admin/ui/users"),
-    )
-        .into_response()
+    let next = form
+        .next
+        .as_deref()
+        .and_then(sanitize_admin_next)
+        .unwrap_or_else(|| "/admin/ui/".to_string());
+
+    ([(header::SET_COOKIE, cookie)], Redirect::to(&next)).into_response()
 }
 
 async fn logout_submit(State(state): State<WebAdminState>, headers: HeaderMap) -> Response {
@@ -1834,7 +3061,11 @@ async fn logout_submit(State(state): State<WebAdminState>, headers: HeaderMap) -
         "{ADMIN_SESSION_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax{}",
         secure
     );
-    ([(header::SET_COOKIE, cookie)], Redirect::to("/admin/ui/login")).into_response()
+    (
+        [(header::SET_COOKIE, cookie)],
+        Redirect::to("/admin/ui/login"),
+    )
+        .into_response()
 }
 
 async fn ad_onboarding_page(Query(query): Query<AdOnboardingQuery>) -> Response {
@@ -1860,11 +3091,15 @@ async fn ad_onboarding_submit(
             Some(serde_json::json!({"reason":"missing_token"})),
         )
         .await;
-        return redirect_with("/ad/onboarding", "error", "Missing onboarding token").into_response();
+        return redirect_with("/ad/onboarding", "error", "Missing onboarding token")
+            .into_response();
     }
     if form.login.trim().is_empty() {
         return redirect_with(
-            &format!("/ad/onboarding?token={}", urlencoding::encode(form.token.trim())),
+            &format!(
+                "/ad/onboarding?token={}",
+                urlencoding::encode(form.token.trim())
+            ),
             "error",
             "Missing AD login",
         )
@@ -1872,7 +3107,10 @@ async fn ad_onboarding_submit(
     }
     if form.password.is_empty() {
         return redirect_with(
-            &format!("/ad/onboarding?token={}", urlencoding::encode(form.token.trim())),
+            &format!(
+                "/ad/onboarding?token={}",
+                urlencoding::encode(form.token.trim())
+            ),
             "error",
             "Missing AD password",
         )
@@ -1882,7 +3120,7 @@ async fn ad_onboarding_submit(
     let token_hash = onboarding_token_hash(form.token.trim());
     let row = match sqlx::query(
         r#"
-        SELECT t.user_id, u.id, u.username, u.tenant_id, t.expires_at, t.used_at
+        SELECT t.user_id, t.idp_id, u.id, u.username, u.tenant_id, t.expires_at, t.used_at
         FROM ad_onboarding_tokens t
         JOIN users u ON u.id = t.user_id
         WHERE t.token_hash = $1
@@ -1905,11 +3143,11 @@ async fn ad_onboarding_submit(
             )
             .await;
             return redirect_with("/ad/onboarding", "error", "Invalid onboarding token")
-                .into_response()
+                .into_response();
         }
         Err(e) => {
             return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
-                .into_response()
+                .into_response();
         }
     };
 
@@ -1917,14 +3155,14 @@ async fn ad_onboarding_submit(
         Ok(v) => v,
         Err(e) => {
             return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
-                .into_response()
+                .into_response();
         }
     };
     let used_at = match row.try_get::<Option<DateTime<Utc>>, _>("used_at") {
         Ok(v) => v,
         Err(e) => {
             return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
-                .into_response()
+                .into_response();
         }
     };
     if used_at.is_some() {
@@ -1937,8 +3175,12 @@ async fn ad_onboarding_submit(
             Some(serde_json::json!({"reason":"token_used"})),
         )
         .await;
-        return redirect_with("/ad/onboarding", "error", "Onboarding token was already used")
-            .into_response();
+        return redirect_with(
+            "/ad/onboarding",
+            "error",
+            "Onboarding token was already used",
+        )
+        .into_response();
     }
     if Utc::now() > expires_at {
         simple_idm_core::audit::emit_event(
@@ -1950,19 +3192,35 @@ async fn ad_onboarding_submit(
             Some(serde_json::json!({"reason":"token_expired"})),
         )
         .await;
-        return redirect_with("/ad/onboarding", "error", "Onboarding token expired").into_response();
+        return redirect_with("/ad/onboarding", "error", "Onboarding token expired")
+            .into_response();
     }
 
-    let ldap_cfg = match &state.oauth_state.ldap_auth {
-        Some(v) => v.clone(),
-        None => {
-            return redirect_with("/ad/onboarding", "error", "AD auth is not enabled")
-                .into_response()
+    let idp_id = match row.try_get::<Uuid, _>("idp_id") {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
+                .into_response();
+        }
+    };
+    let provider = match oauth2::load_ad_ldap_provider(&state.db_pool, idp_id).await {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with(
+                "/ad/onboarding",
+                "error",
+                &format!("AD provider error: {e}"),
+            )
+            .into_response();
         }
     };
 
-    if let Err(e) =
-        simple_idm_ad_auth::verify_ldap_password(&ldap_cfg, form.login.trim(), &form.password).await
+    if let Err(e) = simple_idm_ad_auth::verify_ldap_password(
+        &provider.config,
+        form.login.trim(),
+        &form.password,
+    )
+    .await
     {
         simple_idm_core::audit::emit_event(
             &state.db_pool,
@@ -1974,7 +3232,10 @@ async fn ad_onboarding_submit(
         )
         .await;
         return redirect_with(
-            &format!("/ad/onboarding?token={}", urlencoding::encode(form.token.trim())),
+            &format!(
+                "/ad/onboarding?token={}",
+                urlencoding::encode(form.token.trim())
+            ),
             "error",
             &format!("AD login failed: {e}"),
         )
@@ -1985,7 +3246,7 @@ async fn ad_onboarding_submit(
         Ok(v) => v,
         Err(e) => {
             return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
-                .into_response()
+                .into_response();
         }
     };
     let user = match sqlx::query_as::<_, User>(
@@ -2001,11 +3262,17 @@ async fn ad_onboarding_submit(
         }
         Err(e) => {
             return redirect_with("/ad/onboarding", "error", &format!("DB error: {e}"))
-                .into_response()
+                .into_response();
         }
     };
 
-    if let Err(e) = oauth2::sync_ldap_roles_force(state.oauth_state.as_ref(), &user, form.login.trim()).await
+    if let Err(e) = oauth2::sync_ldap_roles_force_with_provider(
+        state.oauth_state.as_ref(),
+        &user,
+        form.login.trim(),
+        &provider,
+    )
+    .await
     {
         simple_idm_core::audit::emit_event(
             &state.db_pool,
@@ -2017,7 +3284,10 @@ async fn ad_onboarding_submit(
         )
         .await;
         return redirect_with(
-            &format!("/ad/onboarding?token={}", urlencoding::encode(form.token.trim())),
+            &format!(
+                "/ad/onboarding?token={}",
+                urlencoding::encode(form.token.trim())
+            ),
             "error",
             &format!("AD role sync failed: {e}"),
         )
@@ -2064,7 +3334,12 @@ async fn federated_onboarding_start(
     State(state): State<WebAdminState>,
     Query(query): Query<FederatedOnboardingQuery>,
 ) -> Response {
-    let Some(raw_token) = query.token.as_deref().map(str::trim).filter(|v| !v.is_empty()) else {
+    let Some(raw_token) = query
+        .token
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    else {
         return Html(simple_idm_core::oauth2::templates::error_page(
             "invalid_request",
             "Missing invitation token",
@@ -2079,14 +3354,14 @@ async fn federated_onboarding_start(
                 "invalid_request",
                 "Invalid invitation token",
             ))
-            .into_response()
+            .into_response();
         }
         Err(e) => {
             return Html(simple_idm_core::oauth2::templates::error_page(
                 "server_error",
                 &format!("DB error: {e}"),
             ))
-            .into_response()
+            .into_response();
         }
     };
 
@@ -2114,7 +3389,13 @@ async fn federated_onboarding_start(
 
     let discovery = match resolve_federated_discovery(&row).await {
         Ok(v) => v,
-        Err(e) => return Html(simple_idm_core::oauth2::templates::error_page("server_error", &e)).into_response(),
+        Err(e) => {
+            return Html(simple_idm_core::oauth2::templates::error_page(
+                "server_error",
+                &e,
+            ))
+            .into_response();
+        }
     };
 
     let csrf: String = rand::rng()
@@ -2134,11 +3415,12 @@ async fn federated_onboarding_start(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to prepare federated onboarding state",
             )
-                .into_response()
+                .into_response();
         }
     };
 
-    let issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let issuer =
+        std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let callback = format!(
         "{}/federated/onboarding/{}/callback",
         issuer.trim_end_matches('/'),
@@ -2151,7 +3433,7 @@ async fn federated_onboarding_start(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Invalid upstream authorization endpoint",
             )
-                .into_response()
+                .into_response();
         }
     };
     let scope = if row.scopes.is_empty() {
@@ -2165,13 +3447,28 @@ async fn federated_onboarding_start(
         .append_pair("client_id", &row.client_id)
         .append_pair("redirect_uri", &callback)
         .append_pair("scope", &scope)
+        .append_pair("login_hint", &row.email)
         .append_pair("state", &state_token);
+    if row.provider_type.eq_ignore_ascii_case("google")
+        || row
+            .issuer
+            .trim_end_matches('/')
+            .eq_ignore_ascii_case("https://accounts.google.com")
+    {
+        auth_url
+            .query_pairs_mut()
+            .append_pair("prompt", "select_account");
+    }
     if let Some(domain) = &row.hd_domain {
         auth_url.query_pairs_mut().append_pair("hd", domain);
     }
 
     let cookie = build_federated_csrf_cookie(Some(&csrf), state.secure_cookies);
-    ([(header::SET_COOKIE, cookie)], Redirect::to(auth_url.as_ref())).into_response()
+    (
+        [(header::SET_COOKIE, cookie)],
+        Redirect::to(auth_url.as_ref()),
+    )
+        .into_response()
 }
 
 async fn federated_onboarding_callback(
@@ -2180,17 +3477,25 @@ async fn federated_onboarding_callback(
     Path(provider): Path<String>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    let code = match params.get("code").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+    let code = match params
+        .get("code")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
         Some(v) => v.to_string(),
         None => {
             return (
                 StatusCode::BAD_REQUEST,
                 "Missing authorization code from upstream provider",
             )
-                .into_response()
+                .into_response();
         }
     };
-    let state_token = match params.get("state").map(|v| v.trim()).filter(|v| !v.is_empty()) {
+    let state_token = match params
+        .get("state")
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+    {
         Some(v) => v,
         None => return (StatusCode::BAD_REQUEST, "Missing state parameter").into_response(),
     };
@@ -2252,7 +3557,9 @@ async fn federated_onboarding_callback(
     {
         Ok(Some(v)) => v,
         Ok(None) => return (StatusCode::BAD_REQUEST, "Invalid invitation token").into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response();
+        }
     };
 
     if row.used_at.is_some() {
@@ -2262,7 +3569,11 @@ async fn federated_onboarding_callback(
         return (StatusCode::BAD_REQUEST, "Invitation token expired").into_response();
     }
     if !row.is_active || !row.auth_mode.eq_ignore_ascii_case("federated") {
-        return (StatusCode::BAD_REQUEST, "User is not eligible for federated onboarding").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "User is not eligible for federated onboarding",
+        )
+            .into_response();
     }
 
     let discovery = match resolve_federated_discovery(&row).await {
@@ -2270,7 +3581,8 @@ async fn federated_onboarding_callback(
         Err(e) => return (StatusCode::BAD_GATEWAY, e).into_response(),
     };
 
-    let issuer = std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
+    let issuer =
+        std::env::var("JWT_ISSUER").unwrap_or_else(|_| "http://localhost:8080".to_string());
     let callback = format!(
         "{}/federated/onboarding/{}/callback",
         issuer.trim_end_matches('/'),
@@ -2283,7 +3595,7 @@ async fn federated_onboarding_callback(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to decrypt upstream client secret: {e}"),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -2306,7 +3618,7 @@ async fn federated_onboarding_callback(
                     StatusCode::BAD_GATEWAY,
                     format!("Failed to exchange code with upstream IdP: {e}"),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
         let resp = match resp.error_for_status() {
@@ -2316,7 +3628,7 @@ async fn federated_onboarding_callback(
                     StatusCode::BAD_GATEWAY,
                     format!("Upstream IdP rejected token request: {e}"),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
         match resp.json::<FederatedTokenResponse>().await {
@@ -2326,7 +3638,7 @@ async fn federated_onboarding_callback(
                     StatusCode::BAD_GATEWAY,
                     format!("Failed to parse token response: {e}"),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     };
@@ -2338,7 +3650,7 @@ async fn federated_onboarding_callback(
                 StatusCode::BAD_GATEWAY,
                 "Upstream IdP userinfo endpoint is missing",
             )
-                .into_response()
+                .into_response();
         }
     };
     let userinfo = {
@@ -2354,7 +3666,7 @@ async fn federated_onboarding_callback(
                     StatusCode::BAD_GATEWAY,
                     format!("Failed to load userinfo from upstream IdP: {e}"),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
         let resp = match resp.error_for_status() {
@@ -2364,7 +3676,7 @@ async fn federated_onboarding_callback(
                     StatusCode::BAD_GATEWAY,
                     format!("Upstream IdP rejected userinfo request: {e}"),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
         match resp.json::<FederatedUserInfoResponse>().await {
@@ -2374,12 +3686,17 @@ async fn federated_onboarding_callback(
                     StatusCode::BAD_GATEWAY,
                     format!("Failed to parse userinfo from upstream IdP: {e}"),
                 )
-                    .into_response()
+                    .into_response();
             }
         }
     };
 
-    let email = userinfo.email.clone().unwrap_or_default().trim().to_lowercase();
+    let email = userinfo
+        .email
+        .clone()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
     if email.is_empty() || !userinfo.email_verified.unwrap_or(false) {
         return (
             StatusCode::FORBIDDEN,
@@ -2397,7 +3714,9 @@ async fn federated_onboarding_callback(
 
     let mut tx = match state.db_pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response(),
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response();
+        }
     };
 
     if let Err(e) = sqlx::query(
@@ -2438,12 +3757,11 @@ async fn federated_onboarding_callback(
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response();
     }
 
-    if let Err(e) = sqlx::query(
-        "UPDATE federated_invitation_tokens SET used_at = NOW() WHERE token_hash = $1",
-    )
-    .bind(&row.token_hash)
-    .execute(&mut *tx)
-    .await
+    if let Err(e) =
+        sqlx::query("UPDATE federated_invitation_tokens SET used_at = NOW() WHERE token_hash = $1")
+            .bind(&row.token_hash)
+            .execute(&mut *tx)
+            .await
     {
         return (StatusCode::INTERNAL_SERVER_ERROR, format!("DB error: {e}")).into_response();
     }
@@ -2535,6 +3853,7 @@ async fn users_page(
                        FROM user_external_identities uei
                        WHERE uei.user_id = users.id
                          AND uei.source = 'ad'
+                         AND uei.idp_id = users.auth_provider_id
                          AND uei.deleted_at IS NULL
                        LIMIT 1
                      ),
@@ -2546,6 +3865,7 @@ async fn users_page(
                        FROM user_external_identities uei
                        WHERE uei.user_id = users.id
                          AND uei.source = 'ad'
+                         AND uei.idp_id = users.auth_provider_id
                          AND uei.deleted_at IS NULL
                        LIMIT 1
                      ),
@@ -2557,6 +3877,7 @@ async fn users_page(
                        FROM user_external_identities uei
                        WHERE uei.user_id = users.id
                          AND uei.source = 'ad'
+                         AND uei.idp_id = users.auth_provider_id
                          AND uei.deleted_at IS NULL
                        LIMIT 1
                      ),
@@ -2582,7 +3903,8 @@ async fn users_page(
     {
         Ok(v) => v,
         Err(e) => {
-            return redirect_with("/admin/ui/users", "error", &format!("DB error: {e}")).into_response();
+            return redirect_with("/admin/ui/users", "error", &format!("DB error: {e}"))
+                .into_response();
         }
     };
 
@@ -2602,6 +3924,8 @@ async fn users_page(
              users.last_sign_in_at,
              users.note,
              users.auth_mode,
+             users.auth_provider_id,
+             aip.slug AS auth_provider_slug,
              users.is_active,
              uei.external_user_id,
              uei.external_user_id_type,
@@ -2613,9 +3937,11 @@ async fn users_page(
              fui.federated_subject,
              fui.federated_approval_status
            FROM users
+           LEFT JOIN identity_providers aip ON aip.id = users.auth_provider_id AND aip.deleted_at IS NULL
            LEFT JOIN user_external_identities uei
              ON uei.user_id = users.id
             AND uei.source = 'ad'
+            AND uei.idp_id = users.auth_provider_id
             AND uei.deleted_at IS NULL
            LEFT JOIN LATERAL (
              SELECT
@@ -2712,9 +4038,62 @@ async fn users_page(
         )
     };
 
+    let deleted_rows = sqlx::query_as::<_, UserRow>(
+        r#"SELECT
+             users.id,
+             users.username,
+             users.email,
+             users.first_name,
+             users.last_name,
+             users.recovery_email,
+             users.phone_e164,
+             users.last_sign_in_at,
+             users.note,
+             users.auth_mode,
+             users.auth_provider_id,
+             aip.slug AS auth_provider_slug,
+             users.is_active,
+             uei.external_user_id,
+             uei.external_user_id_type,
+             uei.login_name AS external_login_name,
+             uei.upn AS external_upn,
+             uei.last_seen_at AS external_last_seen_at,
+             fui.federated_provider_slug,
+             fui.federated_provider_type,
+             fui.federated_subject,
+             fui.federated_approval_status
+           FROM users
+           LEFT JOIN identity_providers aip ON aip.id = users.auth_provider_id AND aip.deleted_at IS NULL
+           LEFT JOIN user_external_identities uei
+             ON uei.user_id = users.id
+            AND uei.source = 'ad'
+            AND uei.idp_id = users.auth_provider_id
+            AND uei.deleted_at IS NULL
+           LEFT JOIN LATERAL (
+             SELECT
+               ip.slug AS federated_provider_slug,
+               ip.provider_type AS federated_provider_type,
+               ui.subject AS federated_subject,
+               ui.approval_status AS federated_approval_status
+             FROM user_identities ui
+             JOIN identity_providers ip ON ip.id = ui.idp_id
+             WHERE ui.user_id = users.id
+               AND ui.deleted_at IS NULL
+               AND ip.deleted_at IS NULL
+             ORDER BY ui.updated_at DESC, ui.created_at DESC
+             LIMIT 1
+           ) fui ON TRUE
+           WHERE users.deleted_at IS NOT NULL
+           ORDER BY users.deleted_at DESC
+           LIMIT 50"#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
     let ad_user_ids = rows
         .iter()
-        .filter(|u| u.auth_mode == "mixed")
+        .filter(|u| u.auth_mode == "ad")
         .map(|u| u.id)
         .collect::<Vec<_>>();
 
@@ -2727,6 +4106,7 @@ async fn users_page(
             FROM user_external_roles
             WHERE source = 'ad'
               AND user_id = ANY($1::uuid[])
+              AND idp_id IS NOT NULL
             ORDER BY role_name ASC
             "#,
         )
@@ -2747,6 +4127,7 @@ async fn users_page(
             SELECT
               m.id,
               m.tenant_id,
+              m.idp_id,
               m.external_role,
               m.group_id,
               g.name AS group_name,
@@ -2754,6 +4135,7 @@ async fn users_page(
             FROM external_role_mappings m
             JOIN groups g ON g.id = m.group_id
             WHERE m.source = 'ad'
+              AND m.idp_id IS NOT NULL
               AND m.is_active = true
               AND m.deleted_at IS NULL
               AND g.deleted_at IS NULL
@@ -2778,18 +4160,24 @@ async fn users_page(
         }
 
         let mut by_user_existing_json: BTreeMap<Uuid, String> = BTreeMap::new();
-        let user_lookup = sqlx::query("SELECT id, tenant_id FROM users WHERE id = ANY($1::uuid[])")
-            .bind(&ad_user_ids)
-            .fetch_all(&state.db_pool)
-            .await
-            .unwrap_or_default();
-        let mut tenant_by_user: HashMap<Uuid, Uuid> = HashMap::new();
+        let user_lookup = sqlx::query(
+            "SELECT id, tenant_id, auth_provider_id FROM users WHERE id = ANY($1::uuid[])",
+        )
+        .bind(&ad_user_ids)
+        .fetch_all(&state.db_pool)
+        .await
+        .unwrap_or_default();
+        let mut tenant_by_user: HashMap<Uuid, (Uuid, Option<Uuid>)> = HashMap::new();
         for r in user_lookup {
             if let (Ok(uid), Ok(tid)) = (
                 r.try_get::<Uuid, _>("id"),
                 r.try_get::<Uuid, _>("tenant_id"),
             ) {
-                tenant_by_user.insert(uid, tid);
+                let idp_id = r
+                    .try_get::<Option<Uuid>, _>("auth_provider_id")
+                    .ok()
+                    .flatten();
+                tenant_by_user.insert(uid, (tid, idp_id));
             }
         }
 
@@ -2798,13 +4186,17 @@ async fn users_page(
                 .iter()
                 .map(|r| r.role_name.as_str())
                 .collect::<std::collections::HashSet<_>>();
-            let Some(user_tenant) = tenant_by_user.get(user_id).copied() else {
+            let Some((user_tenant, user_idp_id)) = tenant_by_user.get(user_id).copied() else {
                 by_user_existing_json.insert(*user_id, "[]".to_string());
                 continue;
             };
             let items = existing_mappings
                 .iter()
-                .filter(|m| m.tenant_id == user_tenant && role_set.contains(m.external_role.as_str()))
+                .filter(|m| {
+                    m.tenant_id == user_tenant
+                        && m.idp_id == user_idp_id
+                        && role_set.contains(m.external_role.as_str())
+                })
                 .map(|m| {
                     json!({
                         "id": m.id,
@@ -2877,6 +4269,35 @@ async fn users_page(
         Err(_) => Vec::new(),
     };
 
+    let identity_providers = sqlx::query_as::<_, IdentityProviderRow>(
+        r#"
+        SELECT
+          ip.id, ip.slug, ip.provider_type, ip.issuer, ip.client_id, ip.auth_url, ip.token_url, ip.jwks_url, ip.scopes, ip.hd_domain, ip.is_active,
+          ad.host AS ad_host,
+          ad.port AS ad_port,
+          ad.base_dn AS ad_base_dn,
+          ad.user_filter AS ad_user_filter,
+          ad.tls_mode AS ad_tls_mode,
+          ad.timeout_seconds AS ad_timeout_seconds,
+          ad.allow_insecure AS ad_allow_insecure,
+          ad.domains AS ad_domains,
+          ad.bind_dn AS ad_bind_dn,
+          ad.role_sync_enabled AS ad_role_sync_enabled,
+          ad.role_sync_ttl_seconds AS ad_role_sync_ttl_seconds,
+          ad.role_sync_timeout_seconds AS ad_role_sync_timeout_seconds
+        FROM identity_providers ip
+        LEFT JOIN identity_provider_ad_ldap_configs ad ON ad.idp_id = ip.id
+        WHERE ip.tenant_id = $1
+          AND ip.is_active = true
+          AND ip.deleted_at IS NULL
+        ORDER BY slug ASC
+        "#,
+    )
+    .bind(default_tenant_id())
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
     render_template(UsersTemplate {
         sections: nav_items(AdminSection::Users),
         message: query.message,
@@ -2884,8 +4305,10 @@ async fn users_page(
         ad_link: query.ad_link,
         federated_link: query.federated_link,
         rows,
+        deleted_rows,
         ad_modal_data,
         ad_onboarding_tokens,
+        identity_providers,
         filter_q,
         filter_status,
         filter_note,
@@ -3043,7 +4466,7 @@ async fn ad_role_mappings_create(
         Ok(v) => v,
         Err(_) => {
             return redirect_with("/admin/ui/ad-role-mappings", "error", "Invalid group_id")
-                .into_response()
+                .into_response();
         }
     };
     let mode = match form.mode.trim() {
@@ -3072,16 +4495,18 @@ async fn ad_role_mappings_create(
     .await;
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/ad-role-mappings", "message", "Role mapping created")
-            .into_response(),
-        Err(e) => {
-            redirect_with(
-                "/admin/ui/ad-role-mappings",
-                "error",
-                &format!("Create failed: {e}"),
-            )
-            .into_response()
-        }
+        Ok(_) => redirect_with(
+            "/admin/ui/ad-role-mappings",
+            "message",
+            "Role mapping created",
+        )
+        .into_response(),
+        Err(e) => redirect_with(
+            "/admin/ui/ad-role-mappings",
+            "error",
+            &format!("Create failed: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -3130,25 +4555,56 @@ async fn users_create(
         return redir.into_response();
     }
 
+    let return_path = users_return_path_from_referer(&headers);
+    let email = form.email.trim().to_lowercase();
+    if !looks_like_email(&email) {
+        return redirect_with(&return_path, "error", "Invalid email format").into_response();
+    }
+    let recovery_email = normalize_opt_form(form.recovery_email).map(|v| v.to_lowercase());
+    if let Some(value) = recovery_email.as_deref() {
+        if !looks_like_email(value) {
+            return redirect_with(&return_path, "error", "Invalid recovery email format")
+                .into_response();
+        }
+    }
+    let phone_e164 = normalize_opt_form(form.phone_e164);
+    if let Some(value) = phone_e164.as_deref() {
+        if !looks_like_e164(value) {
+            return redirect_with(
+                &return_path,
+                "error",
+                "Phone must use E.164 format, e.g. +420...",
+            )
+            .into_response();
+        }
+    }
+    let first_name = normalize_opt_form(form.first_name);
+    let last_name = normalize_opt_form(form.last_name);
+    let note = normalize_opt_form(form.note);
     let auth_mode = normalize_auth_mode(form.auth_mode.as_deref());
+    let auth_provider_id = if auth_mode.eq_ignore_ascii_case("local") {
+        None
+    } else {
+        form.auth_provider_id
+    };
     let is_active = parse_checkbox(&form.is_active);
-    let password = form.password.as_deref().map(str::trim).filter(|v| !v.is_empty());
+    let password = form
+        .password
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty());
     let password_hash: Option<String> = match (auth_mode.as_str(), password) {
         ("federated", _) => None,
         (_, Some(p)) => match simple_idm_core::auth::password::hash_password(p) {
             Ok(h) => Some(h),
             Err(e) => {
-                return redirect_with(
-                    "/admin/ui/users",
-                    "error",
-                    &format!("Password hash failed: {e}"),
-                )
-                .into_response();
+                return redirect_with(&return_path, "error", &format!("Password hash failed: {e}"))
+                    .into_response();
             }
         },
         ("local", None) => {
             return redirect_with(
-                "/admin/ui/users",
+                &return_path,
                 "error",
                 "Password is required for local auth mode",
             )
@@ -3160,29 +4616,31 @@ async fn users_create(
 
     let result = sqlx::query(
         r#"INSERT INTO users (
-             tenant_id, username, email, password_hash, is_active, auth_mode, password_disabled,
+             tenant_id, username, email, password_hash, is_active, auth_mode, auth_provider_id, password_disabled,
              first_name, last_name, recovery_email, phone_e164, note
            )
-           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
+           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)"#,
     )
     .bind(form.username.trim())
-    .bind(form.email.trim().to_lowercase())
+    .bind(&email)
     .bind(password_hash)
     .bind(is_active)
     .bind(auth_mode)
+    .bind(auth_provider_id)
     .bind(password_disabled)
-    .bind(normalize_opt_form(form.first_name))
-    .bind(normalize_opt_form(form.last_name))
-    .bind(normalize_opt_form(form.recovery_email).map(|v| v.to_lowercase()))
-    .bind(normalize_opt_form(form.phone_e164))
-    .bind(normalize_opt_form(form.note))
+    .bind(&first_name)
+    .bind(&last_name)
+    .bind(&recovery_email)
+    .bind(&phone_e164)
+    .bind(&note)
     .execute(&state.db_pool)
     .await;
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/users", "message", "User created").into_response(),
-        Err(e) => redirect_with("/admin/ui/users", "error", &format!("Create failed: {e}"))
-            .into_response(),
+        Ok(_) => redirect_with(&return_path, "message", "User created").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Create failed: {e}")).into_response()
+        }
     }
 }
 
@@ -3196,7 +4654,38 @@ async fn users_update(
         return redir.into_response();
     }
 
+    let return_path = users_return_path_from_referer(&headers);
+    let email = form.email.trim().to_lowercase();
+    if !looks_like_email(&email) {
+        return redirect_with(&return_path, "error", "Invalid email format").into_response();
+    }
+    let recovery_email = normalize_opt_form(form.recovery_email).map(|v| v.to_lowercase());
+    if let Some(value) = recovery_email.as_deref() {
+        if !looks_like_email(value) {
+            return redirect_with(&return_path, "error", "Invalid recovery email format")
+                .into_response();
+        }
+    }
+    let phone_e164 = normalize_opt_form(form.phone_e164);
+    if let Some(value) = phone_e164.as_deref() {
+        if !looks_like_e164(value) {
+            return redirect_with(
+                &return_path,
+                "error",
+                "Phone must use E.164 format, e.g. +420...",
+            )
+            .into_response();
+        }
+    }
+    let first_name = normalize_opt_form(form.first_name);
+    let last_name = normalize_opt_form(form.last_name);
+    let note = normalize_opt_form(form.note);
     let auth_mode = normalize_auth_mode(form.auth_mode.as_deref());
+    let auth_provider_id = if auth_mode.eq_ignore_ascii_case("local") {
+        None
+    } else {
+        form.auth_provider_id
+    };
     let is_active = parse_checkbox(&form.is_active);
     let password_disabled = auth_mode.eq_ignore_ascii_case("federated");
 
@@ -3208,14 +4697,31 @@ async fn users_update(
     let result = if auth_mode.eq_ignore_ascii_case("federated") {
         sqlx::query(
             r#"UPDATE users
-               SET email = $2, password_hash = NULL, is_active = $3, auth_mode = $4, password_disabled = $5, updated_at = NOW()
+               SET email = $2,
+                   password_hash = NULL,
+                   is_active = $3,
+                   auth_mode = $4,
+                   auth_provider_id = $5,
+                   password_disabled = $6,
+                   first_name = $7,
+                   last_name = $8,
+                   recovery_email = $9,
+                   phone_e164 = $10,
+                   note = $11,
+                   updated_at = NOW()
                WHERE id = $1"#,
         )
         .bind(id)
-        .bind(form.email.trim().to_lowercase())
+        .bind(&email)
         .bind(is_active)
         .bind(auth_mode)
+        .bind(auth_provider_id)
         .bind(password_disabled)
+        .bind(&first_name)
+        .bind(&last_name)
+        .bind(&recovery_email)
+        .bind(&phone_e164)
+        .bind(&note)
         .execute(&state.db_pool)
         .await
     } else if let Some(password) = new_password {
@@ -3223,42 +4729,191 @@ async fn users_update(
             Ok(hash) => {
                 sqlx::query(
                     r#"UPDATE users
-                       SET email = $2, password_hash = $3, is_active = $4, auth_mode = $5, password_disabled = $6, updated_at = NOW()
+                       SET email = $2,
+                           password_hash = $3,
+                           is_active = $4,
+                           auth_mode = $5,
+                           auth_provider_id = $6,
+                           password_disabled = $7,
+                           first_name = $8,
+                           last_name = $9,
+                           recovery_email = $10,
+                           phone_e164 = $11,
+                           note = $12,
+                           updated_at = NOW()
                        WHERE id = $1"#,
                 )
                 .bind(id)
-                .bind(form.email.trim().to_lowercase())
+                .bind(&email)
                 .bind(hash)
                 .bind(is_active)
                 .bind(auth_mode)
+                .bind(auth_provider_id)
                 .bind(password_disabled)
+                .bind(&first_name)
+                .bind(&last_name)
+                .bind(&recovery_email)
+                .bind(&phone_e164)
+                .bind(&note)
                 .execute(&state.db_pool)
                 .await
             }
             Err(e) => {
-                return redirect_with("/admin/ui/users", "error", &format!("Hash failed: {e}"))
+                return redirect_with(&return_path, "error", &format!("Hash failed: {e}"))
                     .into_response();
             }
         }
     } else {
         sqlx::query(
             r#"UPDATE users
-               SET email = $2, is_active = $3, auth_mode = $4, password_disabled = $5, updated_at = NOW()
+               SET email = $2,
+                   is_active = $3,
+                   auth_mode = $4,
+                   auth_provider_id = $5,
+                   password_disabled = $6,
+                   first_name = $7,
+                   last_name = $8,
+                   recovery_email = $9,
+                   phone_e164 = $10,
+                   note = $11,
+                   updated_at = NOW()
                WHERE id = $1"#,
         )
         .bind(id)
-        .bind(form.email.trim().to_lowercase())
+        .bind(&email)
         .bind(is_active)
         .bind(auth_mode)
+        .bind(auth_provider_id)
         .bind(password_disabled)
+        .bind(&first_name)
+        .bind(&last_name)
+        .bind(&recovery_email)
+        .bind(&phone_e164)
+        .bind(&note)
         .execute(&state.db_pool)
         .await
     };
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/users", "message", "User updated").into_response(),
-        Err(e) => redirect_with("/admin/ui/users", "error", &format!("Update failed: {e}"))
-            .into_response(),
+        Ok(_) => redirect_with(&return_path, "message", "User updated").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Update failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn user_patterns_create(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    Form(form): Form<PatternCreateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = user_patterns_return_path_from_referer(&headers, user_id);
+    if form.pattern.trim().is_empty() {
+        return redirect_with(&return_path, "error", "Pattern is required").into_response();
+    }
+
+    match sqlx::query(
+        r#"
+        INSERT INTO user_group_patterns (tenant_id, user_id, pattern, is_include, priority)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(default_tenant_id())
+    .bind(user_id)
+    .bind(form.pattern.trim())
+    .bind(pattern_mode_to_bool(&form.mode))
+    .bind(pattern_priority(form.priority))
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(_) => redirect_with(&return_path, "message", "User pattern created").into_response(),
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Pattern create failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+async fn user_patterns_update(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path((user_id, pattern_id)): Path<(Uuid, Uuid)>,
+    Form(form): Form<PatternUpdateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = user_patterns_return_path_from_referer(&headers, user_id);
+    if form.pattern.trim().is_empty() {
+        return redirect_with(&return_path, "error", "Pattern is required").into_response();
+    }
+
+    match sqlx::query(
+        r#"
+        UPDATE user_group_patterns
+        SET pattern = $3, is_include = $4, priority = $5
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(pattern_id)
+    .bind(user_id)
+    .bind(form.pattern.trim())
+    .bind(pattern_mode_to_bool(&form.mode))
+    .bind(pattern_priority(form.priority))
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "User pattern updated").into_response()
+        }
+        Ok(_) => redirect_with(&return_path, "error", "User pattern not found").into_response(),
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Pattern update failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+async fn user_patterns_deactivate(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path((user_id, pattern_id)): Path<(Uuid, Uuid)>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = user_patterns_return_path_from_referer(&headers, user_id);
+
+    match sqlx::query(
+        r#"
+        UPDATE user_group_patterns
+        SET deleted_at = NOW()
+        WHERE id = $1 AND user_id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(pattern_id)
+    .bind(user_id)
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "User pattern deleted").into_response()
+        }
+        Ok(_) => redirect_with(&return_path, "error", "User pattern not found").into_response(),
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Pattern delete failed: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -3312,7 +4967,7 @@ async fn users_import_submit(
         Ok(v) if !v.is_empty() => v,
         Ok(_) => {
             return redirect_with("/admin/ui/users", "error", "CSV has no importable users")
-                .into_response()
+                .into_response();
         }
         Err(e) => return redirect_with("/admin/ui/users", "error", &e).into_response(),
     };
@@ -3329,9 +4984,8 @@ async fn users_import_submit(
         .await;
 
         let result = match existing {
-            Ok(Some(user_id)) => {
-                sqlx::query(
-                    r#"UPDATE users
+            Ok(Some(user_id)) => sqlx::query(
+                r#"UPDATE users
                        SET first_name = $2,
                            last_name = $3,
                            recovery_email = $4,
@@ -3341,30 +4995,30 @@ async fn users_import_submit(
                            is_active = $8,
                            updated_at = NOW()
                        WHERE id = $1"#,
-                )
-                .bind(user_id)
-                .bind(item.first_name.as_deref())
-                .bind(item.last_name.as_deref())
-                .bind(item.recovery_email.as_deref())
-                .bind(item.phone.as_deref())
-                .bind(item.last_sign_in_at)
-                .bind(note.as_deref())
-                .bind(item.is_active)
-                .execute(&state.db_pool)
-                .await
-                .map(|_| {
-                    updated += 1;
-                })
-            }
+            )
+            .bind(user_id)
+            .bind(item.first_name.as_deref())
+            .bind(item.last_name.as_deref())
+            .bind(item.recovery_email.as_deref())
+            .bind(item.phone.as_deref())
+            .bind(item.last_sign_in_at)
+            .bind(note.as_deref())
+            .bind(item.is_active)
+            .execute(&state.db_pool)
+            .await
+            .map(|_| {
+                updated += 1;
+            }),
             Ok(None) => {
                 let generated_password = random_import_password();
-                let password_hash = match simple_idm_core::auth::password::hash_password(&generated_password) {
-                    Ok(h) => h,
-                    Err(_) => {
-                        failed += 1;
-                        continue;
-                    }
-                };
+                let password_hash =
+                    match simple_idm_core::auth::password::hash_password(&generated_password) {
+                        Ok(h) => h,
+                        Err(_) => {
+                            failed += 1;
+                            continue;
+                        }
+                    };
                 sqlx::query(
                     r#"INSERT INTO users (
                            tenant_id, username, email, password_hash, is_active,
@@ -3414,17 +5068,53 @@ async fn users_deactivate(
 
     let return_path = users_return_path_from_referer(&headers);
     let result = sqlx::query(
-        r#"UPDATE users SET is_active = false, updated_at = NOW() WHERE id = $1"#,
+        r#"UPDATE users
+           SET is_active = false, deleted_at = NOW(), updated_at = NOW()
+           WHERE id = $1 AND deleted_at IS NULL"#,
     )
     .bind(id)
     .execute(&state.db_pool)
     .await;
 
     match result {
-        Ok(_) => redirect_with(&return_path, "message", "User deactivated (safe delete)")
-            .into_response(),
-        Err(e) => redirect_with(&return_path, "error", &format!("Deactivate failed: {e}"))
-            .into_response(),
+        Ok(_) => {
+            redirect_with(&return_path, "message", "User deactivated (safe delete)").into_response()
+        }
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Deactivate failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn users_restore(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let return_path = users_return_path_from_referer(&headers);
+    let result = sqlx::query(
+        r#"UPDATE users
+           SET deleted_at = NULL, updated_at = NOW()
+           WHERE id = $1 AND deleted_at IS NOT NULL"#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "User restored").into_response()
+        }
+        Ok(_) => {
+            redirect_with(&return_path, "error", "User not found in deleted users").into_response()
+        }
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Restore failed: {e}")).into_response()
+        }
     }
 }
 
@@ -3464,8 +5154,9 @@ async fn ad_onboarding_tokens_bulk_delete(
             &format!("Deleted onboarding tokens: {}", done.rows_affected()),
         )
         .into_response(),
-        Err(e) => redirect_with(&return_path, "error", &format!("Delete failed: {e}"))
-            .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Delete failed: {e}")).into_response()
+        }
     }
 }
 
@@ -3499,11 +5190,11 @@ async fn users_ad_mappings_apply(
         Ok(Some(u)) => u,
         Ok(None) => return redirect_with(&return_path, "error", "User not found").into_response(),
         Err(e) => {
-            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response()
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
         }
     };
 
-    if user.auth_mode != "mixed" {
+    if user.auth_mode != "ad" {
         return redirect_with(
             &return_path,
             "error",
@@ -3523,6 +5214,14 @@ async fn users_ad_mappings_apply(
             .into_response();
         }
     };
+    let Some(idp_id) = user.auth_provider_id else {
+        return redirect_with(
+            &return_path,
+            "error",
+            "AD user has no identity provider selected",
+        )
+        .into_response();
+    };
 
     if items.is_empty() {
         return redirect_with(&return_path, "error", "No mappings selected").into_response();
@@ -3530,7 +5229,9 @@ async fn users_ad_mappings_apply(
 
     let mut tx = match state.db_pool.begin().await {
         Ok(tx) => tx,
-        Err(e) => return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response(),
+        Err(e) => {
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
+        }
     };
     let mut changed = 0usize;
     for item in &items {
@@ -3549,11 +5250,13 @@ async fn users_ad_mappings_apply(
                 WHERE id = $1
                   AND tenant_id = $2
                   AND source = 'ad'
+                  AND idp_id = $3
                   AND deleted_at IS NULL
                 "#,
             )
             .bind(mapping_id)
             .bind(user.tenant_id)
+            .bind(idp_id)
             .execute(&mut *tx)
             .await;
             if let Ok(done) = result {
@@ -3574,10 +5277,10 @@ async fn users_ad_mappings_apply(
         let result = sqlx::query(
             r#"
             INSERT INTO external_role_mappings
-              (tenant_id, source, external_role, group_id, mode, priority, is_active)
+              (tenant_id, source, external_role, group_id, mode, priority, is_active, idp_id)
             VALUES
-              ($1, 'ad', $2, $3, 'add', $4, true)
-            ON CONFLICT (tenant_id, source, external_role, group_id, mode)
+              ($1, 'ad', $2, $3, 'add', $4, true, $5)
+            ON CONFLICT (tenant_id, idp_id, source, external_role, group_id, mode)
             WHERE deleted_at IS NULL
             DO UPDATE SET
               is_active = true,
@@ -3589,6 +5292,7 @@ async fn users_ad_mappings_apply(
         .bind(item.external_role.trim())
         .bind(group_id)
         .bind(priority)
+        .bind(idp_id)
         .execute(&mut *tx)
         .await;
         if result.is_ok() {
@@ -3600,7 +5304,9 @@ async fn users_ad_mappings_apply(
         return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
     }
 
-    if let Err(err) = oauth2::sync_ldap_roles_force(state.oauth_state.as_ref(), &user, &user.email).await {
+    if let Err(err) =
+        oauth2::sync_ldap_roles_force(state.oauth_state.as_ref(), &user, &user.email).await
+    {
         simple_idm_core::audit::emit_event(
             &state.db_pool,
             "ad.role_mapping.apply",
@@ -3646,25 +5352,40 @@ async fn users_ad_onboarding_link(
     }
 
     let return_path = users_return_path_from_referer(&headers);
-    if state.oauth_state.ldap_auth.is_none() {
-        return redirect_with(&return_path, "error", "AD auth is not enabled").into_response();
+    let user =
+        match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(&state.db_pool)
+            .await
+        {
+            Ok(Some(v)) => v,
+            Ok(None) => {
+                return redirect_with(&return_path, "error", "User not found").into_response();
+            }
+            Err(e) => {
+                return redirect_with(&return_path, "error", &format!("DB error: {e}"))
+                    .into_response();
+            }
+        };
+    if !user.auth_mode.eq_ignore_ascii_case("ad") {
+        return redirect_with(
+            &return_path,
+            "error",
+            "AD onboarding is available only for auth type 'ad'",
+        )
+        .into_response();
     }
-
-    let user_exists = match sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM users WHERE id = $1 AND deleted_at IS NULL",
-    )
-    .bind(id)
-    .fetch_one(&state.db_pool)
-    .await
-    {
-        Ok(v) => v > 0,
-        Err(e) => {
-            return redirect_with(&return_path, "error", &format!("DB error: {e}"))
-                .into_response()
-        }
+    let Some(idp_id) = user.auth_provider_id else {
+        return redirect_with(
+            &return_path,
+            "error",
+            "AD user has no identity provider selected",
+        )
+        .into_response();
     };
-    if !user_exists {
-        return redirect_with(&return_path, "error", "User not found").into_response();
+    if let Err(e) = oauth2::load_ad_ldap_provider(&state.db_pool, idp_id).await {
+        return redirect_with(&return_path, "error", &format!("AD provider error: {e}"))
+            .into_response();
     }
 
     let raw_token = random_onboarding_token();
@@ -3673,19 +5394,23 @@ async fn users_ad_onboarding_link(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO ad_onboarding_tokens (user_id, token_hash, expires_at)
-        VALUES ($1, $2, $3)
+        INSERT INTO ad_onboarding_tokens (user_id, token_hash, expires_at, idp_id)
+        VALUES ($1, $2, $3, $4)
         "#,
     )
     .bind(id)
     .bind(token_hash)
     .bind(expires_at)
+    .bind(idp_id)
     .execute(&state.db_pool)
     .await;
 
     match result {
         Ok(_) => {
-            let link = format!("/ad/onboarding?token={}", urlencoding::encode(&raw_token));
+            let link = public_url_from_headers(
+                &headers,
+                &format!("/ad/onboarding?token={}", urlencoding::encode(&raw_token)),
+            );
             let msg = format!(
                 "AD onboarding link generated ({}h)",
                 state.ad_onboarding_token_ttl_seconds / 3600
@@ -3732,6 +5457,7 @@ async fn users_federated_invitation_link(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
+    Form(form): Form<FederatedInvitationForm>,
 ) -> Response {
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
@@ -3748,7 +5474,7 @@ async fn users_federated_invitation_link(
         Ok(Some(u)) => u,
         Ok(None) => return redirect_with(&return_path, "error", "User not found").into_response(),
         Err(e) => {
-            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response()
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
         }
     };
 
@@ -3767,6 +5493,7 @@ async fn users_federated_invitation_link(
         FROM identity_providers
         WHERE tenant_id = $1
           AND is_active = true
+          AND provider_type <> 'ad_ldap'
           AND deleted_at IS NULL
         ORDER BY slug ASC
         "#,
@@ -3777,23 +5504,28 @@ async fn users_federated_invitation_link(
     {
         Ok(v) => v,
         Err(e) => {
-            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response()
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
         }
     };
 
-    let Some((idp_id, provider_slug, provider_type)) = (match providers.len() {
-        1 => providers.into_iter().next(),
-        0 => None,
-        _ => {
-            return redirect_with(
-                &return_path,
-                "error",
-                "Multiple active federated providers found. Provider selection UI is not implemented yet.",
-            )
-            .into_response()
-        }
-    }) else {
-        return redirect_with(&return_path, "error", "No active federated provider configured").into_response();
+    let requested_idp_id = form.idp_id.or(user.auth_provider_id);
+    let selected_provider = if let Some(idp_id) = requested_idp_id {
+        providers
+            .into_iter()
+            .find(|(provider_id, _, _)| *provider_id == idp_id)
+    } else if providers.len() == 1 {
+        providers.into_iter().next()
+    } else {
+        None
+    };
+
+    let Some((idp_id, provider_slug, provider_type)) = selected_provider else {
+        return redirect_with(
+            &return_path,
+            "error",
+            "Set an active federated identity provider in Edit user first",
+        )
+        .into_response();
     };
 
     let raw_token = random_onboarding_token();
@@ -3816,9 +5548,12 @@ async fn users_federated_invitation_link(
 
     match result {
         Ok(_) => {
-            let link = format!(
-                "/federated/onboarding?token={}",
-                urlencoding::encode(&raw_token)
+            let link = public_url_from_headers(
+                &headers,
+                &format!(
+                    "/federated/onboarding?token={}",
+                    urlencoding::encode(&raw_token)
+                ),
             );
             let msg = format!(
                 "Federated invitation generated via {} ({})",
@@ -3846,14 +5581,12 @@ async fn users_federated_invitation_link(
             ))
             .into_response()
         }
-        Err(e) => {
-            redirect_with(
-                &return_path,
-                "error",
-                &format!("Failed to generate federated invitation: {e}"),
-            )
-            .into_response()
-        }
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Failed to generate federated invitation: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -3898,8 +5631,57 @@ async fn users_federated_approve(
         }
         Ok(_) => redirect_with(&return_path, "error", "No pending federated identity found")
             .into_response(),
-        Err(e) => redirect_with(&return_path, "error", &format!("Approve failed: {e}"))
-            .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Approve failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn users_federated_unlink(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let return_path = users_return_path_from_referer(&headers);
+    let result = sqlx::query(
+        r#"
+        UPDATE user_identities
+        SET deleted_at = NOW(),
+            updated_at = NOW()
+        WHERE user_id = $1
+          AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "federated.identity.unlink",
+                "user_identities",
+                Some(id),
+                "success",
+                Some(json!({"rows": done.rows_affected()})),
+            )
+            .await;
+            redirect_with(&return_path, "message", "Federated identity unlinked").into_response()
+        }
+        Ok(_) => {
+            redirect_with(&return_path, "error", "No federated identity to unlink").into_response()
+        }
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Failed to unlink federated identity: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -3924,11 +5706,26 @@ async fn groups_page(
         }
     };
 
+    let relations = sqlx::query_as::<_, (Uuid, Uuid)>(
+        "SELECT parent_group_id, child_group_id FROM group_groups ORDER BY parent_group_id, child_group_id",
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+    let tree_rows = build_group_tree_rows(&rows, &relations);
+    let deleted_rows = sqlx::query_as::<_, GroupRow>(
+        r#"SELECT id, name, description, is_virtual FROM groups WHERE deleted_at IS NOT NULL ORDER BY updated_at DESC, name ASC LIMIT 25"#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
     render_template(GroupsTemplate {
         sections: nav_items(AdminSection::Groups),
         message: query.message,
         error: query.error,
-        rows,
+        tree_rows,
+        deleted_rows,
     })
 }
 
@@ -3941,12 +5738,13 @@ async fn groups_create(
         return redir.into_response();
     }
 
-    let result = sqlx::query(r#"INSERT INTO groups (name, description, is_virtual) VALUES ($1, $2, $3)"#)
-        .bind(form.name.trim())
-        .bind(Some(form.description.trim()).filter(|v| !v.is_empty()))
-        .bind(parse_checkbox(&form.is_virtual))
-        .execute(&state.db_pool)
-        .await;
+    let result =
+        sqlx::query(r#"INSERT INTO groups (name, description, is_virtual) VALUES ($1, $2, $3)"#)
+            .bind(form.name.trim())
+            .bind(Some(form.description.trim()).filter(|v| !v.is_empty()))
+            .bind(parse_checkbox(&form.is_virtual))
+            .execute(&state.db_pool)
+            .await;
 
     match result {
         Ok(_) => redirect_with("/admin/ui/groups", "message", "Group created").into_response(),
@@ -3965,18 +5763,110 @@ async fn groups_update(
         return redir.into_response();
     }
 
-    let result = sqlx::query(r#"UPDATE groups SET name=$2, description=$3, is_virtual=$4 WHERE id=$1"#)
-        .bind(id)
-        .bind(form.name.trim())
-        .bind(Some(form.description.trim()).filter(|v| !v.is_empty()))
-        .bind(parse_checkbox(&form.is_virtual))
-        .execute(&state.db_pool)
-        .await;
+    let result =
+        sqlx::query(r#"UPDATE groups SET name=$2, description=$3, is_virtual=$4 WHERE id=$1"#)
+            .bind(id)
+            .bind(form.name.trim())
+            .bind(Some(form.description.trim()).filter(|v| !v.is_empty()))
+            .bind(parse_checkbox(&form.is_virtual))
+            .execute(&state.db_pool)
+            .await;
 
     match result {
         Ok(_) => redirect_with("/admin/ui/groups", "message", "Group updated").into_response(),
         Err(e) => redirect_with("/admin/ui/groups", "error", &format!("Update failed: {e}"))
             .into_response(),
+    }
+}
+
+async fn groups_reparent(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Form(form): Form<GroupReparentForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let new_parent = match parse_parent_group_id(form.parent_group_id.as_deref()) {
+        Ok(v) => v,
+        Err(e) => return redirect_with("/admin/ui/groups", "error", &e).into_response(),
+    };
+
+    if let Some(parent_id) = new_parent {
+        if parent_id == id {
+            return redirect_with(
+                "/admin/ui/groups",
+                "error",
+                "Group cannot be its own parent",
+            )
+            .into_response();
+        }
+        match would_create_group_cycle(&state.db_pool, parent_id, id).await {
+            Ok(true) => {
+                return redirect_with(
+                    "/admin/ui/groups",
+                    "error",
+                    "Selected parent would create a cycle",
+                )
+                .into_response();
+            }
+            Err(e) => {
+                return redirect_with("/admin/ui/groups", "error", &format!("DB error: {e}"))
+                    .into_response();
+            }
+            Ok(false) => {}
+        }
+    }
+
+    let mut tx = match state.db_pool.begin().await {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/admin/ui/groups", "error", &format!("DB error: {e}"))
+                .into_response();
+        }
+    };
+
+    if let Err(e) = sqlx::query("DELETE FROM group_groups WHERE child_group_id = $1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+    {
+        return redirect_with(
+            "/admin/ui/groups",
+            "error",
+            &format!("Reparent failed: {e}"),
+        )
+        .into_response();
+    }
+
+    if let Some(parent_id) = new_parent {
+        if let Err(e) = sqlx::query(
+            "INSERT INTO group_groups (parent_group_id, child_group_id) VALUES ($1, $2)",
+        )
+        .bind(parent_id)
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        {
+            return redirect_with(
+                "/admin/ui/groups",
+                "error",
+                &format!("Reparent failed: {e}"),
+            )
+            .into_response();
+        }
+    }
+
+    match tx.commit().await {
+        Ok(_) => redirect_with("/admin/ui/groups", "message", "Group moved").into_response(),
+        Err(e) => redirect_with(
+            "/admin/ui/groups",
+            "error",
+            &format!("Reparent failed: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -3989,22 +5879,55 @@ async fn groups_deactivate(
         return redir.into_response();
     }
 
+    let result =
+        sqlx::query(r#"UPDATE groups SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1"#)
+            .bind(id)
+            .execute(&state.db_pool)
+            .await;
+
+    match result {
+        Ok(_) => redirect_with(
+            "/admin/ui/groups",
+            "message",
+            "Group deactivated (safe delete)",
+        )
+        .into_response(),
+        Err(e) => redirect_with(
+            "/admin/ui/groups",
+            "error",
+            &format!("Deactivate failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+async fn groups_restore(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
     let result = sqlx::query(
-        r#"UPDATE groups SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1"#,
+        r#"UPDATE groups SET deleted_at = NULL, updated_at = NOW() WHERE id = $1 AND deleted_at IS NOT NULL"#,
     )
     .bind(id)
     .execute(&state.db_pool)
     .await;
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/groups", "message", "Group deactivated (safe delete)")
-            .into_response(),
-        Err(e) => redirect_with("/admin/ui/groups", "error", &format!("Deactivate failed: {e}"))
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with("/admin/ui/groups", "message", "Group restored").into_response()
+        }
+        Ok(_) => redirect_with("/admin/ui/groups", "error", "Group is not deleted").into_response(),
+        Err(e) => redirect_with("/admin/ui/groups", "error", &format!("Restore failed: {e}"))
             .into_response(),
     }
 }
 
-async fn user_groups_page(
+async fn tenants_page(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
     Query(query): Query<PageQuery>,
@@ -4013,33 +5936,316 @@ async fn user_groups_page(
         return redir.into_response();
     }
 
-    let rows = match sqlx::query_as::<_, UserGroupRow>(
-        r#"SELECT u.username, u.email, g.name AS group_name
-           FROM user_groups ug
-           JOIN users u ON u.id = ug.user_id
-           JOIN groups g ON g.id = ug.group_id
-           WHERE u.deleted_at IS NULL AND g.deleted_at IS NULL
-           ORDER BY u.username, g.name"#,
+    let tenants = match sqlx::query_as::<_, TenantRow>(
+        r#"
+        SELECT
+            t.id,
+            t.slug,
+            t.name,
+            t.mode::text AS mode,
+            t.is_active,
+            (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.deleted_at IS NULL) AS users_count,
+            (SELECT COUNT(*) FROM groups g WHERE g.tenant_id = t.id AND g.deleted_at IS NULL) AS groups_count,
+            (SELECT COUNT(*) FROM oauth_clients oc WHERE oc.tenant_id = t.id AND oc.deleted_at IS NULL) AS clients_count,
+            (SELECT COUNT(*) FROM tenant_domains td WHERE td.tenant_id = t.id AND td.deleted_at IS NULL) AS domains_count
+        FROM tenants t
+        WHERE t.deleted_at IS NULL
+        ORDER BY t.slug ASC
+        "#,
     )
     .fetch_all(&state.db_pool)
     .await
     {
         Ok(v) => v,
         Err(e) => {
-            return redirect_with("/admin/ui/user-groups", "error", &format!("DB error: {e}"))
-                .into_response();
+            return redirect_with("/admin/ui/", "error", &format!("DB error: {e}")).into_response();
         }
     };
 
-    render_template(UserGroupsTemplate {
-        sections: nav_items(AdminSection::UserGroups),
+    let domains = sqlx::query_as::<_, TenantDomainRow>(
+        r#"
+        SELECT
+            td.id,
+            t.slug AS tenant_slug,
+            t.name AS tenant_name,
+            td.domain,
+            td.is_primary,
+            td.is_active
+        FROM tenant_domains td
+        JOIN tenants t ON t.id = td.tenant_id
+        WHERE td.deleted_at IS NULL
+        ORDER BY td.is_primary DESC, td.domain ASC
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    let deleted_domains = sqlx::query_as::<_, TenantDomainRow>(
+        r#"
+        SELECT
+            td.id,
+            t.slug AS tenant_slug,
+            t.name AS tenant_name,
+            td.domain,
+            td.is_primary,
+            td.is_active
+        FROM tenant_domains td
+        JOIN tenants t ON t.id = td.tenant_id
+        WHERE td.deleted_at IS NOT NULL
+        ORDER BY td.deleted_at DESC, td.domain ASC
+        LIMIT 25
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    render_template(TenantsTemplate {
+        sections: nav_items(AdminSection::Tenants),
         message: query.message,
         error: query.error,
-        rows,
+        tenants,
+        domains,
+        deleted_domains,
     })
 }
 
-async fn group_users_page(
+async fn tenants_update(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Form(form): Form<TenantUpdateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let mode = form.mode.trim();
+    if mode != "single" && mode != "multi" {
+        return redirect_with("/admin/ui/tenants", "error", "Invalid tenant mode").into_response();
+    }
+
+    let name = form.name.trim();
+    if name.is_empty() {
+        return redirect_with("/admin/ui/tenants", "error", "Tenant name is required")
+            .into_response();
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE tenants
+        SET name = $2,
+            mode = $3::tenant_mode,
+            is_active = $4,
+            updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(name)
+    .bind(mode)
+    .bind(parse_checkbox(&form.is_active))
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with("/admin/ui/tenants", "message", "Tenant updated").into_response()
+        }
+        Ok(_) => redirect_with("/admin/ui/tenants", "error", "Tenant not found").into_response(),
+        Err(e) => redirect_with("/admin/ui/tenants", "error", &format!("Update failed: {e}"))
+            .into_response(),
+    }
+}
+
+async fn tenant_domains_create(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Form(form): Form<TenantDomainCreateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let domain = match normalize_domain(&form.domain) {
+        Ok(v) => v,
+        Err(e) => return redirect_with("/admin/ui/tenants", "error", &e).into_response(),
+    };
+    let is_primary = parse_checkbox(&form.is_primary);
+
+    if is_primary {
+        if let Err(e) =
+            sqlx::query("UPDATE tenant_domains SET is_primary = false WHERE tenant_id = $1")
+                .bind(form.tenant_id)
+                .execute(&state.db_pool)
+                .await
+        {
+            return redirect_with(
+                "/admin/ui/tenants",
+                "error",
+                &format!("Primary update failed: {e}"),
+            )
+            .into_response();
+        }
+    }
+
+    let result = sqlx::query(
+        r#"
+        INSERT INTO tenant_domains (tenant_id, domain, is_primary, is_active)
+        VALUES ($1, $2, $3, $4)
+        "#,
+    )
+    .bind(form.tenant_id)
+    .bind(domain)
+    .bind(is_primary)
+    .bind(parse_checkbox(&form.is_active))
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => redirect_with("/admin/ui/tenants", "message", "Domain added").into_response(),
+        Err(e) => redirect_with("/admin/ui/tenants", "error", &format!("Create failed: {e}"))
+            .into_response(),
+    }
+}
+
+async fn tenant_domains_update(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Form(form): Form<TenantDomainUpdateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let domain = match normalize_domain(&form.domain) {
+        Ok(v) => v,
+        Err(e) => return redirect_with("/admin/ui/tenants", "error", &e).into_response(),
+    };
+    let is_primary = parse_checkbox(&form.is_primary);
+    let tenant_id = match sqlx::query_scalar::<_, Uuid>(
+        "SELECT tenant_id FROM tenant_domains WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return redirect_with("/admin/ui/tenants", "error", "Domain not found").into_response();
+        }
+        Err(e) => {
+            return redirect_with("/admin/ui/tenants", "error", &format!("DB error: {e}"))
+                .into_response();
+        }
+    };
+
+    if is_primary {
+        if let Err(e) =
+            sqlx::query("UPDATE tenant_domains SET is_primary = false WHERE tenant_id = $1")
+                .bind(tenant_id)
+                .execute(&state.db_pool)
+                .await
+        {
+            return redirect_with(
+                "/admin/ui/tenants",
+                "error",
+                &format!("Primary update failed: {e}"),
+            )
+            .into_response();
+        }
+    }
+
+    let result = sqlx::query(
+        r#"
+        UPDATE tenant_domains
+        SET domain = $2,
+            is_primary = $3,
+            is_active = $4
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(domain)
+    .bind(is_primary)
+    .bind(parse_checkbox(&form.is_active))
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with("/admin/ui/tenants", "message", "Domain updated").into_response()
+        }
+        Ok(_) => redirect_with("/admin/ui/tenants", "error", "Domain not found").into_response(),
+        Err(e) => redirect_with("/admin/ui/tenants", "error", &format!("Update failed: {e}"))
+            .into_response(),
+    }
+}
+
+async fn tenant_domains_deactivate(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let result = sqlx::query(
+        "UPDATE tenant_domains SET deleted_at = NOW(), is_active = false WHERE id = $1",
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => {
+            redirect_with("/admin/ui/tenants", "message", "Domain deactivated").into_response()
+        }
+        Err(e) => redirect_with(
+            "/admin/ui/tenants",
+            "error",
+            &format!("Deactivate failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+async fn tenant_domains_restore(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let result = sqlx::query(
+        "UPDATE tenant_domains SET deleted_at = NULL, is_active = true WHERE id = $1 AND deleted_at IS NOT NULL",
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with("/admin/ui/tenants", "message", "Domain restored").into_response()
+        }
+        Ok(_) => {
+            redirect_with("/admin/ui/tenants", "error", "Domain is not deleted").into_response()
+        }
+        Err(e) => redirect_with(
+            "/admin/ui/tenants",
+            "error",
+            &format!("Restore failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+async fn identity_providers_page(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
     Query(query): Query<PageQuery>,
@@ -4048,46 +6254,1064 @@ async fn group_users_page(
         return redir.into_response();
     }
 
-    let rows = match sqlx::query_as::<_, UserGroupRow>(
-        r#"SELECT u.username, u.email, g.name AS group_name
-           FROM user_groups ug
-           JOIN users u ON u.id = ug.user_id
-           JOIN groups g ON g.id = ug.group_id
-           WHERE u.deleted_at IS NULL AND g.deleted_at IS NULL
-           ORDER BY g.name, u.username"#,
+    let filter_q = query.q.unwrap_or_default();
+    let search_patterns = filter_q
+        .split_whitespace()
+        .map(|term| format!("%{}%", term.to_lowercase()))
+        .collect::<Vec<_>>();
+
+    let rows = match sqlx::query_as::<_, IdentityProviderRow>(
+        r#"
+        SELECT
+          ip.id, ip.slug, ip.provider_type, ip.issuer, ip.client_id, ip.auth_url, ip.token_url, ip.jwks_url, ip.scopes, ip.hd_domain, ip.is_active,
+          ad.host AS ad_host,
+          ad.port AS ad_port,
+          ad.base_dn AS ad_base_dn,
+          ad.user_filter AS ad_user_filter,
+          ad.tls_mode AS ad_tls_mode,
+          ad.timeout_seconds AS ad_timeout_seconds,
+          ad.allow_insecure AS ad_allow_insecure,
+          ad.domains AS ad_domains,
+          ad.bind_dn AS ad_bind_dn,
+          ad.role_sync_enabled AS ad_role_sync_enabled,
+          ad.role_sync_ttl_seconds AS ad_role_sync_ttl_seconds,
+          ad.role_sync_timeout_seconds AS ad_role_sync_timeout_seconds
+        FROM identity_providers ip
+        LEFT JOIN identity_provider_ad_ldap_configs ad ON ad.idp_id = ip.id
+        WHERE ip.tenant_id = $1 AND ip.deleted_at IS NULL
+          AND (
+            cardinality($2::text[]) = 0 OR
+            lower(concat_ws(' ', ip.slug, ip.provider_type, ip.issuer, ip.client_id, COALESCE(ip.hd_domain, ''), COALESCE(ad.host, ''), COALESCE(array_to_string(ad.domains, ' '), ''))) LIKE ALL($2::text[])
+          )
+        ORDER BY ip.slug ASC
+        "#,
     )
+    .bind(default_tenant_id())
+    .bind(&search_patterns)
     .fetch_all(&state.db_pool)
     .await
     {
         Ok(v) => v,
         Err(e) => {
-            return redirect_with("/admin/ui/group-users", "error", &format!("DB error: {e}"))
+            return redirect_with(
+                "/admin/ui/identity-providers",
+                "error",
+                &format!("DB error: {e}"),
+            )
+            .into_response();
+        }
+    };
+
+    let deleted_rows = sqlx::query_as::<_, IdentityProviderRow>(
+        r#"
+        SELECT
+          ip.id, ip.slug, ip.provider_type, ip.issuer, ip.client_id, ip.auth_url, ip.token_url, ip.jwks_url, ip.scopes, ip.hd_domain, ip.is_active,
+          ad.host AS ad_host,
+          ad.port AS ad_port,
+          ad.base_dn AS ad_base_dn,
+          ad.user_filter AS ad_user_filter,
+          ad.tls_mode AS ad_tls_mode,
+          ad.timeout_seconds AS ad_timeout_seconds,
+          ad.allow_insecure AS ad_allow_insecure,
+          ad.domains AS ad_domains,
+          ad.bind_dn AS ad_bind_dn,
+          ad.role_sync_enabled AS ad_role_sync_enabled,
+          ad.role_sync_ttl_seconds AS ad_role_sync_ttl_seconds,
+          ad.role_sync_timeout_seconds AS ad_role_sync_timeout_seconds
+        FROM identity_providers ip
+        LEFT JOIN identity_provider_ad_ldap_configs ad ON ad.idp_id = ip.id
+        WHERE ip.tenant_id = $1 AND ip.deleted_at IS NOT NULL
+        ORDER BY ip.deleted_at DESC
+        LIMIT 50
+        "#,
+    )
+    .bind(default_tenant_id())
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    render_template(IdentityProvidersTemplate {
+        sections: nav_items(AdminSection::IdentityProviders),
+        message: query.message,
+        error: query.error,
+        rows,
+        deleted_rows,
+        filter_q,
+    })
+}
+
+async fn identity_providers_create(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Form(form): Form<IdentityProviderCreateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = q_return_path_from_referer(
+        &headers,
+        "/admin/ui/identity-providers",
+        "/admin/ui/identity-providers",
+    );
+
+    let scopes =
+        selected_oidc_provider_scopes(&form.scope_openid, &form.scope_profile, &form.scope_email);
+    let provider_type = normalize_provider_type(&form.provider_type);
+    let is_ad_ldap = provider_type == "ad_ldap";
+    if is_ad_ldap
+        && form
+            .ad_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none()
+    {
+        return redirect_with(&return_path, "error", "AD host is required").into_response();
+    }
+    if is_ad_ldap
+        && form
+            .ad_base_dn
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none()
+    {
+        return redirect_with(&return_path, "error", "AD base DN is required").into_response();
+    }
+    if !is_ad_ldap
+        && (form.issuer.trim().is_empty()
+            || form.client_id.trim().is_empty()
+            || form.client_secret.trim().is_empty())
+    {
+        return redirect_with(
+            &return_path,
+            "error",
+            "Issuer, client ID and client secret are required for OIDC providers",
+        )
+        .into_response();
+    }
+
+    let encrypted_secret = if is_ad_ldap {
+        String::new()
+    } else {
+        match encrypt_secret(form.client_secret.trim()) {
+            Ok(v) => v,
+            Err(e) => {
+                return redirect_with(
+                    &return_path,
+                    "error",
+                    &format!("Secret encryption failed: {e}"),
+                )
+                .into_response();
+            }
+        }
+    };
+
+    let mut tx = match state.db_pool.begin().await {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
+        }
+    };
+
+    let result = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        INSERT INTO identity_providers (
+            tenant_id, slug, provider_type, issuer, client_id, client_secret_encrypted,
+            auth_url, token_url, jwks_url, scopes, hd_domain, is_active
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING id
+        "#,
+    )
+    .bind(default_tenant_id())
+    .bind(form.slug.trim())
+    .bind(&provider_type)
+    .bind(if is_ad_ldap {
+        format!("ad_ldap:{}", form.slug.trim())
+    } else {
+        form.issuer.trim().to_string()
+    })
+    .bind(if is_ad_ldap {
+        form.slug.trim()
+    } else {
+        form.client_id.trim()
+    })
+    .bind(encrypted_secret)
+    .bind(if is_ad_ldap {
+        None
+    } else {
+        form.auth_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    })
+    .bind(if is_ad_ldap {
+        None
+    } else {
+        form.token_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    })
+    .bind(if is_ad_ldap {
+        None
+    } else {
+        form.jwks_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    })
+    .bind(if is_ad_ldap {
+        Vec::<String>::new()
+    } else {
+        scopes
+    })
+    .bind(if is_ad_ldap {
+        None
+    } else {
+        form.hd_domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_lowercase)
+    })
+    .bind(parse_checkbox(&form.is_active))
+    .fetch_one(&mut *tx)
+    .await;
+
+    match result {
+        Ok(idp_id) => {
+            if is_ad_ldap {
+                let encrypted_bind_password = match form
+                    .ad_bind_password
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                {
+                    Some(secret) => match encrypt_secret(secret) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            return redirect_with(
+                                &return_path,
+                                "error",
+                                &format!("Bind password encryption failed: {e}"),
+                            )
+                            .into_response();
+                        }
+                    },
+                    None => None,
+                };
+                if let Err(e) = sqlx::query(
+                    r#"
+                    INSERT INTO identity_provider_ad_ldap_configs (
+                      idp_id, host, port, base_dn, user_filter, tls_mode, timeout_seconds,
+                      allow_insecure, bind_dn, bind_password_encrypted, domains,
+                      role_sync_enabled, role_sync_ttl_seconds, role_sync_timeout_seconds
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    "#,
+                )
+                .bind(idp_id)
+                .bind(form.ad_host.as_deref().map(str::trim).unwrap_or(""))
+                .bind(form.ad_port.unwrap_or(636))
+                .bind(form.ad_base_dn.as_deref().map(str::trim).unwrap_or(""))
+                .bind(
+                    form.ad_user_filter
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or(
+                            "(|(mail={login})(sAMAccountName={login})(userPrincipalName={login}))",
+                        ),
+                )
+                .bind(
+                    form.ad_tls_mode
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .unwrap_or("ldaps"),
+                )
+                .bind(form.ad_timeout_seconds.unwrap_or(5))
+                .bind(parse_checkbox(&form.ad_allow_insecure))
+                .bind(
+                    form.ad_bind_dn
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty()),
+                )
+                .bind(encrypted_bind_password)
+                .bind(csv_to_vec(form.ad_domains.as_deref()))
+                .bind(parse_checkbox(&form.ad_role_sync_enabled))
+                .bind(form.ad_role_sync_ttl_seconds.unwrap_or(3600))
+                .bind(form.ad_role_sync_timeout_seconds.unwrap_or(5))
+                .execute(&mut *tx)
+                .await
+                {
+                    return redirect_with(
+                        &return_path,
+                        "error",
+                        &format!("AD LDAP config create failed: {e}"),
+                    )
+                    .into_response();
+                }
+            }
+            if let Err(e) = tx.commit().await {
+                return redirect_with(&return_path, "error", &format!("DB error: {e}"))
+                    .into_response();
+            }
+            redirect_with(&return_path, "message", "Identity provider created").into_response()
+        }
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Create failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn identity_providers_update(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+    Form(form): Form<IdentityProviderUpdateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = q_return_path_from_referer(
+        &headers,
+        "/admin/ui/identity-providers",
+        "/admin/ui/identity-providers",
+    );
+
+    let scopes =
+        selected_oidc_provider_scopes(&form.scope_openid, &form.scope_profile, &form.scope_email);
+    let provider_type = normalize_provider_type(&form.provider_type);
+    let is_ad_ldap = provider_type == "ad_ldap";
+    if is_ad_ldap
+        && form
+            .ad_host
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none()
+    {
+        return redirect_with(&return_path, "error", "AD host is required").into_response();
+    }
+    if is_ad_ldap
+        && form
+            .ad_base_dn
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none()
+    {
+        return redirect_with(&return_path, "error", "AD base DN is required").into_response();
+    }
+    if !is_ad_ldap && (form.issuer.trim().is_empty() || form.client_id.trim().is_empty()) {
+        return redirect_with(
+            &return_path,
+            "error",
+            "Issuer and client ID are required for OIDC providers",
+        )
+        .into_response();
+    }
+    let encrypted_secret_update = match form
+        .client_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(secret) => match encrypt_secret(secret) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                return redirect_with(
+                    &return_path,
+                    "error",
+                    &format!("Secret encryption failed: {e}"),
+                )
+                .into_response();
+            }
+        },
+        None => None,
+    };
+    let encrypted_bind_password_update = match form
+        .ad_bind_password
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(secret) => match encrypt_secret(secret) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                return redirect_with(
+                    &return_path,
+                    "error",
+                    &format!("Bind password encryption failed: {e}"),
+                )
+                .into_response();
+            }
+        },
+        None => None,
+    };
+
+    let mut tx = match state.db_pool.begin().await {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
+        }
+    };
+
+    let result = sqlx::query(
+        r#"
+        UPDATE identity_providers
+        SET slug = $2,
+            provider_type = $3,
+            issuer = $4,
+            client_id = $5,
+            client_secret_encrypted = COALESCE($6, client_secret_encrypted),
+            auth_url = $7,
+            token_url = $8,
+            jwks_url = $9,
+            scopes = $10,
+            hd_domain = $11,
+            is_active = $12,
+            updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(form.slug.trim())
+    .bind(&provider_type)
+    .bind(if is_ad_ldap {
+        format!("ad_ldap:{}", form.slug.trim())
+    } else {
+        form.issuer.trim().to_string()
+    })
+    .bind(if is_ad_ldap {
+        form.slug.trim()
+    } else {
+        form.client_id.trim()
+    })
+    .bind(encrypted_secret_update)
+    .bind(if is_ad_ldap {
+        None
+    } else {
+        form.auth_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    })
+    .bind(if is_ad_ldap {
+        None
+    } else {
+        form.token_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    })
+    .bind(if is_ad_ldap {
+        None
+    } else {
+        form.jwks_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    })
+    .bind(if is_ad_ldap {
+        Vec::<String>::new()
+    } else {
+        scopes
+    })
+    .bind(if is_ad_ldap {
+        None
+    } else {
+        form.hd_domain
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_lowercase)
+    })
+    .bind(parse_checkbox(&form.is_active))
+    .execute(&mut *tx)
+    .await;
+
+    match result {
+        Ok(_) => {
+            if is_ad_ldap {
+                if let Err(e) = sqlx::query(
+                    r#"
+                    INSERT INTO identity_provider_ad_ldap_configs (
+                      idp_id, host, port, base_dn, user_filter, tls_mode, timeout_seconds,
+                      allow_insecure, bind_dn, bind_password_encrypted, domains,
+                      role_sync_enabled, role_sync_ttl_seconds, role_sync_timeout_seconds
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                    ON CONFLICT (idp_id)
+                    DO UPDATE SET
+                      host = EXCLUDED.host,
+                      port = EXCLUDED.port,
+                      base_dn = EXCLUDED.base_dn,
+                      user_filter = EXCLUDED.user_filter,
+                      tls_mode = EXCLUDED.tls_mode,
+                      timeout_seconds = EXCLUDED.timeout_seconds,
+                      allow_insecure = EXCLUDED.allow_insecure,
+                      bind_dn = EXCLUDED.bind_dn,
+                      bind_password_encrypted = COALESCE(EXCLUDED.bind_password_encrypted, identity_provider_ad_ldap_configs.bind_password_encrypted),
+                      domains = EXCLUDED.domains,
+                      role_sync_enabled = EXCLUDED.role_sync_enabled,
+                      role_sync_ttl_seconds = EXCLUDED.role_sync_ttl_seconds,
+                      role_sync_timeout_seconds = EXCLUDED.role_sync_timeout_seconds,
+                      updated_at = NOW()
+                    "#,
+                )
+                .bind(id)
+                .bind(form.ad_host.as_deref().map(str::trim).unwrap_or(""))
+                .bind(form.ad_port.unwrap_or(636))
+                .bind(form.ad_base_dn.as_deref().map(str::trim).unwrap_or(""))
+                .bind(form.ad_user_filter.as_deref().map(str::trim).filter(|v| !v.is_empty()).unwrap_or("(|(mail={login})(sAMAccountName={login})(userPrincipalName={login}))"))
+                .bind(form.ad_tls_mode.as_deref().map(str::trim).filter(|v| !v.is_empty()).unwrap_or("ldaps"))
+                .bind(form.ad_timeout_seconds.unwrap_or(5))
+                .bind(parse_checkbox(&form.ad_allow_insecure))
+                .bind(form.ad_bind_dn.as_deref().map(str::trim).filter(|v| !v.is_empty()))
+                .bind(encrypted_bind_password_update)
+                .bind(csv_to_vec(form.ad_domains.as_deref()))
+                .bind(parse_checkbox(&form.ad_role_sync_enabled))
+                .bind(form.ad_role_sync_ttl_seconds.unwrap_or(3600))
+                .bind(form.ad_role_sync_timeout_seconds.unwrap_or(5))
+                .execute(&mut *tx)
+                .await {
+                    return redirect_with(&return_path, "error", &format!("AD LDAP config update failed: {e}")).into_response();
+                }
+            }
+            if let Err(e) = tx.commit().await {
+                return redirect_with(&return_path, "error", &format!("DB error: {e}"))
+                    .into_response();
+            }
+            redirect_with(&return_path, "message", "Identity provider updated").into_response()
+        }
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Update failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn identity_providers_deactivate(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = q_return_path_from_referer(
+        &headers,
+        "/admin/ui/identity-providers",
+        "/admin/ui/identity-providers",
+    );
+
+    let result = sqlx::query(
+        r#"UPDATE identity_providers SET is_active = false, deleted_at = NOW(), updated_at = NOW() WHERE id = $1"#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => redirect_with(
+            &return_path,
+            "message",
+            "Identity provider deactivated (safe delete)",
+        )
+        .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Deactivate failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn identity_providers_restore(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = q_return_path_from_referer(
+        &headers,
+        "/admin/ui/identity-providers",
+        "/admin/ui/identity-providers",
+    );
+
+    let result = sqlx::query(
+        r#"
+        UPDATE identity_providers
+        SET deleted_at = NULL, updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NOT NULL
+        "#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "Identity provider restored").into_response()
+        }
+        Ok(_) => redirect_with(
+            &return_path,
+            "error",
+            "Identity provider not found in deleted providers",
+        )
+        .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Restore failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn memberships_page(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Query(query): Query<MembershipsQuery>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let users = match sqlx::query_as::<_, MembershipUserRecord>(
+        r#"SELECT id, username, email, first_name, last_name, auth_mode::text AS auth_mode, is_active
+           FROM users
+           WHERE tenant_id = $1 AND deleted_at IS NULL
+           ORDER BY lower(username), lower(email)"#,
+    )
+    .bind(default_tenant_id())
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/admin/ui/memberships", "error", &format!("DB error: {e}"))
                 .into_response();
         }
     };
 
-    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for r in rows {
-        grouped
-            .entry(r.group_name)
-            .or_default()
-            .push(format!("{} <{}>", r.username, r.email));
-    }
+    let groups = match sqlx::query_as::<_, MembershipGroupRecord>(
+        r#"SELECT id, name, description, is_virtual
+           FROM groups
+           WHERE tenant_id = $1 AND deleted_at IS NULL
+           ORDER BY lower(name)"#,
+    )
+    .bind(default_tenant_id())
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/admin/ui/memberships", "error", &format!("DB error: {e}"))
+                .into_response();
+        }
+    };
 
-    let rows = grouped
+    let selected_user_id = query.user_id.or_else(|| users.first().map(|u| u.id));
+    let selected_group_id = query.group_id.or_else(|| groups.first().map(|g| g.id));
+
+    let rows = match sqlx::query_as::<_, UserGroupRow>(
+        r#"SELECT u.id AS user_id,
+                  u.username,
+                  u.email,
+                  u.first_name,
+                  u.last_name,
+                  u.auth_mode::text AS auth_mode,
+                  u.is_active,
+                  g.id AS group_id,
+                  g.name AS group_name,
+                  g.description AS group_description,
+                  g.is_virtual AS group_is_virtual
+           FROM user_groups ug
+           JOIN users u ON u.id = ug.user_id
+           JOIN groups g ON g.id = ug.group_id
+           WHERE ug.tenant_id = $1
+             AND u.deleted_at IS NULL
+             AND g.deleted_at IS NULL
+           ORDER BY lower(u.username), lower(g.name)"#,
+    )
+    .bind(default_tenant_id())
+    .fetch_all(&state.db_pool)
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            return redirect_with("/admin/ui/memberships", "error", &format!("DB error: {e}"))
+                .into_response();
+        }
+    };
+
+    let users = users
         .into_iter()
-        .map(|(group_name, users)| GroupUsersRow {
-            group_name,
-            users: users.join(", "),
+        .map(|u| MembershipUserOption {
+            selected: Some(u.id) == selected_user_id,
+            id: u.id,
+            username: u.username,
+            email: u.email,
+            first_name: u.first_name,
+            last_name: u.last_name,
+            auth_mode: u.auth_mode,
+            is_active: u.is_active,
         })
         .collect::<Vec<_>>();
 
-    render_template(GroupUsersTemplate {
-        sections: nav_items(AdminSection::GroupUsers),
+    let groups = groups
+        .into_iter()
+        .map(|g| MembershipGroupOption {
+            selected: Some(g.id) == selected_group_id,
+            id: g.id,
+            name: g.name,
+            description: g.description,
+            is_virtual: g.is_virtual,
+        })
+        .collect::<Vec<_>>();
+
+    let selected_user = users.iter().find(|u| u.selected).cloned();
+    let selected_group = groups.iter().find(|g| g.selected).cloned();
+
+    let mut selected_user_groups = rows
+        .iter()
+        .filter(|r| Some(r.user_id) == selected_user_id)
+        .enumerate()
+        .map(|(idx, r)| UserAssignedGroupRow {
+            ordinal: idx + 1,
+            id: r.group_id,
+            name: r.group_name.clone(),
+            description: r.group_description.clone(),
+            is_virtual: r.group_is_virtual,
+        })
+        .collect::<Vec<_>>();
+
+    selected_user_groups.sort_by_key(|g| g.name.to_lowercase());
+    for (idx, g) in selected_user_groups.iter_mut().enumerate() {
+        g.ordinal = idx + 1;
+    }
+
+    let selected_user_patterns = if let Some(user_id) = selected_user_id {
+        sqlx::query_as::<_, UserGroupPatternRow>(
+            r#"
+            SELECT id, pattern, is_include, priority
+            FROM user_group_patterns
+            WHERE tenant_id = $1
+              AND user_id = $2
+              AND deleted_at IS NULL
+            ORDER BY priority ASC, pattern ASC
+            "#,
+        )
+        .bind(default_tenant_id())
+        .bind(user_id)
+        .fetch_all(&state.db_pool)
+        .await
+        .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    let mut selected_group_users = rows
+        .iter()
+        .filter(|r| Some(r.group_id) == selected_group_id)
+        .enumerate()
+        .map(|(idx, r)| GroupAssignedUserRow {
+            ordinal: idx + 1,
+            id: r.user_id,
+            username: r.username.clone(),
+            email: r.email.clone(),
+            first_name: r.first_name.clone(),
+            last_name: r.last_name.clone(),
+            auth_mode: r.auth_mode.clone(),
+            is_active: r.is_active,
+        })
+        .collect::<Vec<_>>();
+
+    selected_group_users.sort_by_key(|u| u.username.to_lowercase());
+    for (idx, u) in selected_group_users.iter_mut().enumerate() {
+        u.ordinal = idx + 1;
+    }
+
+    let available_groups = groups
+        .iter()
+        .filter(|g| {
+            selected_user_id.is_some()
+                && !selected_user_groups
+                    .iter()
+                    .any(|assigned| assigned.id == g.id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let available_users = users
+        .iter()
+        .filter(|u| {
+            selected_group_id.is_some()
+                && !selected_group_users
+                    .iter()
+                    .any(|assigned| assigned.id == u.id)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+
+    render_template(MembershipsTemplate {
+        sections: nav_items(AdminSection::Memberships),
         message: query.message,
         error: query.error,
-        rows,
+        users,
+        groups,
+        selected_user,
+        selected_group,
+        selected_user_groups,
+        selected_user_patterns,
+        selected_group_users,
+        available_groups,
+        available_users,
+        user_filter: query.user_filter.unwrap_or_default(),
+        group_filter: query.group_filter.unwrap_or_default(),
     })
+}
+
+async fn memberships_add_groups_to_user(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    Form(form): Form<MembershipAddGroupsForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let fallback = format!("/admin/ui/memberships?user_id={user_id}#by-user");
+    let return_path = memberships_return_path_from_referer(&headers, &fallback);
+
+    let group_ids = parse_uuid_csv(form.group_ids_csv.as_deref());
+    if group_ids.is_empty() {
+        return redirect_with(&return_path, "error", "No group selected").into_response();
+    }
+
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
+        }
+    };
+
+    for group_id in group_ids {
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO user_groups (tenant_id, user_id, group_id)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (user_id, group_id) DO NOTHING"#,
+        )
+        .bind(default_tenant_id())
+        .bind(user_id)
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await
+        {
+            return redirect_with(&return_path, "error", &format!("Add failed: {e}"))
+                .into_response();
+        }
+    }
+
+    match tx.commit().await {
+        Ok(_) => redirect_with(&return_path, "message", "Groups assigned").into_response(),
+        Err(e) => redirect_with(&return_path, "error", &format!("Add failed: {e}")).into_response(),
+    }
+}
+
+async fn memberships_remove_group_from_user(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path((user_id, group_id)): Path<(Uuid, Uuid)>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let fallback = format!("/admin/ui/memberships?user_id={user_id}#by-user");
+    let return_path = memberships_return_path_from_referer(&headers, &fallback);
+
+    match sqlx::query(
+        r#"DELETE FROM user_groups
+           WHERE tenant_id = $1 AND user_id = $2 AND group_id = $3"#,
+    )
+    .bind(default_tenant_id())
+    .bind(user_id)
+    .bind(group_id)
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(_) => redirect_with(&return_path, "message", "Group removed from user").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Remove failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn memberships_remove_groups_from_user(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(user_id): Path<Uuid>,
+    Form(form): Form<MembershipRemoveGroupsForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let fallback = format!("/admin/ui/memberships?user_id={user_id}#by-user");
+    let return_path = memberships_return_path_from_referer(&headers, &fallback);
+    let group_ids = parse_uuid_csv(form.group_ids_csv.as_deref());
+    if group_ids.is_empty() {
+        return redirect_with(&return_path, "error", "No group selected").into_response();
+    }
+
+    match sqlx::query(
+        r#"DELETE FROM user_groups
+           WHERE tenant_id = $1 AND user_id = $2 AND group_id = ANY($3::uuid[])"#,
+    )
+    .bind(default_tenant_id())
+    .bind(user_id)
+    .bind(&group_ids)
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(result) => redirect_with(
+            &return_path,
+            "message",
+            &format!("Removed {} group assignments", result.rows_affected()),
+        )
+        .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Remove failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn memberships_add_users_to_group(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(group_id): Path<Uuid>,
+    Form(form): Form<MembershipAddUsersForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let fallback = format!("/admin/ui/memberships?group_id={group_id}#by-group");
+    let return_path = memberships_return_path_from_referer(&headers, &fallback);
+
+    let user_ids = parse_uuid_csv(form.user_ids_csv.as_deref());
+    if user_ids.is_empty() {
+        return redirect_with(&return_path, "error", "No user selected").into_response();
+    }
+
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(e) => {
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
+        }
+    };
+
+    for user_id in user_ids {
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO user_groups (tenant_id, user_id, group_id)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (user_id, group_id) DO NOTHING"#,
+        )
+        .bind(default_tenant_id())
+        .bind(user_id)
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await
+        {
+            return redirect_with(&return_path, "error", &format!("Add failed: {e}"))
+                .into_response();
+        }
+    }
+
+    match tx.commit().await {
+        Ok(_) => redirect_with(&return_path, "message", "Users assigned").into_response(),
+        Err(e) => redirect_with(&return_path, "error", &format!("Add failed: {e}")).into_response(),
+    }
+}
+
+async fn memberships_remove_user_from_group(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path((group_id, user_id)): Path<(Uuid, Uuid)>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let fallback = format!("/admin/ui/memberships?group_id={group_id}#by-group");
+    let return_path = memberships_return_path_from_referer(&headers, &fallback);
+
+    match sqlx::query(
+        r#"DELETE FROM user_groups
+           WHERE tenant_id = $1 AND user_id = $2 AND group_id = $3"#,
+    )
+    .bind(default_tenant_id())
+    .bind(user_id)
+    .bind(group_id)
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(_) => redirect_with(&return_path, "message", "User removed from group").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Remove failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn memberships_remove_users_from_group(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(group_id): Path<Uuid>,
+    Form(form): Form<MembershipRemoveUsersForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let fallback = format!("/admin/ui/memberships?group_id={group_id}#by-group");
+    let return_path = memberships_return_path_from_referer(&headers, &fallback);
+    let user_ids = parse_uuid_csv(form.user_ids_csv.as_deref());
+    if user_ids.is_empty() {
+        return redirect_with(&return_path, "error", "No user selected").into_response();
+    }
+
+    match sqlx::query(
+        r#"DELETE FROM user_groups
+           WHERE tenant_id = $1 AND group_id = $2 AND user_id = ANY($3::uuid[])"#,
+    )
+    .bind(default_tenant_id())
+    .bind(group_id)
+    .bind(&user_ids)
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(result) => redirect_with(
+            &return_path,
+            "message",
+            &format!("Removed {} user assignments", result.rows_affected()),
+        )
+        .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Remove failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn user_groups_redirect() -> impl IntoResponse {
+    Redirect::to("/admin/ui/memberships#by-user")
+}
+
+async fn group_users_redirect() -> impl IntoResponse {
+    Redirect::to("/admin/ui/memberships#by-group")
 }
 
 async fn clients_page(
@@ -4099,10 +7323,24 @@ async fn clients_page(
         return redir.into_response();
     }
 
+    let filter_q = query.q.unwrap_or_default();
+    let search_patterns = filter_q
+        .split_whitespace()
+        .map(|term| format!("%{}%", term.to_lowercase()))
+        .collect::<Vec<_>>();
+
     let rows = match sqlx::query_as::<_, ClientRow>(
-        r#"SELECT id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public
-           FROM oauth_clients WHERE deleted_at IS NULL ORDER BY name ASC"#,
+        r#"SELECT id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public,
+                  groups_claim_mode, include_claim_maps, ignore_virtual_groups
+           FROM oauth_clients
+           WHERE deleted_at IS NULL
+             AND (
+               cardinality($1::text[]) = 0 OR
+               lower(concat_ws(' ', client_id, name, scope, array_to_string(redirect_uris, ' '), array_to_string(grant_types, ' '), groups_claim_mode)) LIKE ALL($1::text[])
+             )
+           ORDER BY name ASC"#,
     )
+    .bind(&search_patterns)
     .fetch_all(&state.db_pool)
     .await
     {
@@ -4113,11 +7351,45 @@ async fn clients_page(
         }
     };
 
+    let deleted_rows = sqlx::query_as::<_, ClientRow>(
+        r#"SELECT id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public,
+                  groups_claim_mode, include_claim_maps, ignore_virtual_groups
+           FROM oauth_clients
+           WHERE deleted_at IS NOT NULL
+           ORDER BY deleted_at DESC
+           LIMIT 50"#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    let client_ids = rows.iter().map(|r| r.id).collect::<Vec<_>>();
+    let client_patterns = if client_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, ClientGroupPatternRow>(
+            r#"
+            SELECT id, client_id, pattern, is_include, priority
+            FROM oauth_client_group_patterns
+            WHERE client_id = ANY($1::uuid[])
+              AND deleted_at IS NULL
+            ORDER BY priority ASC, pattern ASC
+            "#,
+        )
+        .bind(&client_ids)
+        .fetch_all(&state.db_pool)
+        .await
+        .unwrap_or_default()
+    };
+
     render_template(ClientsTemplate {
         sections: nav_items(AdminSection::Clients),
         message: query.message,
         error: query.error,
         rows,
+        deleted_rows,
+        client_patterns,
+        filter_q,
     })
 }
 
@@ -4129,16 +7401,34 @@ async fn clients_create(
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
+    let return_path =
+        q_return_path_from_referer(&headers, "/admin/ui/clients", "/admin/ui/clients");
 
     let is_public = parse_checkbox(&form.is_public);
     let is_active = parse_checkbox(&form.is_active);
+    let groups_claim_mode = normalize_groups_claim_mode(form.groups_claim_mode.as_deref());
+    let include_claim_maps = parse_checkbox(&form.include_claim_maps);
+    let ignore_virtual_groups = parse_checkbox(&form.ignore_virtual_groups);
     let client_secret_hash = if is_public {
         None
     } else {
-        match simple_idm_core::auth::password::hash_password("change-me") {
+        let Some(secret) = form
+            .client_secret
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        else {
+            return redirect_with(
+                &return_path,
+                "error",
+                "Confidential clients require client secret",
+            )
+            .into_response();
+        };
+        match simple_idm_core::auth::password::hash_password(secret) {
             Ok(v) => Some(v),
             Err(e) => {
-                return redirect_with("/admin/ui/clients", "error", &format!("Hash failed: {e}"))
+                return redirect_with(&return_path, "error", &format!("Hash failed: {e}"))
                     .into_response();
             }
         }
@@ -4176,7 +7466,7 @@ async fn clients_create(
         r#"INSERT INTO oauth_clients
            (tenant_id, client_id, client_secret_hash, name, redirect_uris, grant_types, scope, is_active, is_public,
             groups_claim_mode, include_claim_maps, ignore_virtual_groups)
-           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, $6, $7, $8, 'effective', true, false)"#,
+           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)"#,
     )
     .bind(form.client_id.trim())
     .bind(client_secret_hash)
@@ -4186,13 +7476,17 @@ async fn clients_create(
     .bind(scopes)
     .bind(is_active)
     .bind(is_public)
+    .bind(groups_claim_mode)
+    .bind(include_claim_maps)
+    .bind(ignore_virtual_groups)
     .execute(&state.db_pool)
     .await;
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/clients", "message", "Client created").into_response(),
-        Err(e) => redirect_with("/admin/ui/clients", "error", &format!("Create failed: {e}"))
-            .into_response(),
+        Ok(_) => redirect_with(&return_path, "message", "Client created").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Create failed: {e}")).into_response()
+        }
     }
 }
 
@@ -4205,8 +7499,14 @@ async fn clients_update(
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
+    let return_path =
+        q_return_path_from_referer(&headers, "/admin/ui/clients", "/admin/ui/clients");
 
     let is_active = parse_checkbox(&form.is_active);
+    let is_public = parse_checkbox(&form.is_public);
+    let groups_claim_mode = normalize_groups_claim_mode(form.groups_claim_mode.as_deref());
+    let include_claim_maps = parse_checkbox(&form.include_claim_maps);
+    let ignore_virtual_groups = parse_checkbox(&form.ignore_virtual_groups);
 
     let grants = {
         let from_flags = selected_grant_types_from_flags(
@@ -4235,10 +7535,63 @@ async fn clients_update(
             from_flags.join(" ")
         }
     };
+    let existing_secret_hash = match sqlx::query_scalar::<_, Option<String>>(
+        "SELECT client_secret_hash FROM oauth_clients WHERE id = $1 AND deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(v)) => v,
+        Ok(None) => {
+            return redirect_with(&return_path, "error", "Client not found").into_response();
+        }
+        Err(e) => {
+            return redirect_with(&return_path, "error", &format!("DB error: {e}")).into_response();
+        }
+    };
+    let client_secret_hash_update = match form
+        .client_secret
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        Some(secret) => match simple_idm_core::auth::password::hash_password(secret) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                return redirect_with(&return_path, "error", &format!("Hash failed: {e}"))
+                    .into_response();
+            }
+        },
+        None => None,
+    };
+    if !is_public && client_secret_hash_update.is_none() && existing_secret_hash.is_none() {
+        return redirect_with(
+            &return_path,
+            "error",
+            "Confidential clients require client secret",
+        )
+        .into_response();
+    }
 
     let result = sqlx::query(
         r#"UPDATE oauth_clients
-           SET client_id=$2, name=$3, redirect_uris=$4, grant_types=$5, scope=$6, is_active=$7, updated_at=NOW()
+           SET client_id=$2,
+               name=$3,
+               redirect_uris=$4,
+               grant_types=$5,
+               scope=$6,
+               is_active=$7,
+               is_public=$8,
+               client_secret_hash = CASE
+                 WHEN $8 THEN NULL
+                 WHEN $9::text IS NOT NULL THEN $9
+                 ELSE client_secret_hash
+               END,
+               groups_claim_mode=$10,
+               include_claim_maps=$11,
+               ignore_virtual_groups=$12,
+               updated_at=NOW()
            WHERE id=$1"#,
     )
     .bind(id)
@@ -4248,13 +7601,135 @@ async fn clients_update(
     .bind(grants)
     .bind(scopes)
     .bind(is_active)
+    .bind(is_public)
+    .bind(client_secret_hash_update)
+    .bind(groups_claim_mode)
+    .bind(include_claim_maps)
+    .bind(ignore_virtual_groups)
     .execute(&state.db_pool)
     .await;
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/clients", "message", "Client updated").into_response(),
-        Err(e) => redirect_with("/admin/ui/clients", "error", &format!("Update failed: {e}"))
-            .into_response(),
+        Ok(_) => redirect_with(&return_path, "message", "Client updated").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Update failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn client_patterns_create(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(client_id): Path<Uuid>,
+    Form(form): Form<PatternCreateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path =
+        q_return_path_from_referer(&headers, "/admin/ui/clients", "/admin/ui/clients");
+    if form.pattern.trim().is_empty() {
+        return redirect_with(&return_path, "error", "Pattern is required").into_response();
+    }
+
+    match sqlx::query(
+        r#"
+        INSERT INTO oauth_client_group_patterns (tenant_id, client_id, pattern, is_include, priority)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(default_tenant_id())
+    .bind(client_id)
+    .bind(form.pattern.trim())
+    .bind(pattern_mode_to_bool(&form.mode))
+    .bind(pattern_priority(form.priority))
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(_) => redirect_with(&return_path, "message", "Client pattern created").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Pattern create failed: {e}"))
+                .into_response()
+        }
+    }
+}
+
+async fn client_patterns_update(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path((client_id, pattern_id)): Path<(Uuid, Uuid)>,
+    Form(form): Form<PatternUpdateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path =
+        q_return_path_from_referer(&headers, "/admin/ui/clients", "/admin/ui/clients");
+    if form.pattern.trim().is_empty() {
+        return redirect_with(&return_path, "error", "Pattern is required").into_response();
+    }
+
+    match sqlx::query(
+        r#"
+        UPDATE oauth_client_group_patterns
+        SET pattern = $3, is_include = $4, priority = $5
+        WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(pattern_id)
+    .bind(client_id)
+    .bind(form.pattern.trim())
+    .bind(pattern_mode_to_bool(&form.mode))
+    .bind(pattern_priority(form.priority))
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "Client pattern updated").into_response()
+        }
+        Ok(_) => redirect_with(&return_path, "error", "Client pattern not found").into_response(),
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Pattern update failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+async fn client_patterns_deactivate(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path((client_id, pattern_id)): Path<(Uuid, Uuid)>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path =
+        q_return_path_from_referer(&headers, "/admin/ui/clients", "/admin/ui/clients");
+
+    match sqlx::query(
+        r#"
+        UPDATE oauth_client_group_patterns
+        SET deleted_at = NOW()
+        WHERE id = $1 AND client_id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(pattern_id)
+    .bind(client_id)
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "Client pattern deleted").into_response()
+        }
+        Ok(_) => redirect_with(&return_path, "error", "Client pattern not found").into_response(),
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Pattern delete failed: {e}"),
+        )
+        .into_response(),
     }
 }
 
@@ -4266,23 +7741,60 @@ async fn clients_deactivate(
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
+    let return_path =
+        q_return_path_from_referer(&headers, "/admin/ui/clients", "/admin/ui/clients");
 
     let result = sqlx::query(
-        r#"UPDATE oauth_clients SET is_active=false, updated_at=NOW() WHERE id=$1"#,
+        r#"UPDATE oauth_clients
+           SET is_active=false, deleted_at=NOW(), updated_at=NOW()
+           WHERE id=$1 AND deleted_at IS NULL"#,
     )
     .bind(id)
     .execute(&state.db_pool)
     .await;
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/clients", "message", "Client deactivated (safe delete)")
+        Ok(_) => redirect_with(&return_path, "message", "Client deactivated (safe delete)")
             .into_response(),
-        Err(e) => redirect_with("/admin/ui/clients", "error", &format!("Deactivate failed: {e}"))
-            .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Deactivate failed: {e}")).into_response()
+        }
     }
 }
 
-async fn client_claims_page(
+async fn clients_restore(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path =
+        q_return_path_from_referer(&headers, "/admin/ui/clients", "/admin/ui/clients");
+
+    let result = sqlx::query(
+        r#"UPDATE oauth_clients
+           SET deleted_at = NULL, updated_at = NOW()
+           WHERE id = $1 AND deleted_at IS NOT NULL"#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "Client restored").into_response()
+        }
+        Ok(_) => redirect_with(&return_path, "error", "Client not found in deleted clients")
+            .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Restore failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn claims_page(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
     Query(query): Query<PageQuery>,
@@ -4291,8 +7803,11 @@ async fn client_claims_page(
         return redir.into_response();
     }
 
-    let rows = match sqlx::query_as::<_, ClaimMapRow>(
-        r#"SELECT oc.name AS client_name,
+    let claim_maps = match sqlx::query_as::<_, ClaimMapRow>(
+        r#"SELECT cm.id,
+                  cm.client_id,
+                  cm.group_id,
+                  oc.name AS client_name,
                   g.name AS group_name,
                   cm.claim_name,
                   cm.claim_value,
@@ -4303,58 +7818,147 @@ async fn client_claims_page(
            WHERE cm.deleted_at IS NULL
              AND oc.deleted_at IS NULL
              AND (g.id IS NULL OR g.deleted_at IS NULL)
-           ORDER BY oc.name, cm.claim_name"#,
+           ORDER BY oc.name, g.name NULLS LAST, cm.claim_name"#,
     )
     .fetch_all(&state.db_pool)
     .await
     {
         Ok(v) => v,
         Err(e) => {
-            return redirect_with("/admin/ui/client-claims", "error", &format!("DB error: {e}"))
+            return redirect_with("/admin/ui/claims", "error", &format!("DB error: {e}"))
                 .into_response();
         }
     };
 
-    let mut client_claims: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for row in rows {
-        let claim_value = row
-            .claim_value
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".to_string());
-        client_claims.entry(row.client_name).or_default().push(format!(
-            "{}={} ({}, group={})",
-            row.claim_name,
-            claim_value,
-            row.claim_value_kind,
-            row.group_name.unwrap_or_else(|| "*".to_string())
-        ));
-    }
+    let clients = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, name FROM oauth_clients WHERE deleted_at IS NULL ORDER BY name",
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+    let groups = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT id, name FROM groups WHERE deleted_at IS NULL ORDER BY name",
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
 
-    let rows = client_claims
-        .into_iter()
-        .map(|(client_name, claims)| ClientClaimsRow {
-            client_name,
-            claims: claims.join(" | "),
+    let selected_client_id = query.client_id.or_else(|| clients.first().map(|c| c.0));
+    let client_rows = clients
+        .iter()
+        .map(|(id, name)| ClientClaimsRow {
+            id: *id,
+            name: name.clone(),
+            selected: Some(*id) == selected_client_id,
+            claims_count: claim_maps.iter().filter(|m| m.client_id == *id).count(),
+        })
+        .collect::<Vec<_>>();
+    let selected_client = client_rows.iter().find(|r| r.selected).cloned();
+    let selected_client_claim_maps = claim_maps
+        .iter()
+        .filter(|m| Some(m.client_id) == selected_client_id)
+        .cloned()
+        .enumerate()
+        .map(|(idx, row)| ClientClaimMapView {
+            ordinal: idx + 1,
+            row,
         })
         .collect::<Vec<_>>();
 
-    let clients = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM oauth_clients WHERE deleted_at IS NULL ORDER BY name")
-        .fetch_all(&state.db_pool)
-        .await
-        .unwrap_or_default();
-    let groups = sqlx::query_as::<_, (Uuid, String)>("SELECT id, name FROM groups WHERE deleted_at IS NULL ORDER BY name")
-        .fetch_all(&state.db_pool)
-        .await
-        .unwrap_or_default();
+    let selected_group_id = query.group_id.or_else(|| groups.first().map(|g| g.0));
+    let group_rows = groups
+        .iter()
+        .map(|(id, name)| GroupClaimsRow {
+            id: Some(*id),
+            name: name.clone(),
+            selected: Some(*id) == selected_group_id,
+            claims_count: claim_maps
+                .iter()
+                .filter(|m| m.group_id == Some(*id))
+                .count(),
+        })
+        .collect::<Vec<_>>();
+    let selected_group = group_rows.iter().find(|r| r.selected).cloned();
+    let selected_group_claim_maps = claim_maps
+        .into_iter()
+        .filter(|m| m.group_id == selected_group_id)
+        .enumerate()
+        .map(|(idx, row)| GroupClaimMapView {
+            ordinal: idx + 1,
+            row,
+        })
+        .collect::<Vec<_>>();
 
-    render_template(ClientClaimsTemplate {
-        sections: nav_items(AdminSection::ClientClaims),
+    let deleted_claim_maps = sqlx::query_as::<_, ClaimMapRow>(
+        r#"
+        SELECT cm.id,
+               cm.client_id,
+               cm.group_id,
+               oc.name AS client_name,
+               g.name AS group_name,
+               cm.claim_name,
+               cm.claim_value,
+               cm.claim_value_kind
+        FROM claim_maps cm
+        JOIN oauth_clients oc ON oc.id = cm.client_id
+        LEFT JOIN groups g ON g.id = cm.group_id
+        WHERE cm.deleted_at IS NOT NULL
+          AND oc.deleted_at IS NULL
+          AND (g.id IS NULL OR g.deleted_at IS NULL)
+        ORDER BY cm.deleted_at DESC
+        LIMIT 50
+        "#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    let claim_map_ids = selected_client_claim_maps
+        .iter()
+        .map(|m| m.row.id)
+        .chain(selected_group_claim_maps.iter().map(|m| m.row.id))
+        .collect::<Vec<_>>();
+    let claim_patterns = if claim_map_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as::<_, ClaimMapPatternRow>(
+            r#"
+            SELECT id, claim_map_id, pattern, is_include, priority
+            FROM claim_map_patterns
+            WHERE claim_map_id = ANY($1::uuid[])
+              AND deleted_at IS NULL
+            ORDER BY priority ASC, pattern ASC
+            "#,
+        )
+        .bind(&claim_map_ids)
+        .fetch_all(&state.db_pool)
+        .await
+        .unwrap_or_default()
+    };
+
+    render_template(ClaimsTemplate {
+        sections: nav_items(AdminSection::Claims),
         message: query.message,
         error: query.error,
-        rows,
-        clients,
+        client_rows,
         groups,
+        selected_client,
+        selected_client_claim_maps,
+        group_rows,
+        clients,
+        selected_group,
+        selected_group_claim_maps,
+        deleted_claim_maps,
+        claim_patterns,
     })
+}
+
+async fn client_claims_redirect() -> impl IntoResponse {
+    Redirect::to("/admin/ui/claims#by-client")
+}
+
+async fn group_claims_redirect() -> impl IntoResponse {
+    Redirect::to("/admin/ui/claims#by-group")
 }
 
 async fn client_claims_create(
@@ -4368,7 +7972,15 @@ async fn client_claims_create(
 
     let client_id = match Uuid::parse_str(form.client_id.trim()) {
         Ok(v) => v,
-        Err(_) => return redirect_with("/admin/ui/client-claims", "error", "Invalid client_id").into_response(),
+        Err(_) => {
+            let return_path = scoped_return_path_from_referer(
+                &headers,
+                "/admin/ui/claims",
+                "/admin/ui/claims",
+                &["client_id", "group_id"],
+            );
+            return redirect_with(&return_path, "error", "Invalid client_id").into_response();
+        }
     };
 
     let group_id = form
@@ -4384,6 +7996,25 @@ async fn client_claims_create(
         serde_json::json!(form.claim_value.trim())
     };
 
+    let return_path = if headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("/admin/ui/claims"))
+    {
+        scoped_return_path_from_referer(
+            &headers,
+            "/admin/ui/claims",
+            "/admin/ui/claims",
+            &["client_id", "group_id"],
+        )
+    } else {
+        scoped_return_path_from_referer(
+            &headers,
+            "/admin/ui/client-claims",
+            "/admin/ui/client-claims",
+            &["client_id"],
+        )
+    };
     let result = sqlx::query(
         r#"INSERT INTO claim_maps (tenant_id, client_id, group_id, claim_name, claim_value, claim_value_kind)
            VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5::claim_value_kind)"#,
@@ -4397,70 +8028,295 @@ async fn client_claims_create(
     .await;
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/client-claims", "message", "Claim map created").into_response(),
-        Err(e) => redirect_with("/admin/ui/client-claims", "error", &format!("Create failed: {e}"))
-            .into_response(),
+        Ok(_) => redirect_with(&return_path, "message", "Claim rule created").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Create failed: {e}")).into_response()
+        }
     }
 }
 
-async fn group_claims_page(
+async fn claim_maps_update(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
-    Query(query): Query<PageQuery>,
+    Path(id): Path<Uuid>,
+    Form(form): Form<ClaimMapUpdateForm>,
 ) -> Response {
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
 
-    let rows = match sqlx::query_as::<_, ClaimMapRow>(
-        r#"SELECT oc.name AS client_name,
-                  g.name AS group_name,
-                  cm.claim_name,
-                  cm.claim_value,
-                  cm.claim_value_kind
-           FROM claim_maps cm
-           JOIN oauth_clients oc ON oc.id = cm.client_id
-           LEFT JOIN groups g ON g.id = cm.group_id
-           WHERE cm.deleted_at IS NULL
-             AND oc.deleted_at IS NULL
-             AND (g.id IS NULL OR g.deleted_at IS NULL)
-           ORDER BY g.name NULLS LAST, oc.name, cm.claim_name"#,
-    )
-    .fetch_all(&state.db_pool)
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            return redirect_with("/admin/ui/group-claims", "error", &format!("DB error: {e}"))
-                .into_response();
-        }
+    let referer = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (prefix, fallback, keys): (&str, &str, &[&str]) = if referer.contains("/admin/ui/claims") {
+        (
+            "/admin/ui/claims",
+            "/admin/ui/claims",
+            &["client_id", "group_id"],
+        )
+    } else if referer.contains("/admin/ui/group-claims") {
+        (
+            "/admin/ui/group-claims",
+            "/admin/ui/group-claims",
+            &["group_id"],
+        )
+    } else {
+        (
+            "/admin/ui/client-claims",
+            "/admin/ui/client-claims",
+            &["client_id"],
+        )
+    };
+    let return_path = scoped_return_path_from_referer(&headers, prefix, fallback, keys);
+    let claim_value_json = if form.claim_value_kind == "array" {
+        serde_json::json!(split_csv(&form.claim_value))
+    } else {
+        serde_json::json!(form.claim_value.trim())
     };
 
-    let mut grouped: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for row in rows {
-        let g = row.group_name.unwrap_or_else(|| "*".to_string());
-        let claim_value = row
-            .claim_value
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "null".to_string());
-        grouped.entry(g).or_default().push(format!(
-            "{}: {}={} ({})",
-            row.client_name, row.claim_name, claim_value, row.claim_value_kind
-        ));
+    let result = sqlx::query(
+        r#"
+        UPDATE claim_maps
+        SET claim_name = $2,
+            claim_value = $3,
+            claim_value_kind = $4::claim_value_kind,
+            updated_at = NOW()
+        WHERE id = $1
+          AND deleted_at IS NULL
+        "#,
+    )
+    .bind(id)
+    .bind(form.claim_name.trim())
+    .bind(claim_value_json)
+    .bind(form.claim_value_kind.trim())
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(_) => redirect_with(&return_path, "message", "Claim rule updated").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Update failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn claim_maps_deactivate(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
     }
 
-    let rows = grouped
-        .into_iter()
-        .map(|(group_name, claims)| GroupClaimsRow {
-            group_name,
-            claims: claims.join(" | "),
-        })
-        .collect::<Vec<_>>();
+    let referer = headers
+        .get(header::REFERER)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let (prefix, fallback, keys): (&str, &str, &[&str]) = if referer.contains("/admin/ui/claims") {
+        (
+            "/admin/ui/claims",
+            "/admin/ui/claims",
+            &["client_id", "group_id"],
+        )
+    } else if referer.contains("/admin/ui/group-claims") {
+        (
+            "/admin/ui/group-claims",
+            "/admin/ui/group-claims",
+            &["group_id"],
+        )
+    } else {
+        (
+            "/admin/ui/client-claims",
+            "/admin/ui/client-claims",
+            &["client_id"],
+        )
+    };
+    let return_path = scoped_return_path_from_referer(&headers, prefix, fallback, keys);
+    let result = sqlx::query(
+        r#"UPDATE claim_maps SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1 AND deleted_at IS NULL"#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
 
-    render_template(GroupClaimsTemplate {
-        sections: nav_items(AdminSection::GroupClaims),
-        message: query.message,
-        error: query.error,
-        rows,
-    })
+    match result {
+        Ok(_) => redirect_with(&return_path, "message", "Claim rule deactivated").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Deactivate failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn claim_maps_restore(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let return_path = scoped_return_path_from_referer(
+        &headers,
+        "/admin/ui/claims",
+        "/admin/ui/claims",
+        &["client_id", "group_id"],
+    );
+    let result = sqlx::query(
+        r#"
+        UPDATE claim_maps
+        SET deleted_at = NULL, updated_at = NOW()
+        WHERE id = $1 AND deleted_at IS NOT NULL
+        "#,
+    )
+    .bind(id)
+    .execute(&state.db_pool)
+    .await;
+
+    match result {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "Claim rule restored").into_response()
+        }
+        Ok(_) => redirect_with(
+            &return_path,
+            "error",
+            "Claim rule not found in deleted rules",
+        )
+        .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Restore failed: {e}")).into_response()
+        }
+    }
+}
+
+async fn claim_patterns_create(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(claim_map_id): Path<Uuid>,
+    Form(form): Form<PatternCreateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = scoped_return_path_from_referer(
+        &headers,
+        "/admin/ui/claims",
+        "/admin/ui/claims",
+        &["client_id", "group_id"],
+    );
+    if form.pattern.trim().is_empty() {
+        return redirect_with(&return_path, "error", "Pattern is required").into_response();
+    }
+
+    match sqlx::query(
+        r#"
+        INSERT INTO claim_map_patterns (tenant_id, claim_map_id, pattern, is_include, priority)
+        VALUES ($1, $2, $3, $4, $5)
+        "#,
+    )
+    .bind(default_tenant_id())
+    .bind(claim_map_id)
+    .bind(form.pattern.trim())
+    .bind(pattern_mode_to_bool(&form.mode))
+    .bind(pattern_priority(form.priority))
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(_) => redirect_with(&return_path, "message", "Claim pattern created").into_response(),
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Pattern create failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+async fn claim_patterns_update(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path((claim_map_id, pattern_id)): Path<(Uuid, Uuid)>,
+    Form(form): Form<PatternUpdateForm>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = scoped_return_path_from_referer(
+        &headers,
+        "/admin/ui/claims",
+        "/admin/ui/claims",
+        &["client_id", "group_id"],
+    );
+    if form.pattern.trim().is_empty() {
+        return redirect_with(&return_path, "error", "Pattern is required").into_response();
+    }
+
+    match sqlx::query(
+        r#"
+        UPDATE claim_map_patterns
+        SET pattern = $3, is_include = $4, priority = $5
+        WHERE id = $1 AND claim_map_id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(pattern_id)
+    .bind(claim_map_id)
+    .bind(form.pattern.trim())
+    .bind(pattern_mode_to_bool(&form.mode))
+    .bind(pattern_priority(form.priority))
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "Claim pattern updated").into_response()
+        }
+        Ok(_) => redirect_with(&return_path, "error", "Claim pattern not found").into_response(),
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Pattern update failed: {e}"),
+        )
+        .into_response(),
+    }
+}
+
+async fn claim_patterns_deactivate(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path((claim_map_id, pattern_id)): Path<(Uuid, Uuid)>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+    let return_path = scoped_return_path_from_referer(
+        &headers,
+        "/admin/ui/claims",
+        "/admin/ui/claims",
+        &["client_id", "group_id"],
+    );
+
+    match sqlx::query(
+        r#"
+        UPDATE claim_map_patterns
+        SET deleted_at = NOW()
+        WHERE id = $1 AND claim_map_id = $2 AND deleted_at IS NULL
+        "#,
+    )
+    .bind(pattern_id)
+    .bind(claim_map_id)
+    .execute(&state.db_pool)
+    .await
+    {
+        Ok(done) if done.rows_affected() > 0 => {
+            redirect_with(&return_path, "message", "Claim pattern deleted").into_response()
+        }
+        Ok(_) => redirect_with(&return_path, "error", "Claim pattern not found").into_response(),
+        Err(e) => redirect_with(
+            &return_path,
+            "error",
+            &format!("Pattern delete failed: {e}"),
+        )
+        .into_response(),
+    }
 }

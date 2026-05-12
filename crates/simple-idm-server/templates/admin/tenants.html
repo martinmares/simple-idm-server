@@ -1,0 +1,286 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card">
+      <div class="card-header d-flex align-items-center justify-content-between">
+        <div>
+          <h3 class="card-title mb-0">Tenants / domains</h3>
+          <div class="text-secondary small mt-1">Single-default tenant model with managed email domain allowlist.</div>
+        </div>
+        {% if tenants.len() > 0 %}
+        <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-domain-modal">
+          <i class="ti ti-plus me-1"></i>Add domain
+        </button>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-5">
+    <div class="card h-100">
+      <div class="card-header">
+        <h3 class="card-title mb-0">Tenants</h3>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-vcenter card-table">
+          <thead>
+            <tr>
+              <th>Tenant</th>
+              <th>Mode</th>
+              <th>Status</th>
+              <th class="text-end">Objects</th>
+              <th class="w-1">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for t in tenants %}
+            <tr>
+              <td>
+                <div class="fw-semibold">{{ t.name }}</div>
+                <div class="text-secondary small"><code>{{ t.slug }}</code></div>
+              </td>
+              <td><span class="badge bg-blue-lt">{{ t.mode }}</span></td>
+              <td>
+                {% if t.is_active %}
+                <span class="badge bg-green-lt">active</span>
+                {% else %}
+                <span class="badge bg-red-lt">inactive</span>
+                {% endif %}
+              </td>
+              <td class="text-end text-secondary small">
+                <div>{{ t.users_count }} users</div>
+                <div>{{ t.groups_count }} groups</div>
+                <div>{{ t.clients_count }} clients</div>
+                <div>{{ t.domains_count }} domains</div>
+              </td>
+              <td>
+                <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#edit-tenant-{{ t.id }}">
+                  Edit
+                </button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-7">
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title mb-0">Managed domains</h3>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-vcenter card-table">
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>Tenant</th>
+              <th>Status</th>
+              <th class="w-1">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for d in domains %}
+            <tr>
+              <td>
+                <div class="d-flex align-items-center gap-2">
+                  <code>{{ d.domain }}</code>
+                  {% if d.is_primary %}
+                  <span class="badge bg-azure-lt">primary</span>
+                  {% endif %}
+                </div>
+              </td>
+              <td>
+                <div class="fw-semibold">{{ d.tenant_name }}</div>
+                <div class="text-secondary small"><code>{{ d.tenant_slug }}</code></div>
+              </td>
+              <td>
+                {% if d.is_active %}
+                <span class="badge bg-green-lt">active</span>
+                {% else %}
+                <span class="badge bg-red-lt">inactive</span>
+                {% endif %}
+              </td>
+              <td>
+                <div class="btn-list flex-nowrap">
+                  <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#edit-domain-{{ d.id }}">
+                    Edit
+                  </button>
+                  <form method="post" action="/admin/ui/tenant-domains/{{ d.id }}/deactivate" data-confirm="Safe delete domain '{{ d.domain }}'?" data-confirm-action="Safe delete">
+                    <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
+                  </form>
+                </div>
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="4" class="text-secondary">No managed domain configured.</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    {% if deleted_domains.len() > 0 %}
+    <div class="card mt-3">
+      <div class="card-header">
+        <h3 class="card-title mb-0">Recently deleted domains</h3>
+      </div>
+      <div class="table-responsive">
+        <table class="table table-vcenter card-table">
+          <thead>
+            <tr>
+              <th>Domain</th>
+              <th>Tenant</th>
+              <th class="w-1">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for d in deleted_domains %}
+            <tr>
+              <td><code>{{ d.domain }}</code></td>
+              <td>{{ d.tenant_name }}</td>
+              <td>
+                <form method="post" action="/admin/ui/tenant-domains/{{ d.id }}/restore">
+                  <button class="btn btn-sm btn-outline-success" type="submit">Restore</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+</div>
+
+{% for t in tenants %}
+<div class="modal modal-blur fade" id="edit-tenant-{{ t.id }}" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Edit tenant: {{ t.slug }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/tenants/{{ t.id }}/update">
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Slug</label>
+            <input class="form-control" value="{{ t.slug }}" disabled>
+            <div class="form-text">Tenant slug is stable identity and is not edited here.</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Name</label>
+            <input class="form-control" name="name" value="{{ t.name }}" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Mode</label>
+            <select class="form-select" name="mode">
+              <option value="single" {% if t.mode == "single" %}selected{% endif %}>single</option>
+              <option value="multi" {% if t.mode == "multi" %}selected{% endif %}>multi</option>
+            </select>
+            <div class="form-text">Current deployment still uses the default tenant path. This flag documents intended mode.</div>
+          </div>
+          <label class="form-check form-switch">
+            <input class="form-check-input" type="checkbox" name="is_active" {% if t.is_active %}checked{% endif %}>
+            <span class="form-check-label">active</span>
+          </label>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+
+{% if tenants.len() > 0 %}
+<div class="modal modal-blur fade" id="create-domain-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Add managed domain</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/tenant-domains/create">
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Tenant</label>
+            <select class="form-select" name="tenant_id">
+              {% for t in tenants %}
+              <option value="{{ t.id }}">{{ t.name }} ({{ t.slug }})</option>
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Domain</label>
+            <input class="form-control" name="domain" placeholder="datalite.cz" required>
+            <div class="form-text">Use a bare domain. Do not include protocol, slash, or email address.</div>
+          </div>
+          <div class="d-flex gap-4">
+            <label class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="is_primary">
+              <span class="form-check-label">primary</span>
+            </label>
+            <label class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="is_active" checked>
+              <span class="form-check-label">active</span>
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Add domain</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% for d in domains %}
+<div class="modal modal-blur fade" id="edit-domain-{{ d.id }}" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Edit domain: {{ d.domain }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/tenant-domains/{{ d.id }}/update">
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Domain</label>
+            <input class="form-control" name="domain" value="{{ d.domain }}" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Tenant</label>
+            <input class="form-control" value="{{ d.tenant_name }} ({{ d.tenant_slug }})" disabled>
+          </div>
+          <div class="d-flex gap-4">
+            <label class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="is_primary" {% if d.is_primary %}checked{% endif %}>
+              <span class="form-check-label">primary</span>
+            </label>
+            <label class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="is_active" {% if d.is_active %}checked{% endif %}>
+              <span class="form-check-label">active</span>
+            </label>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+{% endblock %}

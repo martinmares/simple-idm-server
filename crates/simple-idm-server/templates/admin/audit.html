@@ -1,0 +1,222 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card mb-3">
+  <div class="card-header">
+    <h3 class="card-title mb-0">Audit log</h3>
+  </div>
+  <div class="card-body">
+    <form method="get" action="/admin/ui/audit" class="row g-2 align-items-end" id="audit-filter-form">
+      <div class="col-md-2">
+        <label class="form-label">Range</label>
+        <select class="form-select" name="range">
+          <option value="1h" {% if filter_range == "1h" %}selected{% endif %}>last hour</option>
+          <option value="24h" {% if filter_range == "24h" %}selected{% endif %}>last 24h</option>
+          <option value="7d" {% if filter_range == "7d" %}selected{% endif %}>last 7 days</option>
+          <option value="30d" {% if filter_range == "30d" %}selected{% endif %}>last 30 days</option>
+          <option value="all" {% if filter_range == "all" %}selected{% endif %}>all</option>
+        </select>
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Action</label>
+        <input class="form-control" name="action" value="{{ filter_action }}" placeholder="login, token, ssh...">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Resource type</label>
+        <input class="form-control" name="resource_type" value="{{ filter_resource_type }}" placeholder="user, client...">
+      </div>
+      <div class="col-md-2">
+        <label class="form-label">Outcome</label>
+        <select class="form-select" name="outcome">
+          <option value="" {% if filter_outcome == "" %}selected{% endif %}>all</option>
+          <option value="success" {% if filter_outcome == "success" %}selected{% endif %}>success</option>
+          <option value="failure" {% if filter_outcome == "failure" %}selected{% endif %}>failure</option>
+        </select>
+      </div>
+      <div class="col-md-3">
+        <label class="form-label">Text</label>
+        <input class="form-control" name="q" value="{{ filter_q }}" placeholder="actor, client, details">
+      </div>
+      <div class="col-md-1">
+        <button class="btn btn-primary w-100" type="submit">Filter</button>
+      </div>
+      <div class="col-12">
+        <button class="btn btn-outline-secondary btn-sm" type="button" id="audit-filter-reset">Reset filters</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Action</th>
+          <th>Resource</th>
+          <th>Outcome</th>
+          <th>Actor</th>
+          <th>Details</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td class="text-nowrap">{{ r.created_at }}</td>
+          <td><code>{{ r.action }}</code></td>
+          <td>
+            <div>{{ r.resource_type }}</div>
+            {% if let Some(resource_id) = r.resource_id %}
+            <div class="small text-secondary"><code>{{ resource_id }}</code></div>
+            {% endif %}
+          </td>
+          <td>
+            <span class="badge {% if r.outcome == "success" %}bg-green-lt{% else %}bg-red-lt{% endif %}">
+              {{ r.outcome }}
+            </span>
+          </td>
+          <td>
+            {% if let Some(actor_sub) = r.actor_sub %}
+            <div class="small"><code>{{ actor_sub }}</code></div>
+            {% endif %}
+            {% if let Some(actor_client_id) = r.actor_client_id %}
+            <div class="small text-secondary">client: <code>{{ actor_client_id }}</code></div>
+            {% endif %}
+            {% if !r.has_actor() %}
+            <span class="text-secondary">-</span>
+            {% endif %}
+          </td>
+          <td class="text-nowrap">
+            <button
+              class="btn btn-outline-secondary btn-sm"
+              type="button"
+              data-bs-toggle="modal"
+              data-bs-target="#audit-details-{{ loop.index }}"
+            >
+              Details
+            </button>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if rows.len() == 0 %}
+        <tr>
+          <td colspan="6" class="text-secondary">
+            No audit events found. Try widening the time range or resetting filters.
+          </td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% for r in rows %}
+<div class="modal modal-blur fade" id="audit-details-{{ loop.index }}" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <div>
+          <h5 class="modal-title">{{ r.action }}</h5>
+          <div class="text-secondary small">{{ r.created_at }} · {{ r.resource_type }} · {{ r.outcome }}</div>
+        </div>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <dl class="row mb-3">
+          <dt class="col-sm-3">Resource ID</dt>
+          <dd class="col-sm-9">
+            {% if let Some(resource_id) = r.resource_id %}
+            <code>{{ resource_id }}</code>
+            {% else %}
+            <span class="text-secondary">-</span>
+            {% endif %}
+          </dd>
+          <dt class="col-sm-3">Actor</dt>
+          <dd class="col-sm-9">
+            {% if let Some(actor_sub) = r.actor_sub %}
+            <div><code>{{ actor_sub }}</code></div>
+            {% endif %}
+            {% if let Some(actor_client_id) = r.actor_client_id %}
+            <div class="text-secondary">client: <code>{{ actor_client_id }}</code></div>
+            {% endif %}
+            {% if !r.has_actor() %}
+            <span class="text-secondary">-</span>
+            {% endif %}
+          </dd>
+        </dl>
+        <label class="form-label">Details JSON</label>
+        <pre class="border rounded p-3 mb-0 text-secondary bg-dark-lt"><code>{{ r.details_display() }}</code></pre>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endfor %}
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  const form = document.getElementById('audit-filter-form');
+  const reset = document.getElementById('audit-filter-reset');
+  const cookieName = 'sidm_audit_filters';
+  const filterKeys = ['range', 'action', 'resource_type', 'outcome', 'q'];
+
+  function setCookie(name, value, days) {
+    const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
+    document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
+  }
+
+  function getCookie(name) {
+    const raw = document.cookie.split('; ').find((row) => row.startsWith(`${name}=`));
+    if (!raw) return null;
+    return decodeURIComponent(raw.substring(name.length + 1));
+  }
+
+  function clearCookie(name) {
+    document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`;
+  }
+
+  function currentParams() {
+    const params = new URLSearchParams();
+    filterKeys.forEach((key) => {
+      const field = form?.elements[key];
+      if (!field) return;
+      const value = (field.value || '').trim();
+      if (value) params.set(key, value);
+    });
+    return params;
+  }
+
+  if (!form) return;
+
+  const urlParams = new URLSearchParams(window.location.search);
+  const hasFilterState = filterKeys.some((key) => urlParams.has(key));
+  if (!hasFilterState) {
+    const saved = getCookie(cookieName);
+    if (saved) {
+      const savedParams = new URLSearchParams(saved);
+      const hasSaved = filterKeys.some((key) => savedParams.has(key));
+      if (hasSaved) {
+        window.location.replace(`/admin/ui/audit?${savedParams.toString()}`);
+        return;
+      }
+    }
+  }
+
+  form.addEventListener('submit', () => {
+    setCookie(cookieName, currentParams().toString(), 14);
+  });
+
+  form.querySelectorAll('input, select').forEach((field) => {
+    field.addEventListener('change', () => {
+      setCookie(cookieName, currentParams().toString(), 14);
+    });
+  });
+
+  reset?.addEventListener('click', () => {
+    clearCookie(cookieName);
+    window.location.href = '/admin/ui/audit?range=all';
+  });
+});
+</script>
+{% endblock %}

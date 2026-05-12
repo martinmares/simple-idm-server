@@ -1,0 +1,483 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card mb-3">
+  <div class="card-header d-flex align-items-center justify-content-between">
+    <div>
+      <h3 class="card-title mb-0">Identity providers</h3>
+      <div class="text-secondary small mt-1">Configure upstream OIDC providers for federated login and invitation-based linking.</div>
+    </div>
+    <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-idp-modal">
+      <i class="ti ti-plus me-1"></i>Create provider
+    </button>
+  </div>
+  <div class="card-body border-top">
+    <form method="get" action="/admin/ui/identity-providers" class="row g-2 align-items-end">
+      <div class="col-md-8">
+        <label class="form-label">Filter</label>
+        <input class="form-control" name="q" value="{{ filter_q }}" placeholder="slug, type, issuer, client, AD host, domain..." autocomplete="off">
+        <div class="form-text">Use multiple words in any order, for example <code>google datalite</code>.</div>
+      </div>
+      <div class="col-md-4">
+        <div class="btn-list">
+          <button class="btn btn-primary" type="submit">Apply</button>
+          <a class="btn btn-outline-secondary" href="/admin/ui/identity-providers">Reset filters</a>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Issuer</th>
+          <th>Client</th>
+          <th>Scopes</th>
+          <th>Status</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>
+            <div class="fw-semibold">{{ r.slug }}</div>
+            <div class="text-secondary small">{{ r.provider_type }}</div>
+            {% if let Some(domain) = r.hd_domain %}
+            <div class="text-secondary small mt-1">domain: <code>{{ domain }}</code></div>
+            {% endif %}
+            {% if r.provider_type == "ad_ldap" %}
+            <div class="text-secondary small mt-1">domains: <code>{{ r.ad_domains_csv() }}</code></div>
+            {% endif %}
+          </td>
+          <td>
+            {% if r.provider_type == "ad_ldap" %}
+            <div class="text-wrap">
+              {% if let Some(host) = r.ad_host %}{{ host }}{% endif %}:{% if let Some(port) = r.ad_port %}{{ port }}{% endif %}
+            </div>
+            {% else %}
+            <div class="text-wrap">{{ r.issuer }}</div>
+            {% endif %}
+            {% if let Some(auth_url) = r.auth_url %}
+            <div class="text-secondary small mt-1">auth: {{ auth_url }}</div>
+            {% endif %}
+            {% if let Some(token_url) = r.token_url %}
+            <div class="text-secondary small">token: {{ token_url }}</div>
+            {% endif %}
+            {% if let Some(jwks_url) = r.jwks_url %}
+            <div class="text-secondary small">jwks: {{ jwks_url }}</div>
+            {% endif %}
+          </td>
+          <td>
+            {% if r.provider_type == "ad_ldap" %}
+            <div><code>{% if let Some(bind_dn) = r.ad_bind_dn %}{{ bind_dn }}{% endif %}</code></div>
+            <div class="text-secondary small mt-1">bind password stored encrypted</div>
+            {% else %}
+            <div><code>{{ r.client_id }}</code></div>
+            <div class="text-secondary small mt-1">secret stored encrypted</div>
+            {% endif %}
+          </td>
+          <td>
+            {% if r.provider_type == "ad_ldap" %}
+            <div class="text-secondary small">role sync: {% if let Some(enabled) = r.ad_role_sync_enabled %}{% if enabled %}enabled{% else %}disabled{% endif %}{% endif %}</div>
+            {% else %}
+            <div class="text-secondary small">{{ r.scopes_csv() }}</div>
+            {% endif %}
+          </td>
+          <td>
+            {% if r.is_active %}
+            <span class="badge bg-green-lt">active</span>
+            {% else %}
+            <span class="badge bg-red-lt">inactive</span>
+            {% endif %}
+          </td>
+          <td>
+            <div class="btn-list">
+              <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#edit-idp-{{ r.id }}">
+                Edit
+              </button>
+              <form method="post" action="/admin/ui/identity-providers/{{ r.id }}/deactivate" data-confirm="Safe delete identity provider '{{ r.slug }}'?" data-confirm-action="Safe delete">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+        {% if rows.len() == 0 %}
+        <tr>
+          <td colspan="6">
+            <div class="empty py-4">
+              <div class="empty-icon"><i class="ti ti-search"></i></div>
+              <p class="empty-title">No identity providers found</p>
+              <p class="empty-subtitle text-secondary">Adjust or reset the filter.</p>
+            </div>
+          </td>
+        </tr>
+        {% endif %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+{% if deleted_rows.len() > 0 %}
+<div class="card mt-3">
+  <div class="card-header">
+    <h3 class="card-title mb-0">Recently deleted identity providers</h3>
+  </div>
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table">
+      <thead>
+        <tr>
+          <th>Provider</th>
+          <th>Type</th>
+          <th>Issuer / Host</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in deleted_rows %}
+        <tr>
+          <td><code>{{ r.slug }}</code></td>
+          <td><span class="badge bg-secondary-lt">{{ r.provider_type }}</span></td>
+          <td>
+            {% if r.provider_type == "ad_ldap" %}
+            {% if let Some(host) = r.ad_host %}{{ host }}{% endif %}:{% if let Some(port) = r.ad_port %}{{ port }}{% endif %}
+            {% else %}
+            {{ r.issuer }}
+            {% endif %}
+          </td>
+          <td>
+            <form method="post" action="/admin/ui/identity-providers/{{ r.id }}/restore">
+              <button class="btn btn-sm btn-outline-success" type="submit">Restore</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="modal modal-blur fade" id="create-idp-modal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Create identity provider</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/identity-providers/create" autocomplete="off">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label">Slug</label>
+              <input class="form-control" name="slug" placeholder="google" required>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Provider type</label>
+              <select class="form-select idp-provider-type" name="provider_type">
+                <option value="google" selected>google</option>
+                <option value="oidc">oidc</option>
+                <option value="ad_ldap">ad_ldap</option>
+              </select>
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <label class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="is_active" checked>
+                <span class="form-check-label">active</span>
+              </label>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Issuer</label>
+              <input class="form-control idp-oidc-field" name="issuer" placeholder="https://accounts.google.com" required>
+              <div class="form-text">Google issuer is <code>https://accounts.google.com</code>.</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Hosted domain</label>
+              <input class="form-control" name="hd_domain" placeholder="datalite.cz">
+              <div class="form-text">Optional Google Workspace hint/filter. Leave empty for normal Gmail accounts.</div>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Client ID</label>
+              <input class="form-control idp-oidc-field" name="client_id" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Client secret</label>
+              <input class="form-control idp-oidc-field" name="client_secret" type="password" autocomplete="new-password" required>
+            </div>
+            <div class="col-md-12">
+              <label class="form-label">Scopes</label>
+              <div class="form-selectgroup">
+                <label class="form-selectgroup-item">
+                  <input type="checkbox" name="scope_openid" value="on" class="form-selectgroup-input" checked>
+                  <span class="form-selectgroup-label">openid</span>
+                </label>
+                <label class="form-selectgroup-item">
+                  <input type="checkbox" name="scope_profile" value="on" class="form-selectgroup-input" checked>
+                  <span class="form-selectgroup-label">profile</span>
+                </label>
+                <label class="form-selectgroup-item">
+                  <input type="checkbox" name="scope_email" value="on" class="form-selectgroup-input" checked>
+                  <span class="form-selectgroup-label">email</span>
+                </label>
+              </div>
+              <div class="form-text"><code>openid</code> is required for OIDC and will be kept even if unchecked.</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Authorization URL</label>
+              <input class="form-control" name="auth_url" placeholder="https://accounts.google.com/o/oauth2/v2/auth">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Token URL</label>
+              <input class="form-control" name="token_url" placeholder="https://oauth2.googleapis.com/token">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">JWKS URL</label>
+              <input class="form-control" name="jwks_url" placeholder="https://www.googleapis.com/oauth2/v3/certs">
+            </div>
+            <div class="col-12 idp-ad-section"><hr><div class="text-secondary small">AD/LDAP settings are used only when provider type is <code>ad_ldap</code>.</div></div>
+            <div class="col-md-4 idp-ad-section">
+              <label class="form-label">AD host</label>
+              <input class="form-control idp-ad-required" name="ad_host" placeholder="ad.example.com">
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">Port</label>
+              <input class="form-control" name="ad_port" type="number" value="636">
+            </div>
+            <div class="col-md-6 idp-ad-section">
+              <label class="form-label">Base DN</label>
+              <input class="form-control idp-ad-required" name="ad_base_dn" placeholder="DC=AD,DC=EXAMPLE">
+            </div>
+            <div class="col-md-8 idp-ad-section">
+              <label class="form-label">User filter</label>
+              <input class="form-control" name="ad_user_filter" value="(|(mail={login})(sAMAccountName={login})(userPrincipalName={login}))">
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">TLS mode</label>
+              <select class="form-select" name="ad_tls_mode">
+                <option value="ldaps" selected>ldaps</option>
+                <option value="starttls">starttls</option>
+              </select>
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">Timeout</label>
+              <input class="form-control" name="ad_timeout_seconds" type="number" value="5">
+            </div>
+            <div class="col-md-6 idp-ad-section">
+              <label class="form-label">Domains</label>
+              <input class="form-control" name="ad_domains" placeholder="datalite.cz, cetin.cz">
+            </div>
+            <div class="col-md-6 idp-ad-section">
+              <label class="form-label">Bind DN / login</label>
+              <input class="form-control" name="ad_bind_dn" autocomplete="off">
+            </div>
+            <div class="col-md-6 idp-ad-section">
+              <label class="form-label">Bind password</label>
+              <input class="form-control" name="ad_bind_password" type="password" autocomplete="new-password">
+            </div>
+            <div class="col-md-2 d-flex align-items-end idp-ad-section">
+              <label class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="ad_allow_insecure">
+                <span class="form-check-label">insecure TLS</span>
+              </label>
+            </div>
+            <div class="col-md-2 d-flex align-items-end idp-ad-section">
+              <label class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="ad_role_sync_enabled" checked>
+                <span class="form-check-label">role sync</span>
+              </label>
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">Role TTL</label>
+              <input class="form-control" name="ad_role_sync_ttl_seconds" type="number" value="3600">
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">Role timeout</label>
+              <input class="form-control" name="ad_role_sync_timeout_seconds" type="number" value="5">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Create provider</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% for r in rows %}
+<div class="modal modal-blur fade" id="edit-idp-{{ r.id }}" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Edit provider: {{ r.slug }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <form method="post" action="/admin/ui/identity-providers/{{ r.id }}/update" autocomplete="off">
+        <div class="modal-body">
+          <div class="row g-3">
+            <div class="col-md-4">
+              <label class="form-label">Slug</label>
+              <input class="form-control" name="slug" value="{{ r.slug }}" required>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Provider type</label>
+              <select class="form-select idp-provider-type" name="provider_type">
+                <option value="google" {% if r.provider_type == "google" %}selected{% endif %}>google</option>
+                <option value="oidc" {% if r.provider_type == "oidc" %}selected{% endif %}>oidc</option>
+                <option value="ad_ldap" {% if r.provider_type == "ad_ldap" %}selected{% endif %}>ad_ldap</option>
+              </select>
+            </div>
+            <div class="col-md-4 d-flex align-items-end">
+              <label class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="is_active" {% if r.is_active %}checked{% endif %}>
+                <span class="form-check-label">active</span>
+              </label>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Issuer</label>
+              <input class="form-control idp-oidc-field" name="issuer" value="{{ r.issuer }}" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Hosted domain</label>
+              <input class="form-control" name="hd_domain" value="{% if let Some(domain) = r.hd_domain %}{{ domain }}{% endif %}">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Client ID</label>
+              <input class="form-control idp-oidc-field" name="client_id" value="{{ r.client_id }}" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Replace client secret</label>
+              <input class="form-control" name="client_secret" type="password" autocomplete="new-password" placeholder="leave empty to keep current secret">
+            </div>
+            <div class="col-md-12">
+              <label class="form-label">Scopes</label>
+              <div class="form-selectgroup">
+                <label class="form-selectgroup-item">
+                  <input type="checkbox" name="scope_openid" value="on" class="form-selectgroup-input" {% if r.has_scope("openid") %}checked{% endif %}>
+                  <span class="form-selectgroup-label">openid</span>
+                </label>
+                <label class="form-selectgroup-item">
+                  <input type="checkbox" name="scope_profile" value="on" class="form-selectgroup-input" {% if r.has_scope("profile") %}checked{% endif %}>
+                  <span class="form-selectgroup-label">profile</span>
+                </label>
+                <label class="form-selectgroup-item">
+                  <input type="checkbox" name="scope_email" value="on" class="form-selectgroup-input" {% if r.has_scope("email") %}checked{% endif %}>
+                  <span class="form-selectgroup-label">email</span>
+                </label>
+              </div>
+              <div class="form-text"><code>openid</code> is required for OIDC and will be kept even if unchecked.</div>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Authorization URL</label>
+              <input class="form-control" name="auth_url" value="{% if let Some(v) = r.auth_url %}{{ v }}{% endif %}">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Token URL</label>
+              <input class="form-control" name="token_url" value="{% if let Some(v) = r.token_url %}{{ v }}{% endif %}">
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">JWKS URL</label>
+              <input class="form-control" name="jwks_url" value="{% if let Some(v) = r.jwks_url %}{{ v }}{% endif %}">
+            </div>
+            <div class="col-12 idp-ad-section"><hr><div class="text-secondary small">AD/LDAP settings are used only when provider type is <code>ad_ldap</code>.</div></div>
+            <div class="col-md-4 idp-ad-section">
+              <label class="form-label">AD host</label>
+              <input class="form-control idp-ad-required" name="ad_host" value="{% if let Some(v) = r.ad_host %}{{ v }}{% endif %}">
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">Port</label>
+              <input class="form-control" name="ad_port" type="number" value="{% if let Some(v) = r.ad_port %}{{ v }}{% else %}{% if r.provider_type == "ad_ldap" %}636{% endif %}{% endif %}">
+            </div>
+            <div class="col-md-6 idp-ad-section">
+              <label class="form-label">Base DN</label>
+              <input class="form-control idp-ad-required" name="ad_base_dn" value="{% if let Some(v) = r.ad_base_dn %}{{ v }}{% endif %}">
+            </div>
+            <div class="col-md-8 idp-ad-section">
+              <label class="form-label">User filter</label>
+              <input class="form-control" name="ad_user_filter" value="{% if let Some(v) = r.ad_user_filter %}{{ v }}{% else %}{% if r.provider_type == "ad_ldap" %}(|(mail={login})(sAMAccountName={login})(userPrincipalName={login})){% endif %}{% endif %}">
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">TLS mode</label>
+              <select class="form-select" name="ad_tls_mode">
+                <option value="ldaps" {% if r.ad_tls_mode.as_deref() == Some("ldaps") %}selected{% endif %}>ldaps</option>
+                <option value="starttls" {% if r.ad_tls_mode.as_deref() == Some("starttls") %}selected{% endif %}>starttls</option>
+              </select>
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">Timeout</label>
+              <input class="form-control" name="ad_timeout_seconds" type="number" value="{% if let Some(v) = r.ad_timeout_seconds %}{{ v }}{% else %}{% if r.provider_type == "ad_ldap" %}5{% endif %}{% endif %}">
+            </div>
+            <div class="col-md-6 idp-ad-section">
+              <label class="form-label">Domains</label>
+              <input class="form-control" name="ad_domains" value="{{ r.ad_domains_csv() }}">
+            </div>
+            <div class="col-md-6 idp-ad-section">
+              <label class="form-label">Bind DN / login</label>
+              <input class="form-control" name="ad_bind_dn" value="{% if let Some(v) = r.ad_bind_dn %}{{ v }}{% endif %}" autocomplete="off">
+            </div>
+            <div class="col-md-6 idp-ad-section">
+              <label class="form-label">Replace bind password</label>
+              <input class="form-control" name="ad_bind_password" type="password" autocomplete="new-password" placeholder="leave empty to keep current password">
+            </div>
+            <div class="col-md-2 d-flex align-items-end idp-ad-section">
+              <label class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="ad_allow_insecure" {% if r.ad_allow_insecure.unwrap_or(false) %}checked{% endif %}>
+                <span class="form-check-label">insecure TLS</span>
+              </label>
+            </div>
+            <div class="col-md-2 d-flex align-items-end idp-ad-section">
+              <label class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" name="ad_role_sync_enabled" {% if r.ad_role_sync_enabled.unwrap_or(true) %}checked{% endif %}>
+                <span class="form-check-label">role sync</span>
+              </label>
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">Role TTL</label>
+              <input class="form-control" name="ad_role_sync_ttl_seconds" type="number" value="{% if let Some(v) = r.ad_role_sync_ttl_seconds %}{{ v }}{% else %}{% if r.provider_type == "ad_ldap" %}3600{% endif %}{% endif %}">
+            </div>
+            <div class="col-md-2 idp-ad-section">
+              <label class="form-label">Role timeout</label>
+              <input class="form-control" name="ad_role_sync_timeout_seconds" type="number" value="{% if let Some(v) = r.ad_role_sync_timeout_seconds %}{{ v }}{% else %}{% if r.provider_type == "ad_ldap" %}5{% endif %}{% endif %}">
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save changes</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endfor %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+  function syncProviderForm(form) {
+    const type = form.querySelector('.idp-provider-type')?.value || 'google';
+    const isAd = type === 'ad_ldap';
+    form.querySelectorAll('.idp-oidc-field').forEach((el) => {
+      el.required = !isAd;
+    });
+    form.querySelectorAll('.idp-ad-required').forEach((el) => {
+      el.required = isAd;
+    });
+    form.querySelectorAll('.idp-ad-section').forEach((el) => {
+      el.hidden = !isAd;
+      el.querySelectorAll('input, select, textarea').forEach((field) => {
+        field.disabled = !isAd;
+      });
+    });
+  }
+
+  document.querySelectorAll('form[action^="/admin/ui/identity-providers"]').forEach((form) => {
+    syncProviderForm(form);
+    form.querySelector('.idp-provider-type')?.addEventListener('change', () => syncProviderForm(form));
+  });
+});
+</script>
+{% endblock %}
