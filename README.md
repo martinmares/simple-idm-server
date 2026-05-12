@@ -1,715 +1,589 @@
-# Simple IDM Server
+# Simple IDM
 
-A simple OAuth2/OIDC Identity Provider Server written in Rust.
+Simple IDM is a Rust-based OAuth2/OIDC identity stack for small and medium environments that need:
 
-## Features
+- OAuth2/OIDC SSO
+- compact JWT tokens
+- group and claim mapping
+- legacy application SSO through reverse proxy headers
+- SSH certificate login
+- delegated authentication through Google/OIDC or AD/LDAP
+- browser-based and terminal administration
 
-- **Machine-to-Machine (M2M)** - OAuth2 Client Credentials Grant
-- **User-to-Webserver** - OAuth2 Authorization Code Flow with PKCE + HTML Login Form
-- **TV/Device Flow** - OAuth2 Device Authorization Grant (RFC 8628) (experimental)
-- **OAuth2 Authentication Proxy** - Add OIDC to legacy applications (nginx auth_request)
-- **Custom Claim Mapping** - Similar to Kanidm, allows filtering groups/claims per application
-- **Group Patterns** - Automatic group assignment using wildcard patterns (e.g., `ssh:*`)
-- **JWT tokens** - RS256 with asymmetric keys
-- **Refresh tokens** - For long-term sessions
-- **OIDC Discovery** - `/.well-known/openid-configuration`
-- **JWKS Endpoint** - `/.well-known/jwks.json`
-- **Admin API** - Complete REST API for managing users, groups, clients, and claim maps
-- **TUI Client** - Terminal UI for administration (`simple-idm-ctl tui`)
-- **Admin Web UI** - Browser-based admin interface (`/admin/ui/*`)
+The repository is a Cargo workspace with multiple binaries and shared core crates.
+
+## Components
+
+- `simple-idm-server` - OAuth2/OIDC server, Admin API and Admin Web UI
+- `simple-idm-ctl` - CLI and TUI administration client
+- `simple-idm-oauth2-proxy` - OIDC auth proxy for legacy apps and nginx `auth_request`
+- `simple-idm-ssh-login` - SSH certificate login client
+- `simple-idm-ssh-signer` - SSH certificate signer service
+- `simple-idm-core` - shared server/core library
+- `simple-idm-ad-auth` - AD/LDAP password verification and profile/role fetch
+- `simple-idm-ldap-sync` - external role to local group mapping engine
+
+## Main Features
+
+- OAuth2 Authorization Code Flow with PKCE
+- OAuth2 Device Authorization Flow
+- OAuth2 Client Credentials Flow for M2M clients
+- OIDC discovery and JWKS endpoints
+- refresh tokens and SSO sessions
+- local password auth with Argon2 password hashes
+- federated login through upstream Google/OIDC providers
+- AD/LDAP delegated password auth through `ad_ldap` identity providers
+- AD/LDAP role sync and mapping to local groups
+- nested groups and effective group expansion
+- virtual groups and configurable group claim output
+- per-client claim maps and group filtering
+- Admin Web UI based on Tabler
+- CLI for login, session management, and automation
+- soft delete model for admin-managed entities
 
 ## Requirements
 
-- Rust 1.70+
+- Rust stable
 - PostgreSQL 14+
-- OpenSSL (for generating RSA keys)
-- **sqlx-cli** (for database migrations and offline mode)
+- `sqlx-cli`
+- RSA key pair for JWT signing
+- `IDP_SECRETS_MASTER_KEY` if you store identity provider secrets
 
-## Quick Start
-
-### 1. Install Dependencies
+Install `sqlx-cli`:
 
 ```bash
-# PostgreSQL
-# macOS
-brew install postgresql
-
-# Linux (Ubuntu/Debian)
-sudo apt-get install postgresql
-
-# sqlx-cli (for database migrations)
 cargo install sqlx-cli --no-default-features --features postgres
 ```
 
-### 2. Create Database
+## Quick Start
+
+Create database:
 
 ```bash
 createdb simple_idm
 ```
 
-### 3. Generate RSA Keys
+Generate keys:
 
 ```bash
 ./scripts/generate_keys.sh
 ```
 
-### 4. Configure Environment
+Configure:
 
 ```bash
 cp .env.example .env
-# Edit .env as needed
 ```
 
-### 5. Run Server
+Run migrations:
 
 ```bash
-cargo run
+cargo sqlx migrate run
 ```
 
-The server will run on `http://localhost:8080`.
-
----
-
-## ⚠️ IMPORTANT: sqlx Offline Mode
-
-This project uses **sqlx offline mode** to allow compilation without a running PostgreSQL database.
-
-### 🔴 BEFORE PUSHING TO GIT/GITLAB:
-
-**YOU MUST UPDATE SQLX METADATA** if you modified any SQL queries:
+Run server:
 
 ```bash
-# 1. Ensure PostgreSQL is running with the database
-docker-compose up -d
-
-# 2. Run migrations (if any)
-sqlx migrate run
-
-# 3. Generate metadata
-cargo sqlx prepare
-
-# 4. Commit the .sqlx/ directory
-git add .sqlx/
-git commit -m "chore: update sqlx metadata"
+cargo run -p simple-idm-server --bin simple-idm-server
 ```
 
-### Why?
+Default local URL:
 
-- The `.sqlx/` directory contains **pre-generated type information** for all SQL queries
-- CI/CD can build **without a database connection**
-- Compile-time SQL validation is preserved
-- **If you forget this step, CI/CD will fail!**
-
-### Building Locally
-
-```bash
-# With database (normal development)
-cargo build
-
-# Without database (uses offline cache)
-SQLX_OFFLINE=true cargo build
+```text
+http://localhost:8080
 ```
 
----
+Admin Web UI:
+
+```text
+http://localhost:8080/admin/ui
+```
 
 ## Configuration
 
-### Environment Variables
+Important environment variables:
 
-#### JWT Configuration
+```env
+SERVER_HOST=127.0.0.1
+SERVER_PORT=8080
+DATABASE_URL=postgres://postgres:postgres@localhost/simple_idm
 
-- `JWT_ISSUER` - JWT issuer URL (default: `http://localhost:8080`)
-- `JWT_PRIVATE_KEY_PATH` - Path to RSA private key (default: `./keys/private.pem`)
-- `JWT_PUBLIC_KEY_PATH` - Path to RSA public key (default: `./keys/public.pem`)
-- `JWT_KEY_ID` - Key ID (kid) for JWT header and JWKS (default: `default-key-2025`)
-  - Used for key rotation strategy
-  - Must be unique for each key pair
-  - Included in JWT header and JWKS response
-- `ACCESS_TOKEN_EXPIRY_SECONDS` - Access token expiry (default: `3600` = 1 hour)
-- `REFRESH_TOKEN_EXPIRY_SECONDS` - Refresh token expiry (default: `2592000` = 30 days)
+JWT_ISSUER=http://localhost:8080
+JWT_PRIVATE_KEY_PATH=./keys/private.pem
+JWT_PUBLIC_KEY_PATH=./keys/public.pem
+JWT_KEY_ID=default-key-2025
+ACCESS_TOKEN_EXPIRY_SECONDS=3600
+REFRESH_TOKEN_EXPIRY_SECONDS=2592000
 
-#### Rate Limiting
+ADMIN_ROOT_TOKEN=
 
-The server supports per-endpoint rate limiting with different limits for sensitive endpoints.
+AUTH_ALLOW_USERNAME_LOGIN=true
+ALLOWED_EMAIL_DOMAINS=
 
-- `RATE_LIMIT_REQUESTS_PER_SECOND` - Global rate limit (default: `5`)
-- `RATE_LIMIT_BURST_SIZE` - Global burst size (default: `10`)
-- `RATE_LIMIT_TOKEN_ENDPOINT_REQUESTS_PER_SECOND` - Rate limit for `/oauth2/token` endpoint (default: `2`)
-- `RATE_LIMIT_TOKEN_ENDPOINT_BURST_SIZE` - Burst size for `/oauth2/token` endpoint (default: `5`)
+ONBOARDING_TOKEN_TTL_SECONDS=86400
+ONBOARDING_TOKEN_CLEANUP_INTERVAL_SECONDS=3600
+IDP_SECRETS_MASTER_KEY=
 
-The `/oauth2/token` endpoint has stricter rate limiting by default to prevent brute-force attacks.
+UI_BRAND_NAME=Cloud App
+UI_BRAND_DOMAIN=
+UI_PAGE_TITLE=Simple IDM
+```
 
-#### Other Configuration
+`JWT_ISSUER` is important. It is used as the public issuer URL and as the base for generated callback URLs. In production it should be the external HTTPS URL, for example:
 
-- `SERVER_HOST` - Server host (default: `127.0.0.1`)
-- `SERVER_PORT` - Server port (default: `8080`)
-- `DATABASE_URL` - PostgreSQL connection string
-- `ADMIN_ROOT_TOKEN` - Admin API token (optional, for development only)
-- `AUTH_ALLOW_USERNAME_LOGIN` - If `false`, interactive login accepts email only (default: `true`)
-- `ALLOWED_EMAIL_DOMAINS` - Optional comma-separated whitelist of login email domains (default: empty = allow all)
-- `UI_BRAND_NAME` - Company/product name shown on login/reset/error pages (default: `Cloud App`)
-- `UI_BRAND_DOMAIN` - Optional domain/tenant hint for login page subtitle (default: empty)
-- `UI_PAGE_TITLE` - Browser page title used on auth pages (default: `Simple IDM`)
-- `IDP_SECRETS_MASTER_KEY` - Master key for encrypting federated IdP client secrets in DB (`identity_providers.client_secret_encrypted`)
-- `AD_AUTH_ROLE_SYNC_ENABLED` - Enable LDAP role sync after successful AD login (default: `true`)
-- `AD_AUTH_ROLE_SYNC_TTL_SECONDS` - Skip role refresh if cached sync is newer than TTL (default: `3600`)
-- `AD_AUTH_ROLE_SYNC_TIMEOUT_SECONDS` - Timeout for LDAP role sync on login (default: `5`)
-- `AD_ONBOARDING_TOKEN_TTL_SECONDS` - One-time AD onboarding link validity in seconds (default: `86400`)
+```env
+JWT_ISSUER=https://sso.example.com
+```
 
-CLI overrides for branding are also available:
+### Secret Encryption
 
-- `--ui-brand-name`
-- `--ui-brand-domain`
-- `--ui-page-title`
+Identity provider secrets are encrypted in the database:
 
-### Federated IdP Secret Encryption
+- OIDC client secrets
+- Google client secrets
+- AD/LDAP bind passwords
 
-If you use federated login via `identity_providers` (Google/Entra/GitLab OIDC upstream), set:
+Set:
 
-```bash
+```env
 IDP_SECRETS_MASTER_KEY=<base64_32B_key>
 ```
 
-Generate key:
+Generate a key:
 
 ```bash
 openssl rand -base64 32
 ```
 
-Notes:
+Stored values use:
 
-- New/updated identity provider secrets are stored as:
-  `EncSimple[@api=2.0:@box=<base64(nonce||ciphertext||tag)>]`
-- Only `EncSimple[...]` format is accepted.
-- **Do not rotate `IDP_SECRETS_MASTER_KEY` without re-encrypting existing records**, otherwise decryption fails.
-
----
-
-## API Endpoints
-
-### Health Check
-```
-GET /health
+```text
+EncSimple[@api=2.0:@box=<base64(nonce||ciphertext||tag)>]
 ```
 
-### Client Credentials (M2M)
-```
-POST /oauth2/client_credentials/token
-Content-Type: application/json
+Do not rotate `IDP_SECRETS_MASTER_KEY` without re-encrypting existing secrets.
 
-{
-  "grant_type": "client_credentials",
-  "client_id": "your_client_id",
-  "client_secret": "your_client_secret",
-  "scope": "api:read api:write"
-}
-```
+## Callback URLs
 
-### Authorization Code Flow (with HTML Login Form)
+### Simple IDM as OAuth2/OIDC Provider
 
-#### 1. Authorize (shows HTML login form)
-```
-GET /oauth2/authorize?response_type=code&client_id=your_client_id&redirect_uri=https://your-app.com/callback&scope=openid%20profile%20email&state=random_state&code_challenge=challenge&code_challenge_method=S256
+For normal OAuth2 clients, callback URLs are the client `redirect_uris` registered in `Clients`.
+
+Example:
+
+```text
+https://app.example.com/auth/callback
+http://127.0.0.1:55236/callback
 ```
 
-This returns an **HTML login form** where users enter their email or username and password.
+The server validates the `redirect_uri` from `/oauth2/authorize` against the registered client.
 
-#### 2. Login (submitted via HTML form)
+### Federated Onboarding Callback
+
+Used when an admin sends an invitation to link a local Simple IDM user to an upstream identity provider.
+
+Format:
+
+```text
+{JWT_ISSUER}/federated/onboarding/{provider_slug}/callback
 ```
+
+Example:
+
+```text
+https://sso.example.com/federated/onboarding/google/callback
+```
+
+Register this URL in the upstream provider, for example in Google OAuth Client settings.
+
+### Federated Login Callback
+
+Used when Simple IDM delegates a normal interactive login to an upstream OIDC provider.
+
+Format:
+
+```text
+{JWT_ISSUER}/oauth2/federated/{provider_slug}/callback
+```
+
+Example:
+
+```text
+https://sso.example.com/oauth2/federated/google/callback
+```
+
+Register this URL in the upstream provider if the provider is used for normal login, not only onboarding.
+
+### AD/LDAP
+
+AD/LDAP has no OAuth callback URL. It uses direct LDAPS/StartTLS bind from Simple IDM to the configured LDAP server.
+
+AD onboarding page:
+
+```text
+{origin}/ad/onboarding?token=...
+```
+
+This page accepts AD login/password, verifies them through the selected `ad_ldap` provider, fetches profile/roles and stores the synced state.
+
+### Device Flow
+
+Device flow has no callback URL.
+
+Relevant endpoints:
+
+```text
+POST /oauth2/device/authorize
+GET  /device
+POST /oauth2/device/verify
+POST /oauth2/device/token
+```
+
+User verification URL:
+
+```text
+{JWT_ISSUER}/device
+{JWT_ISSUER}/device?user_code=XXXX-XXXX
+```
+
+## Identity Providers
+
+Identity providers are configured in Admin Web UI:
+
+```text
+Admin UI -> Identity providers
+```
+
+Supported provider types:
+
+- `google`
+- `oidc`
+- `ad_ldap`
+
+### Google / OIDC Providers
+
+These providers use OAuth2/OIDC redirect flow.
+
+Typical fields:
+
+- slug
+- issuer
+- client ID
+- client secret
+- scopes
+- optional hosted domain
+- optional explicit authorization/token/JWKS URLs
+
+For Google:
+
+```text
+issuer: https://accounts.google.com
+scopes: openid profile email
+```
+
+Usually leave Authorization URL, Token URL and JWKS URL empty; discovery will resolve them from the issuer.
+
+### AD/LDAP Provider
+
+AD/LDAP is also configured as an identity provider, with:
+
+```text
+provider_type: ad_ldap
+```
+
+Typical fields:
+
+- host
+- port
+- base DN
+- user filter
+- TLS mode: `ldaps` or `starttls`
+- timeout
+- allow insecure TLS for testing
+- bind DN/login
+- bind password
+- accepted domains
+- role sync settings
+
+Example user filter:
+
+```text
+(|(mail={login})(sAMAccountName={login})(userPrincipalName={login}))
+```
+
+The user must have:
+
+```text
+auth_mode = ad
+auth_provider_id = <ad_ldap provider id>
+```
+
+AD/LDAP role sync stores external roles per provider and maps them to local groups through AD role mappings.
+
+## Authentication Modes
+
+Users can use:
+
+- `local` - password hash is stored locally using Argon2
+- `federated` - identity is verified through Google/OIDC provider
+- `ad` - password is verified through a configured AD/LDAP provider
+
+For `federated`, the user is linked by invitation and then approved by an admin. The final binding is based on upstream `issuer + subject`, not just email.
+
+For `ad`, the selected `auth_provider_id` decides which AD/LDAP provider is used for password verification, onboarding and role sync.
+
+## OAuth2 Endpoints
+
+OIDC discovery:
+
+```text
+GET /.well-known/openid-configuration
+GET /.well-known/jwks.json
+```
+
+Authorization Code Flow:
+
+```text
+GET  /oauth2/authorize
 POST /oauth2/login
-Content-Type: application/x-www-form-urlencoded
-
-username=user@example.com&password=password123&client_id=your_client_id&redirect_uri=https://your-app.com/callback&code_challenge=challenge&code_challenge_method=S256&state=random_state
+POST /oauth2/token
 ```
 
-On success, redirects to:
-```
-https://your-app.com/callback?code=AUTHORIZATION_CODE&state=random_state
+Client Credentials:
+
+```text
+POST /oauth2/client_credentials/token
 ```
 
-### Password Reset (Admin-Initiated)
+Device Flow:
 
-1. Create reset link (Admin API):
-```
-POST /admin/users/{id}/password-reset
-Authorization: Bearer <ADMIN_TOKEN>
-```
-
-Response includes a one-time `reset_url` and `reset_token`.
-
-2. User opens reset page:
-```
-GET /password/reset?token=RESET_TOKEN
+```text
+POST /oauth2/device/authorize
+GET  /device
+POST /oauth2/device/verify
+POST /oauth2/device/token
 ```
 
-3. User submits new password (HTML form):
-```
-POST /password/reset
-Content-Type: application/x-www-form-urlencoded
+UserInfo:
 
-token=RESET_TOKEN&password=NewPass123&password_confirm=NewPass123
+```text
+GET /oauth2/userinfo
 ```
+
+Token introspection/revocation:
+
+```text
+POST /oauth2/introspect
+POST /oauth2/revoke
+```
+
+## Admin UI
+
+Admin Web UI:
+
+```text
+/admin/ui
+```
+
+Main sections:
+
+- Dashboard
+- Users
+- Groups
+- Memberships
+- Clients
+- Identity providers
+- Client claims
+- Group claims
+
+The Admin UI uses an admin session cookie. For development, `ADMIN_ROOT_TOKEN` can be used to log in.
 
 ## Admin CLI
 
 Build:
-```bash
-cargo build --bin simple-idm-ctl
-```
-
-### Authentication
-
-First, login using OAuth2 (opens browser):
-```bash
-./target/debug/simple-idm-ctl login --url http://localhost:8080
-```
-
-If the same `client_id` exists in multiple tenants, provide tenant hint:
-```bash
-./target/debug/simple-idm-ctl login --url https://sso.example.com --tenant acme
-```
-
-For headless servers, use device flow:
-```bash
-./target/debug/simple-idm-ctl login --url https://sso.example.com --device --tenant acme
-```
-
-The CLI will:
-1. Open your browser to the OAuth2 authorization page
-2. You login with your credentials (e.g., username: `admin`, password from seed data)
-3. After successful login, the session is saved locally
-4. All subsequent commands use this session automatically
-
-Session management:
-```bash
-# Check session status
-./target/debug/simple-idm-ctl status
-
-# List all saved sessions
-./target/debug/simple-idm-ctl sessions list
-
-# Switch between servers
-./target/debug/simple-idm-ctl sessions use production
-
-# Logout (delete session)
-./target/debug/simple-idm-ctl logout
-```
-
-### Usage Examples
-
-Once logged in, you can use all commands without authentication flags:
 
 ```bash
-# List users
-./target/debug/simple-idm-ctl users list
-
-# Create user
-./target/debug/simple-idm-ctl users create \
-  --username john --email john@example.com --password 'Secret123!'
-
-# Paging & style
-./target/debug/simple-idm-ctl --style sharp users ls --page 1 --limit 10
-
-# Health check
-./target/debug/simple-idm-ctl ping
-
-# Output format (JSON)
-./target/debug/simple-idm-ctl -o json users list
-
-# TUI (Text UI)
-./target/debug/simple-idm-ctl tui
+cargo build -p simple-idm-ctl
 ```
 
-Insecure TLS for self-signed certificates:
-```bash
-./target/debug/simple-idm-ctl --insecure users ls
-```
-
-OAuth helpers (for testing OAuth flows):
-```bash
-./target/debug/simple-idm-ctl oauth authorize-url \
-  --client-id webapp --redirect-uri http://localhost:3000/callback
-
-./target/debug/simple-idm-ctl oauth token \
-  --client-id webapp --client-secret <SECRET> \
-  --code <AUTH_CODE> --redirect-uri http://localhost:3000/callback
-
-./target/debug/simple-idm-ctl oauth userinfo --access-token <ACCESS_TOKEN>
-```
-
-**Note:** CLI requires users to be members of the `simple-idm:role:admin` group.
-
----
-
-## OAuth2 Authentication Proxy
-
-`simple-idm-oauth2-proxy` is an edge authentication proxy that adds OIDC authentication to legacy applications that don't have their own OAuth2/OIDC support.
-
-### Features
-
-- **OIDC Authorization Code Flow + PKCE** - Secure OAuth2 flow
-- **Session Management** - In-memory or SQLite persistence
-- **Nginx auth_request Integration** - Standard integration with reverse proxy
-- **Header Injection** - Pass identity and groups to application
-- **Group Claim Support** - Parse groups from JWT (array or string)
-
-### Quick Start
-
-Build the proxy:
-```bash
-cargo build --release --bin simple-idm-oauth2-proxy
-```
-
-Create configuration:
-```bash
-cp config.example.oauth2-proxy.toml config.oauth2-proxy.toml
-# Edit config.oauth2-proxy.toml
-```
-
-Run:
-```bash
-./target/release/simple-idm-oauth2-proxy
-```
-
-### Documentation
-
-See detailed documentation in [docs/OAUTH2_PROXY.md](docs/OAUTH2_PROXY.md) including:
-- Full configuration options
-- Nginx integration example
-- Login flow explanation
-- Header formats
-- Legacy application integration examples
-
----
-
-#### 3. Token Exchange (exchange code for token)
-```
-POST /oauth2/token
-Content-Type: application/json
-
-{
-  "grant_type": "authorization_code",
-  "code": "authorization_code_from_login",
-  "redirect_uri": "https://your-app.com/callback",
-  "client_id": "your_client_id",
-  "client_secret": "your_client_secret",
-  "code_verifier": "original_verifier"
-}
-```
-
-### Device Flow (TV/IoT)
-
-#### 1. Initialize device flow
-```
-POST /oauth2/device/authorize
-Content-Type: application/json
-
-{
-  "client_id": "your_client_id",
-  "scope": "openid profile"
-}
-
-Response:
-{
-  "device_code": "long_device_code",
-  "user_code": "ABCD-1234",
-  "verification_uri": "http://localhost:8080/device",
-  "verification_uri_complete": "http://localhost:8080/device?user_code=ABCD-1234",
-  "expires_in": 600,
-  "interval": 5
-}
-```
-
-#### 2. User verification (on mobile/PC)
-```
-POST /oauth2/device/verify
-Content-Type: application/json
-
-{
-  "user_code": "ABCD-1234",
-  "username": "user@example.com",
-  "password": "password123"
-}
-```
-
-#### 3. Polling for token (on TV/device)
-```
-POST /oauth2/device/token
-Content-Type: application/json
-
-{
-  "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-  "device_code": "long_device_code",
-  "client_id": "your_client_id"
-}
-```
-
-## Database Schema
-
-### Main Tables
-- `users` - Users
-- `groups` - Groups/roles
-- `user_groups` - User membership in groups
-- `oauth_clients` - OAuth2 clients (applications)
-- `claim_maps` - Custom claim mapping (filtering groups for specific application)
-- `authorization_codes` - Temporary authorization codes
-- `refresh_tokens` - Refresh tokens
-- `device_codes` - Device flow codes
-
-## Custom Claim Mapping
-
-Custom claim mapping allows restricting which groups/permissions are included in the JWT token for a specific application. This is useful for:
-
-1. **Reducing token size** - If you have hundreds of groups but the application needs only a few
-2. **Security** - Application sees only relevant permissions
-3. **Custom claim names** - You can map groups to custom claim names
-4. **Array vs Single values** - Choose whether claim is a single string or array of strings
-
-### Single String Claims
-
-For applications that expect single string values (like Grafana):
+Login through browser:
 
 ```bash
-# Map group to single string claim
-curl -X POST http://localhost:8080/admin/claim-maps \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "<CLIENT_UUID>",
-    "group_id": "<GRAFANA_ADMIN_GROUP_UUID>",
-    "claim_name": "grafana_role",
-    "claim_value": "Admin"
-  }'
+simple-idm-ctl login --url https://sso.example.com
 ```
 
-JWT output:
-```json
-{
-  "sub": "user-id",
-  "grafana_role": "Admin",
-  "groups": ["grafana:role:Admin"]
-}
-```
-
-### Array Claims
-
-For applications that expect array of values:
+Login through device flow:
 
 ```bash
-# Map group to array claim
-curl -X POST http://localhost:8080/admin/claim-maps \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "client_id": "<CLIENT_UUID>",
-    "group_id": "<GROUP_UUID>",
-    "claim_name": "roles",
-    "claim_value": ["developer", "maintainer"]
-  }'
+simple-idm-ctl login --url https://sso.example.com --device
 ```
 
-JWT output:
-```json
-{
-  "sub": "user-id",
-  "roles": ["developer", "maintainer"],
-  "groups": ["team:backend"]
-}
-```
-
-### Mixed Claims
-
-If any claim map for a given `claim_name` has `kind='array'`, the output will be an array (merging all values):
+Tenant hint:
 
 ```bash
-# User has two groups:
-# Group A → roles: ["developer"]
-# Group B → roles: ["maintainer", "reviewer"]
-
-# JWT will merge and deduplicate:
-{
-  "roles": ["developer", "maintainer", "reviewer"]
-}
+simple-idm-ctl login --url https://sso.example.com --tenant acme
 ```
 
-### Example
-
-User has groups: `admin`, `users`, `billing`, `reports`, `analytics`
-
-For the "Dashboard" application you set claim maps:
-- `admin` → `is_admin` (single, value: "true")
-- `reports` → `can_view_reports` (single, value: "true")
-- `admin` → `roles` (array, value: ["admin", "super-user"])
-
-JWT for this application will contain:
-```json
-{
-  "sub": "user-id",
-  "is_admin": "true",
-  "can_view_reports": "true",
-  "roles": ["admin", "super-user"],
-  "groups": ["admin", "reports"]
-}
-```
-
-## Nested Groups
-
-Groups can contain other groups, creating hierarchical structures. When a user is assigned to a parent group, they automatically inherit membership in all child groups (transitively).
-
-### Example: Team Bundles
-
-Create a "team bundle" that contains multiple application-specific groups:
+Session commands:
 
 ```bash
-# Create groups
-simple-idm-ctl groups create --name "gitlab:ns:o2" --description "GitLab namespace O2"
-simple-idm-ctl groups create --name "gitlab:role:maintainer" --description "GitLab maintainer role"
-simple-idm-ctl groups create --name "team:devops" --description "DevOps team bundle"
-
-# Create nested structure: team:devops contains both groups
-simple-idm-ctl groups add-child --parent "team:devops" --child "gitlab:ns:o2"
-simple-idm-ctl groups add-child --parent "team:devops" --child "gitlab:role:maintainer"
-
-# Assign user to parent group only
-simple-idm-ctl user-groups add --user-id <UUID> --group-id <team:devops_UUID>
+simple-idm-ctl status
+simple-idm-ctl sessions list
+simple-idm-ctl sessions use production
+simple-idm-ctl logout
 ```
 
-The user's JWT will automatically include all effective groups:
-```json
-{
-  "groups": ["gitlab:ns:o2", "gitlab:role:maintainer", "team:devops"]
-}
+## OAuth2 Proxy
+
+`simple-idm-oauth2-proxy` protects legacy applications that do not speak OAuth2/OIDC.
+
+Typical architecture:
+
+```text
+browser -> nginx -> simple-idm-oauth2-proxy -> legacy app
 ```
 
-### CLI Commands
+It can inject headers such as:
 
-```bash
-# Add child group (supports both UUID and name)
-simple-idm-ctl groups add-child --parent "team:devops" --child "gitlab:ns:o2"
-
-# Remove child group
-simple-idm-ctl groups remove-child --parent "team:devops" --child "gitlab:ns:o2"
-
-# List direct children
-simple-idm-ctl groups list-children --parent "team:devops"
-
-# List all transitive children (recursive)
-simple-idm-ctl groups list-children --parent "team:devops" --expand
+```text
+X-Auth-User
+X-Auth-Email
+X-Auth-Groups
 ```
 
-### Cycle Detection
+See:
 
-The system prevents circular dependencies:
-```bash
-# This will fail with "cycle_detected" error
-simple-idm-ctl groups add-child --parent "A" --child "B"
-simple-idm-ctl groups add-child --parent "B" --child "A"
+```text
+docs/OAUTH2_PROXY.md
+docs/multi-oauth/
 ```
 
-### API Endpoints
+## SSH Certificates
 
-- `POST /admin/groups/{id}/children` - Add child group
-- `GET /admin/groups/{id}/children?expand=true` - List children (direct or transitive)
-- `DELETE /admin/groups/{parent_id}/children/{child_id}` - Remove relationship
+The SSH stack consists of:
 
-## Development
+- `simple-idm-ssh-login`
+- `simple-idm-ssh-signer`
 
-### Running Tests
-```bash
-cargo test
+Basic flow:
+
+```text
+simple-idm-ssh-login -> Simple IDM OIDC login -> SSH signer -> OpenSSH certificate
 ```
 
-### Production Build
-```bash
-cargo build --release
+Typical SSHD server config:
+
+```text
+TrustedUserCAKeys /etc/ssh/simple-idm-ssh-signer.pub
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
 ```
+
+Local Linux account access is controlled by OpenSSH principals. Simple IDM groups can produce SSH principals such as:
+
+```text
+ssh:principal:mares
+ssh:role:linux-admin
+```
+
+## Groups and Claims
+
+Groups can be nested and are evaluated as direct/effective memberships.
+
+Client settings control group claim output:
+
+- `groups_claim_mode = none`
+- `groups_claim_mode = direct`
+- `groups_claim_mode = effective`
+- `ignore_virtual_groups = true|false`
+
+Claim maps allow per-client custom claims:
+
+- single value
+- array value
+- group-specific claim mapping
+
+This is useful for reducing JWT size and translating internal groups to application-specific roles.
 
 ## Group Patterns
 
-Automatically assign groups to users based on wildcard patterns. Useful for managing large numbers of groups systematically.
+Group patterns automatically assign groups to users.
 
-### How It Works
+Pattern examples:
 
-1. Define patterns for a user (via TUI or API)
-2. Background job evaluates patterns every 5 minutes (configurable)
-3. Groups matching patterns are automatically assigned/removed
-
-### Pattern Syntax
-
-- `ssh:*` - Matches all groups starting with `ssh:`
-- `*:admin` - Matches all groups ending with `:admin`
-- `ssh:*:admin` - Matches groups like `ssh:role:admin`, `ssh:principal:admin`
-- `exact-match` - Matches only exact group name
-
-### Priority System
-
-Patterns are applied **sequentially** in priority order (lower number = higher priority):
-
-```
-Priority 1: ssh:* (include)         → Adds all ssh:* groups
-Priority 2: ssh:role:admin (exclude) → Removes ssh:role:admin from result
-Priority 10: encjson:* (include)     → Adds all encjson:* groups
+```text
+ssh:*
+*:admin
+ssh:*:admin
+exact-match
 ```
 
-### Example Usage
+Priority rules:
 
-#### Via TUI (simple-idm-ctl tui)
+- lower number means higher priority
+- patterns are evaluated in priority order
 
-1. Navigate to **Users** tab
-2. Select user and press **e** (edit)
-3. Press **Ctrl+P** to open Patterns Manager
-4. Press **n** to create new pattern:
-   - Pattern: `ssh:*`
-   - Type: Include
-   - Priority: 1
-5. Press **n** again for exclusion:
-   - Pattern: `ssh:role:admin`
-   - Type: Exclude
-   - Priority: 2
+Example:
 
-#### Via API
-
-```bash
-# Create include pattern
-curl -X POST http://localhost:8080/admin/users/{user_id}/group-patterns \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"pattern": "ssh:*", "is_include": true, "priority": 1}'
-
-# Create exclude pattern
-curl -X POST http://localhost:8080/admin/users/{user_id}/group-patterns \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"pattern": "ssh:role:admin", "is_include": false, "priority": 2}'
-
-# List user patterns
-curl http://localhost:8080/admin/users/{user_id}/group-patterns \
-  -H "Authorization: Bearer $TOKEN"
+```text
+Priority 1:  ssh:*            include
+Priority 2:  ssh:role:admin   exclude
+Priority 10: encjson:*        include
 ```
 
-### Configuration
+Config:
 
-```bash
-# .env file
-GROUP_PATTERNS_SYNC_INTERVAL_SECONDS=300  # Default: 5 minutes, 0 = disabled
+```env
+GROUP_PATTERNS_SYNC_INTERVAL_SECONDS=300
+```
 
-# Optional hard-purge for soft-deleted records
+## Soft Delete
+
+Admin operations use soft delete where possible. Deleted rows are marked and can be hidden from normal UI/API views.
+
+Optional purge:
+
+```env
 SOFT_DELETE_PURGE_ENABLED=false
 SOFT_DELETE_PURGE_INTERVAL_SECONDS=3600
 SOFT_DELETE_RETENTION_DAYS=30
 ```
 
-### TUI Keyboard Shortcuts
+## SQLx Offline Mode
 
-- **Ctrl+P** - Open Patterns Manager (in Create/Update User form)
-- **n** - New pattern
-- **e** - Edit pattern
-- **d** - Delete pattern
-- **Enter/Esc** - Close manager
+The workspace uses SQLx compile-time query metadata.
+
+After SQL or migration changes:
+
+```bash
+cargo sqlx migrate run
+cargo sqlx prepare --workspace
+git add .sqlx migrations
+```
+
+Build without database:
+
+```bash
+SQLX_OFFLINE=true cargo build --workspace
+```
+
+## Development
+
+Run checks:
+
+```bash
+cargo check --workspace --all-targets
+cargo test --workspace
+```
+
+Run server:
+
+```bash
+cargo run -p simple-idm-server --bin simple-idm-server
+```
 
 ## License
 
-This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
+MIT
 
 ## Author
 
