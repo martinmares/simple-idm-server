@@ -44,7 +44,6 @@ for package_file in dist/simple-idm-"${version}"-*.tar.gz; do
   package_name="$(basename "${package_file}" .tar.gz)"
   case "${package_name}" in
     *linux-x86_64) job_name="release_linux" ;;
-    *macos-*) job_name="release_macos" ;;
     *windows-x86_64) job_name="release_windows" ;;
     *) job_name="release_linux" ;;
   esac

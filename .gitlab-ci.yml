@@ -58,8 +58,11 @@ release_linux:
     - job: release_notes
       artifacts: true
   script:
-    - cargo build --release --workspace
-    - bash scripts/ci_package_binaries.sh "linux-x86_64" "target/release"
+    - apt-get update
+    - apt-get install -y --no-install-recommends musl-tools
+    - rustup target add x86_64-unknown-linux-musl
+    - RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --workspace --target x86_64-unknown-linux-musl
+    - bash scripts/ci_package_binaries.sh "linux-x86_64" "target/x86_64-unknown-linux-musl/release"
   artifacts:
     paths:
       - dist/simple-idm-*-linux-x86_64.tar.gz
