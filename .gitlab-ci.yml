@@ -53,18 +53,13 @@ release_notes:
 
 release_linux:
   stage: build
+  timeout: 2h
   needs:
     - job: release_notes
       artifacts: true
   script:
-    - apt-get update
-    - apt-get install -y --no-install-recommends musl-tools curl ca-certificates
-    - curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ -C /tmp
-    - ln -s /tmp/zig-linux-x86_64-0.13.0/zig /usr/local/bin/zig
-    - cargo install cargo-zigbuild --locked
-    - rustup target add x86_64-unknown-linux-musl
-    - cargo zigbuild --release --workspace --target x86_64-unknown-linux-musl
-    - bash scripts/ci_package_linux.sh
+    - cargo build --release --workspace
+    - bash scripts/ci_package_binaries.sh "linux-x86_64" "target/release"
   artifacts:
     paths:
       - dist/simple-idm-*-linux-x86_64.tar.gz
@@ -74,25 +69,9 @@ release_linux:
       changes:
         - VERSION
 
-release_macos:
-  stage: build
-  needs:
-    - job: release_notes
-      artifacts: true
-  script:
-    - cargo build --release --workspace
-    - bash scripts/ci_package_binaries.sh "macos-$(uname -m)" "target/release"
-  artifacts:
-    paths:
-      - dist/simple-idm-*-macos-*.tar.gz
-    expire_in: 30 days
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes:
-        - VERSION
-
 release_windows:
   stage: build
+  timeout: 2h
   needs:
     - job: release_notes
       artifacts: true
@@ -118,8 +97,6 @@ publish_release:
     - job: release_notes
       artifacts: true
     - job: release_linux
-      artifacts: true
-    - job: release_macos
       artifacts: true
     - job: release_windows
       artifacts: true
