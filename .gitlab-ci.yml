@@ -1,0 +1,119 @@
+stages:
+  - prepare
+  - verify
+  - build
+  - release
+
+variables:
+  CARGO_TERM_COLOR: always
+  GIT_DEPTH: "0"
+  SQLX_OFFLINE: "true"
+
+cache:
+  key: "$CI_COMMIT_REF_SLUG"
+  paths:
+    - target/
+    - .cargo/
+
+check:
+  stage: verify
+  script:
+    - cargo check --workspace
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+test:
+  stage: verify
+  script:
+    - cargo test --workspace --lib
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+release_notes:
+  stage: prepare
+  script:
+    - bash scripts/ci_release_notes.sh
+  artifacts:
+    reports:
+      dotenv: dist/release.env
+    paths:
+      - dist/release_notes.md
+      - dist/CHANGELOG.generated.md
+    expire_in: 30 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - VERSION
+
+release_linux:
+  stage: build
+  needs:
+    - job: release_notes
+      artifacts: true
+  script:
+    - rustup target add x86_64-unknown-linux-musl
+    - cargo zigbuild --release --workspace --target x86_64-unknown-linux-musl
+    - bash scripts/ci_package_linux.sh
+  artifacts:
+    paths:
+      - dist/simple-idm-*-linux-x86_64.tar.gz
+    expire_in: 30 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - VERSION
+
+release_macos:
+  stage: build
+  needs:
+    - job: release_notes
+      artifacts: true
+  script:
+    - cargo build --release --workspace
+    - bash scripts/ci_package_binaries.sh "macos-$(uname -m)" "target/release"
+  artifacts:
+    paths:
+      - dist/simple-idm-*-macos-*.tar.gz
+    expire_in: 30 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - VERSION
+
+release_windows:
+  stage: build
+  needs:
+    - job: release_notes
+      artifacts: true
+  script:
+    - rustup target add x86_64-pc-windows-msvc
+    - cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
+    - bash scripts/ci_package_binaries.sh "windows-x86_64" "target/x86_64-pc-windows-msvc/release" ".exe"
+  artifacts:
+    paths:
+      - dist/simple-idm-*-windows-x86_64.tar.gz
+    expire_in: 30 days
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - VERSION
+
+publish_release:
+  stage: release
+  needs:
+    - job: release_notes
+      artifacts: true
+    - job: release_linux
+      artifacts: true
+    - job: release_macos
+      artifacts: true
+    - job: release_windows
+      artifacts: true
+  script:
+    - bash scripts/ci_publish_release.sh
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      changes:
+        - VERSION

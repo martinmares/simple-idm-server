@@ -1,0 +1,32 @@
+name: "inject-binaries"
+description: "Injects binaries utility into the image"
+
+steps:
+  - action: add-file
+    src: ./target/x86_64-unknown-linux-musl/release/simple-idm-ctl
+    dst: /usr/local/bin/simple-idm-ctl
+    mode: "0755"
+  - action: add-file
+    src: ./target/x86_64-unknown-linux-musl/release/simple-idm-oauth2-proxy
+    dst: /usr/local/bin/simple-idm-oauth2-proxy
+    mode: "0755"
+  - action: add-file
+    src: ./target/x86_64-unknown-linux-musl/release/simple-idm-server
+    dst: /usr/local/bin/simple-idm-server
+    mode: "0755"
+  - action: add-file
+    src: ./target/x86_64-unknown-linux-musl/release/simple-idm-ssh-login
+    dst: /usr/local/bin/simple-idm-ssh-login
+    mode: "0755"
+  - action: add-file
+    src: ./target/x86_64-unknown-linux-musl/release/simple-idm-ssh-signer
+    dst: /usr/local/bin/simple-idm-ssh-signer
+    mode: "0755"
+
+  - action: set-label
+    key: "org.datalite.patched-by"
+    value: "oci-patch"
+
+  - action: set-label
+    key: "org.datalite.patch-recipe"
+    value: "create-image"
