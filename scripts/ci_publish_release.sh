@@ -11,6 +11,8 @@ if [[ ! -f "${notes_file}" ]]; then
 fi
 
 api="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}"
+package_name="simple-idm"
+package_base_url="${api}/packages/generic/${package_name}/${version}"
 
 curl --silent --show-error --fail \
   --request POST \
@@ -41,18 +43,22 @@ fi
 
 for package_file in dist/simple-idm-"${version}"-*.tar.gz; do
   [[ -f "${package_file}" ]] || continue
-  package_name="$(basename "${package_file}" .tar.gz)"
-  case "${package_name}" in
-    *linux-x86_64) job_name="release_linux" ;;
-    *windows-x86_64) job_name="release_windows" ;;
-    *) job_name="release_linux" ;;
-  esac
-  artifact_url="${CI_PROJECT_URL}/-/jobs/artifacts/${CI_COMMIT_REF_NAME}/raw/${package_file}?job=${job_name}"
+  file_name="$(basename "${package_file}")"
+  asset_name="${file_name%.tar.gz}"
+  package_url="${package_base_url}/${file_name}"
+
+  echo "Uploading ${file_name} to GitLab Generic Package Registry"
+  curl --silent --show-error --fail \
+    --request PUT \
+    --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+    --upload-file "${package_file}" \
+    "${package_url}" >/dev/null
+
   curl --silent --show-error \
     --request POST \
     --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-    --form "name=${package_name}" \
-    --form "url=${artifact_url}" \
+    --form "name=${asset_name}" \
+    --form "url=${package_url}" \
     --form "link_type=package" \
     "${api}/releases/${tag}/assets/links" >/dev/null || true
 done
