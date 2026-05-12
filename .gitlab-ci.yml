@@ -11,6 +11,7 @@ variables:
   CARGO_TERM_COLOR: always
   GIT_DEPTH: "0"
   SQLX_OFFLINE: "true"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
 
 cache:
   key: "$CI_COMMIT_REF_SLUG"
@@ -56,6 +57,11 @@ release_linux:
     - job: release_notes
       artifacts: true
   script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends musl-tools curl ca-certificates
+    - curl -fsSL https://ziglang.org/download/0.13.0/zig-linux-x86_64-0.13.0.tar.xz | tar -xJ -C /tmp
+    - ln -s /tmp/zig-linux-x86_64-0.13.0/zig /usr/local/bin/zig
+    - cargo install cargo-zigbuild --locked
     - rustup target add x86_64-unknown-linux-musl
     - cargo zigbuild --release --workspace --target x86_64-unknown-linux-musl
     - bash scripts/ci_package_linux.sh
@@ -91,6 +97,9 @@ release_windows:
     - job: release_notes
       artifacts: true
   script:
+    - apt-get update
+    - apt-get install -y --no-install-recommends clang lld llvm curl ca-certificates
+    - cargo install cargo-xwin --locked
     - rustup target add x86_64-pc-windows-msvc
     - cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
     - bash scripts/ci_package_binaries.sh "windows-x86_64" "target/x86_64-pc-windows-msvc/release" ".exe"
