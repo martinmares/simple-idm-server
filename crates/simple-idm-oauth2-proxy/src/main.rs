@@ -1,10 +1,10 @@
 use anyhow::Result;
 use axum::{
+    Router,
     extract::{Query, State},
-    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect},
     routing::{get, post},
-    Router,
 };
 use base64::Engine;
 use std::sync::Arc;
@@ -36,7 +36,10 @@ async fn main() -> Result<()> {
 
     // Load configuration
     let config = Config::load()?;
-    tracing::info!("Loaded configuration from: {}", config.config_file.display());
+    tracing::info!(
+        "Loaded configuration from: {}",
+        config.config_file.display()
+    );
     tracing::info!("Listen address: {}", config.listen_addr);
     tracing::info!("Public base URL: {}", config.public_base_url);
     tracing::info!("OIDC issuer: {}", config.oidc_issuer);
@@ -80,10 +83,7 @@ async fn healthz() -> impl IntoResponse {
 }
 
 /// Auth request endpoint - used by nginx auth_request
-async fn handle_auth(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn handle_auth(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     // Extract session cookie
     let session_id = match extract_session_cookie(&headers, &state.config.cookie_name) {
         Some(id) => id,
@@ -111,7 +111,11 @@ async fn handle_auth(
                         }
                     },
                     Err(err) => {
-                        tracing::warn!("Token refresh failed for session {}: {:?}", session_id, err);
+                        tracing::warn!(
+                            "Token refresh failed for session {}: {:?}",
+                            session_id,
+                            err
+                        );
                         return (StatusCode::UNAUTHORIZED, HeaderMap::new()).into_response();
                     }
                 }
@@ -146,10 +150,7 @@ async fn handle_auth(
     // X-Auth-Groups
     let groups_header = serialize_groups(&session.groups, &state.config.groups_header_format);
     let header_name: HeaderName = state.config.groups_header_name.parse().unwrap();
-    response_headers.insert(
-        header_name,
-        HeaderValue::from_str(&groups_header).unwrap(),
-    );
+    response_headers.insert(header_name, HeaderValue::from_str(&groups_header).unwrap());
 
     tracing::debug!(
         "Auth OK for user: {}, groups: {:?}",
@@ -180,10 +181,9 @@ async fn handle_start(
             );
 
             let mut response = Redirect::temporary(&auth_url).into_response();
-            response.headers_mut().insert(
-                header::SET_COOKIE,
-                cookie.parse().unwrap(),
-            );
+            response
+                .headers_mut()
+                .insert(header::SET_COOKIE, cookie.parse().unwrap());
 
             response
         }
@@ -251,28 +251,28 @@ async fn handle_callback(
     };
 
     // Create session
-    let session_id = state.session_store.create_session(&token_response, &state.config).await;
+    let session_id = state
+        .session_store
+        .create_session(&token_response, &state.config)
+        .await;
 
     // Set session cookie
     let cookie = format!(
         "{}={}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age={}",
-        state.config.cookie_name,
-        session_id,
-        state.config.session_max_age
+        state.config.cookie_name, session_id, state.config.session_max_age
     );
 
     // Clear state cookie
-    let clear_state_cookie = "__oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string();
+    let clear_state_cookie =
+        "__oauth_state=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string();
 
     let mut response = Redirect::temporary(&flow_state.redirect_url).into_response();
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        cookie.parse().unwrap(),
-    );
-    response.headers_mut().append(
-        header::SET_COOKIE,
-        clear_state_cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
+    response
+        .headers_mut()
+        .append(header::SET_COOKIE, clear_state_cookie.parse().unwrap());
 
     tracing::info!("Login successful for user: {}", token_response.username);
 
@@ -280,10 +280,7 @@ async fn handle_callback(
 }
 
 /// Logout endpoint
-async fn handle_logout(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> impl IntoResponse {
+async fn handle_logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     // Extract and delete session
     if let Some(session_id) = extract_session_cookie(&headers, &state.config.cookie_name) {
         state.session_store.delete(&session_id).await;
@@ -299,10 +296,9 @@ async fn handle_logout(
     let mut response = Html("<html><body><h1>Logged out</h1><p>You have been logged out successfully.</p></body></html>")
         .into_response();
 
-    response.headers_mut().insert(
-        header::SET_COOKIE,
-        cookie.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert(header::SET_COOKIE, cookie.parse().unwrap());
 
     response
 }
@@ -311,16 +307,14 @@ async fn handle_logout(
 fn extract_session_cookie(headers: &HeaderMap, cookie_name: &str) -> Option<String> {
     let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
 
-    cookie_header
-        .split(';')
-        .find_map(|cookie| {
-            let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
-            if parts.len() == 2 && parts[0] == cookie_name {
-                Some(parts[1].to_string())
-            } else {
-                None
-            }
-        })
+    cookie_header.split(';').find_map(|cookie| {
+        let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
+        if parts.len() == 2 && parts[0] == cookie_name {
+            Some(parts[1].to_string())
+        } else {
+            None
+        }
+    })
 }
 
 /// Helper: Serialize groups for header
