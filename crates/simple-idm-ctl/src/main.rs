@@ -1,11 +1,11 @@
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Duration, Utc};
 use clap::{Parser, Subcommand, ValueEnum};
 use dirs::config_dir;
 use openidconnect::{
-    core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreProviderMetadata},
     AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, PkceCodeChallenge, PkceCodeVerifier,
     RedirectUrl, Scope,
+    core::{CoreAuthenticationFlow, CoreClient, CoreIdToken, CoreProviderMetadata},
 };
 use openidconnect::{OAuth2TokenResponse, TokenResponse as OidcTokenResponseTrait};
 use qrcode::QrCode;
@@ -17,10 +17,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use tabled::{settings::Style, Table, Tabled};
+use tabled::{Table, Tabled, settings::Style};
 use tokio::sync::oneshot;
-
-mod tui;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Session {
@@ -180,8 +178,6 @@ enum Commands {
         #[command(subcommand)]
         command: UserGroupsCommand,
     },
-    #[command(alias = "ui")]
-    Tui,
     Login {
         #[arg(long, required = true)]
         url: String,
@@ -609,7 +605,7 @@ struct OutputConfig {
 }
 
 fn generate_pkce_pair() -> (String, String) {
-    use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use sha2::{Digest, Sha256};
 
     let code_verifier: String = rand::rng()
@@ -637,9 +633,7 @@ fn build_oidc_http_client(insecure: bool) -> Result<openidconnect::reqwest::Clie
     if insecure {
         builder = builder.danger_accept_invalid_certs(true);
     }
-    builder
-        .build()
-        .context("Failed to build OIDC HTTP client")
+    builder.build().context("Failed to build OIDC HTTP client")
 }
 
 fn parse_raw_claims(id_token: &CoreIdToken) -> Result<HashMap<String, Value>> {
@@ -689,7 +683,7 @@ async fn main() -> Result<()> {
                     server,
                     cli.insecure.unwrap_or(false),
                 )
-                    .await;
+                .await;
             }
             return handle_login(
                 url,
@@ -719,8 +713,6 @@ async fn main() -> Result<()> {
         session.base_url.clone(),
         session.access_token.clone(),
         cli.insecure.unwrap_or(false),
-        session.tenant.clone(),
-        session.client_id.clone(),
     )?;
     let output = OutputConfig {
         format: cli.output,
@@ -734,7 +726,6 @@ async fn main() -> Result<()> {
         Commands::Clients { command } => handle_clients(&http, output, command).await?,
         Commands::ClaimMaps { command } => handle_claim_maps(&http, output, command).await?,
         Commands::UserGroups { command } => handle_user_groups(&http, output, command).await?,
-        Commands::Tui => tui::run_tui(&http).await?,
         Commands::Ping => handle_ping(&http).await?,
         Commands::Login { .. }
         | Commands::Logout { .. }
@@ -1072,9 +1063,7 @@ async fn exchange_code_for_tokens(
         ClientId::new(client_id.to_string()),
         None,
     )
-    .set_redirect_uri(
-        RedirectUrl::new(redirect_uri.to_string()).context("Invalid redirect URL")?,
-    );
+    .set_redirect_uri(RedirectUrl::new(redirect_uri.to_string()).context("Invalid redirect URL")?);
 
     let mut token_req = client
         .exchange_code(AuthorizationCode::new(code.to_string()))
@@ -1187,7 +1176,9 @@ async fn handle_tenants(
                 "mode": mode,
                 "is_active": is_active,
             });
-            let body = http.put_json(&format!("/admin/tenants/{id}"), payload).await?;
+            let body = http
+                .put_json(&format!("/admin/tenants/{id}"), payload)
+                .await?;
             print_table_item::<TenantRow>(output, &body)?;
         }
         TenantsCommand::Delete { id } => {
@@ -1731,10 +1722,7 @@ fn handle_status() -> Result<()> {
     println!("Active server: {}", config.active);
     println!("Server URL: {}", session.base_url);
     println!("Client ID: {}", session.client_id);
-    println!(
-        "Tenant: {}",
-        session.tenant.as_deref().unwrap_or("-")
-    );
+    println!("Tenant: {}", session.tenant.as_deref().unwrap_or("-"));
     println!(
         "Token expires in: {} seconds ({} minutes)",
         expires_in,
@@ -2066,19 +2054,11 @@ impl KeyValueRow {
 pub(crate) struct HttpClient {
     base_url: String,
     token: String,
-    pub(crate) tenant: Option<String>,
-    pub(crate) client_id: String,
     client: reqwest::Client,
 }
 
 impl HttpClient {
-    pub(crate) fn new(
-        base_url: String,
-        token: String,
-        insecure: bool,
-        tenant: Option<String>,
-        client_id: String,
-    ) -> Result<Self> {
+    pub(crate) fn new(base_url: String, token: String, insecure: bool) -> Result<Self> {
         let client = reqwest::Client::builder()
             .danger_accept_invalid_certs(insecure)
             .build()
@@ -2086,8 +2066,6 @@ impl HttpClient {
         Ok(Self {
             base_url: base_url.trim_end_matches('/').to_string(),
             token,
-            tenant,
-            client_id,
             client,
         })
     }
