@@ -4,8 +4,16 @@
 # OAUTH2_PROXY_LISTEN_ADDR=0.0.0.0:4180 cargo run --bin simple-idm-oauth2-proxy
 
 # HTTP server configuration
+mode = "auth_request"  # "auth_request" or "reverse_proxy"
 listen_addr = "127.0.0.1:4180"
 public_base_url = "https://auth.example.com"
+
+# Reverse proxy mode configuration.
+# Used only when mode = "reverse_proxy".
+# upstream_url = "http://127.0.0.1:3000"
+# protected_prefixes = ["/"]
+# public_prefixes = ["/healthz", "/static"]
+# upstream_timeout_secs = 300
 
 # Cookie settings
 cookie_name = "_oauth2_proxy"
@@ -36,7 +44,7 @@ username_claims = ["preferred_username", "email", "sub"]  # Try in order
 groups_header_name = "X-Auth-Groups"
 groups_header_format = "csv"  # "csv" or "jsonb64"
 
-# Example Nginx configuration:
+# Example Nginx auth_request configuration:
 #
 # server {
 #     listen 80;
@@ -82,3 +90,17 @@ groups_header_format = "csv"  # "csv" or "jsonb64"
 # 9. User is redirected to original URL (/)
 # 10. Nginx makes subrequest to /auth - now returns 200 with headers
 # 11. User accesses the application with identity headers
+#
+# Reverse proxy mode:
+#
+# mode = "reverse_proxy"
+# listen_addr = "127.0.0.1:4180"
+# public_base_url = "https://app.example.com"
+# upstream_url = "http://127.0.0.1:3000"
+# protected_prefixes = ["/"]
+# public_prefixes = ["/healthz", "/static"]
+#
+# In this mode the browser talks directly to simple-idm-oauth2-proxy. The proxy
+# performs OIDC login, validates the session cookie, strips client-supplied
+# X-Auth-* headers, injects trusted X-Auth-* headers, and forwards HTTP/1.1 and
+# WebSocket traffic to the configured upstream.
