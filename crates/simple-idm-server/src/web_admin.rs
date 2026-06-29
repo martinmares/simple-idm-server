@@ -25,12 +25,82 @@ use sqlx::{FromRow, Row};
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use tokio::sync::RwLock;
 use url::Url;
 use uuid::Uuid;
 
 const ADMIN_SESSION_COOKIE: &str = "sidm_admin_session";
 const ADMIN_SESSION_TTL_SECONDS: i64 = 8 * 60 * 60;
+
+#[derive(Debug, Clone)]
+struct WebAdminBranding {
+    brand_name: String,
+    brand_domain: Option<String>,
+    page_title: String,
+}
+
+impl Default for WebAdminBranding {
+    fn default() -> Self {
+        Self {
+            brand_name: "Cloud App".to_string(),
+            brand_domain: None,
+            page_title: "Simple IDM".to_string(),
+        }
+    }
+}
+
+static WEB_ADMIN_BRANDING: OnceLock<WebAdminBranding> = OnceLock::new();
+
+pub fn set_branding_from_config(
+    brand_name: String,
+    brand_domain: Option<String>,
+    page_title: String,
+) {
+    let _ = WEB_ADMIN_BRANDING.set(WebAdminBranding {
+        brand_name,
+        brand_domain,
+        page_title,
+    });
+}
+
+fn web_admin_branding() -> &'static WebAdminBranding {
+    WEB_ADMIN_BRANDING.get_or_init(WebAdminBranding::default)
+}
+
+fn admin_brand_label() -> String {
+    let branding = web_admin_branding();
+    match &branding.brand_domain {
+        Some(domain) if !domain.trim().is_empty() => {
+            format!("{} · {}", branding.brand_name, domain.trim())
+        }
+        _ => branding.brand_name.clone(),
+    }
+}
+
+fn admin_page_title() -> String {
+    web_admin_branding().page_title.clone()
+}
+
+fn admin_product_title() -> String {
+    format!("{} Admin", admin_page_title())
+}
+
+trait AdminTemplateBranding {
+    fn admin_brand_label(&self) -> String {
+        admin_brand_label()
+    }
+
+    fn admin_page_title(&self) -> String {
+        admin_page_title()
+    }
+
+    fn admin_product_title(&self) -> String {
+        admin_product_title()
+    }
+}
+
+impl<T> AdminTemplateBranding for T {}
 
 #[derive(RustEmbed)]
 #[folder = "static/"]

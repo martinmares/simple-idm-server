@@ -113,6 +113,10 @@ UI_BRAND_DOMAIN=
 UI_PAGE_TITLE=Simple IDM
 ```
 
+UI customizace je záměrně omezená jen na tyto textové popisky. Barvy, layout,
+dark/light chování a assety zůstávají konzistentní napříč Simple službami přes
+embedované Tabler Admin UI assety.
+
 `JWT_ISSUER` musí odpovídat veřejné URL serveru. Používá se jako issuer v tokenech a jako základ pro generované callback URL.
 
 Produkční příklad:

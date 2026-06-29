@@ -87,6 +87,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.ui.brand_domain.clone(),
         config.ui.page_title.clone(),
     );
+    web_admin::set_branding_from_config(
+        config.ui.brand_name.clone(),
+        config.ui.brand_domain.clone(),
+        config.ui.page_title.clone(),
+    );
 
     tracing::info!("Starting simple-idm-server");
     tracing::info!("Server: {}:{}", config.server.host, config.server.port);

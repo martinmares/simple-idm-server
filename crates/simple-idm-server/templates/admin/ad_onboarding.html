@@ -3,8 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>AD Onboarding</title>
+  <title>AD Onboarding - {{ admin_page_title() }}</title>
   <link href="/admin/ui/static/css/tabler.min.css" rel="stylesheet">
+  <link href="/admin/ui/static/css/tabler-icons.min.css" rel="stylesheet">
   <script>
     (function () {
       const t = localStorage.getItem('theme') || 'auto';
@@ -21,8 +22,13 @@
   <div class="container container-tight py-4">
     <div class="card card-md">
       <div class="card-body">
-        <h2 class="h2 text-center mb-2">Simple IDM AD Onboarding</h2>
-        <p class="text-secondary text-center mb-4">Confirm your AD credentials to initialize role sync.</p>
+        <div class="text-center mb-4">
+          <div class="avatar avatar-lg bg-blue-lt text-blue mb-3">
+            <i class="ti ti-user-shield"></i>
+          </div>
+          <h2 class="h2 mb-1">{{ admin_page_title() }} AD Onboarding</h2>
+          <p class="text-secondary mb-0">Confirm your AD credentials to initialize role sync.</p>
+        </div>
 
         {% if let Some(msg) = message %}
         <div class="alert alert-success">{{ msg }}</div>

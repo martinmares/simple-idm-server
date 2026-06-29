@@ -129,6 +129,10 @@ UI_BRAND_DOMAIN=
 UI_PAGE_TITLE=Simple IDM
 ```
 
+UI customization is intentionally limited to these text labels. Colors, layout,
+dark/light behavior, and bundled assets are kept consistent across Simple
+services through the embedded Tabler Admin UI assets.
+
 `JWT_ISSUER` is important. It is used as the public issuer URL and as the base for generated callback URLs. In production it should be the external HTTPS URL, for example:
 
 ```env
