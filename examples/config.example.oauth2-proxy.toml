@@ -42,6 +42,14 @@ public_base_url = "https://app.example.com/oauth2"
 # protected_prefixes = ["/"]
 # public_prefixes = ["/healthz", "/static"]
 # upstream_timeout_secs = 300
+#
+# Variant B is also useful behind a TLS-only nginx edge:
+#
+#   browser -> nginx TLS edge -> simple-idm-oauth2-proxy -> upstream app
+#
+# In that deployment nginx owns certificates and forwards all traffic to
+# simple-idm-oauth2-proxy. Configure public_base_url to the external HTTPS
+# origin, not to the local proxy address.
 
 # Cookie settings
 cookie_name = "_oauth2_proxy"
@@ -146,3 +154,78 @@ groups_header_format = "csv"  # "csv" or "jsonb64"
 # performs OIDC login, validates the session cookie, strips client-supplied
 # X-Auth-* headers, injects trusted X-Auth-* headers, and forwards HTTP/1.1 and
 # WebSocket traffic to the configured upstream.
+#
+# OIDC client setup for this variant:
+#
+# - client type: confidential
+# - grant types: authorization_code, refresh_token
+# - scopes: openid, profile, email, groups
+# - redirect URI: https://app.example.com/callback
+#
+# Logout:
+#
+# - app logout links should point to /logout
+# - /logout clears the proxy session cookie
+# - it does not necessarily clear the central SSO session at simple-idm-server
+#
+# Systemd example:
+#
+# [Unit]
+# Description=Simple IDM OAuth2 proxy
+# After=network-online.target
+# Wants=network-online.target
+#
+# [Service]
+# Type=simple
+# User=simple-idm-oauth2-proxy
+# Group=simple-idm-oauth2-proxy
+# Environment=RUST_LOG=info
+# Environment=OAUTH2_PROXY_CONFIG=/etc/simple-idm-oauth2-proxy/config.toml
+# ExecStart=/usr/local/bin/simple-idm-oauth2-proxy
+# Restart=on-failure
+# RestartSec=3
+# NoNewPrivileges=true
+# PrivateTmp=true
+# ProtectSystem=strict
+# ProtectHome=true
+# ReadWritePaths=/var/lib/simple-idm-oauth2-proxy
+#
+# [Install]
+# WantedBy=multi-user.target
+#
+# Nginx TLS-edge example for reverse_proxy mode:
+#
+# upstream app_oauth2_proxy {
+#     server 127.0.0.1:4180;
+# }
+#
+# server {
+#     listen 443 ssl http2;
+#     server_name app.example.com;
+#
+#     location / {
+#         client_max_body_size 2g;
+#
+#         proxy_set_header Host              $host;
+#         proxy_set_header X-Real-IP         $remote_addr;
+#         proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+#         proxy_set_header X-Forwarded-Proto $scheme;
+#
+#         # Do not allow callers to spoof identity headers.
+#         proxy_set_header X-Auth-Subject "";
+#         proxy_set_header X-Auth-User    "";
+#         proxy_set_header X-Auth-Email   "";
+#         proxy_set_header X-Auth-Groups  "";
+#
+#         proxy_http_version 1.1;
+#         proxy_set_header Upgrade    $http_upgrade;
+#         proxy_set_header Connection "upgrade";
+#         proxy_buffering off;
+#
+#         proxy_connect_timeout 30s;
+#         proxy_send_timeout    300s;
+#         proxy_read_timeout    300s;
+#
+#         proxy_pass http://app_oauth2_proxy;
+#     }
+# }

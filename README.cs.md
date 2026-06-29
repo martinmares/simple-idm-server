@@ -421,6 +421,16 @@ Architektura:
 browser -> nginx -> simple-idm-oauth2-proxy -> legacy app
 ```
 
+Praktický produkční režim může být i:
+
+```text
+browser -> nginx TLS edge -> simple-idm-oauth2-proxy -> aplikace
+```
+
+V tomto režimu nginx řeší certifikáty a edge nastavení, zatímco
+`simple-idm-oauth2-proxy` řeší SSO login, logout, session cookie, důvěryhodné
+identity hlavičky a HTTP/1.1/WebSocket proxy na jednu upstream aplikaci.
+
 Typické hlavičky:
 
 ```text

@@ -453,6 +453,15 @@ browser -> simple-idm-oauth2-proxy -> app
 The reverse proxy mode is a focused single-upstream OIDC adapter, not a general
 nginx/Traefik replacement. Use nginx, Traefik, HAProxy, or OpenShift Route for
 TLS termination, edge hardening, buffering, request limits, or complex routing.
+The practical production pattern is often:
+
+```text
+browser -> nginx TLS edge -> simple-idm-oauth2-proxy -> app
+```
+
+In that setup nginx keeps certificate automation and edge hardening, while
+`simple-idm-oauth2-proxy` owns SSO login, logout, session cookies, trusted
+identity headers, and HTTP/1.1/WebSocket forwarding to one upstream app.
 
 It can inject headers such as:
 
