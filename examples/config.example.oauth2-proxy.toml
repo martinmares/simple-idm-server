@@ -3,13 +3,41 @@
 # You can also override any setting with environment variables:
 # OAUTH2_PROXY_LISTEN_ADDR=0.0.0.0:4180 cargo run --bin simple-idm-oauth2-proxy
 
-# HTTP server configuration
+# ---------------------------------------------------------------------------
+# Variant A: nginx / ingress reverse proxy + auth_request
+# ---------------------------------------------------------------------------
+#
+# Browser talks to nginx/ingress. Nginx proxies application traffic to the
+# upstream app and calls simple-idm-oauth2-proxy only for auth decisions.
+#
+#   browser -> nginx/ingress -> upstream app
+#                     |
+#                     +-> simple-idm-oauth2-proxy /auth,/start,/callback
+#
+# The public OAuth2 proxy URL is mounted under the app origin as /oauth2.
+# With redirect_path = "/callback", configure the OIDC client redirect URI as:
+#
+#   https://app.example.com/oauth2/callback
+#
 mode = "auth_request"  # "auth_request" or "reverse_proxy"
 listen_addr = "127.0.0.1:4180"
-public_base_url = "https://auth.example.com"
+public_base_url = "https://app.example.com/oauth2"
 
-# Reverse proxy mode configuration.
-# Used only when mode = "reverse_proxy".
+# ---------------------------------------------------------------------------
+# Variant B: built-in reverse proxy mode, without nginx
+# ---------------------------------------------------------------------------
+#
+# Browser talks directly to simple-idm-oauth2-proxy. The proxy performs OIDC
+# login/session handling and forwards authenticated HTTP/1.1 + WebSocket traffic
+# to one upstream app.
+#
+#   browser -> simple-idm-oauth2-proxy -> upstream app
+#
+# To use this mode, switch the values above to:
+#
+# mode = "reverse_proxy"
+# listen_addr = "127.0.0.1:4180"
+# public_base_url = "https://app.example.com"
 # upstream_url = "http://127.0.0.1:3000"
 # protected_prefixes = ["/"]
 # public_prefixes = ["/healthz", "/static"]
@@ -44,7 +72,9 @@ username_claims = ["preferred_username", "email", "sub"]  # Try in order
 groups_header_name = "X-Auth-Groups"
 groups_header_format = "csv"  # "csv" or "jsonb64"
 
-# Example Nginx auth_request configuration:
+# ---------------------------------------------------------------------------
+# Example nginx configuration for Variant A
+# ---------------------------------------------------------------------------
 #
 # server {
 #     listen 80;
@@ -62,6 +92,11 @@ groups_header_format = "csv"  # "csv" or "jsonb64"
 #         proxy_set_header X-Auth-Email $auth_email;
 #         proxy_set_header X-Auth-Groups $auth_groups;
 #
+#         # WebSocket support
+#         proxy_http_version 1.1;
+#         proxy_set_header Upgrade $http_upgrade;
+#         proxy_set_header Connection $connection_upgrade;
+#
 #         proxy_pass http://localhost:3000;
 #     }
 #
@@ -78,6 +113,11 @@ groups_header_format = "csv"  # "csv" or "jsonb64"
 #     }
 # }
 #
+# map $http_upgrade $connection_upgrade {
+#     default upgrade;
+#     ''      close;
+# }
+#
 # Login flow:
 # 1. User accesses https://app.example.com/
 # 2. Nginx makes subrequest to /auth (proxy at localhost:4180/auth)
@@ -91,7 +131,9 @@ groups_header_format = "csv"  # "csv" or "jsonb64"
 # 10. Nginx makes subrequest to /auth - now returns 200 with headers
 # 11. User accesses the application with identity headers
 #
-# Reverse proxy mode:
+# ---------------------------------------------------------------------------
+# Minimal config override for Variant B
+# ---------------------------------------------------------------------------
 #
 # mode = "reverse_proxy"
 # listen_addr = "127.0.0.1:4180"
