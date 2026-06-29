@@ -8,8 +8,18 @@ pub struct Config {
     pub config_file: PathBuf,
 
     // Server settings
+    #[serde(default)]
+    pub mode: ProxyMode,
     pub listen_addr: String,
     pub public_base_url: String,
+    #[serde(default)]
+    pub upstream_url: Option<String>,
+    #[serde(default)]
+    pub protected_prefixes: Vec<String>,
+    #[serde(default)]
+    pub public_prefixes: Vec<String>,
+    #[serde(default = "default_upstream_timeout_secs")]
+    pub upstream_timeout_secs: u64,
 
     // Cookie settings
     pub cookie_name: String,
@@ -40,10 +50,21 @@ pub struct Config {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProxyMode {
+    AuthRequest,
+    ReverseProxy,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionBackend {
     Memory,
     Sqlite,
+}
+
+fn default_upstream_timeout_secs() -> u64 {
+    300
 }
 
 impl Config {
@@ -95,8 +116,21 @@ impl Config {
         if let Ok(val) = std::env::var("LISTEN_ADDR") {
             config.listen_addr = val;
         }
+        if let Ok(val) = std::env::var("OAUTH2_PROXY_MODE") {
+            config.mode = match val.as_str() {
+                "auth_request" => ProxyMode::AuthRequest,
+                "reverse_proxy" => ProxyMode::ReverseProxy,
+                other => {
+                    tracing::warn!("Ignoring unsupported OAUTH2_PROXY_MODE={}", other);
+                    config.mode.clone()
+                }
+            };
+        }
         if let Ok(val) = std::env::var("PUBLIC_BASE_URL") {
             config.public_base_url = val;
+        }
+        if let Ok(val) = std::env::var("UPSTREAM_URL") {
+            config.upstream_url = Some(val);
         }
         if let Ok(val) = std::env::var("OIDC_ISSUER") {
             config.oidc_issuer = val;
@@ -134,7 +168,22 @@ impl Config {
             anyhow::bail!("session_sqlite_path is required when session_backend is sqlite");
         }
 
+        if self.mode == ProxyMode::ReverseProxy {
+            let Some(upstream_url) = self.upstream_url.as_ref() else {
+                anyhow::bail!("upstream_url is required when mode is reverse_proxy");
+            };
+            if !upstream_url.starts_with("http://") && !upstream_url.starts_with("https://") {
+                anyhow::bail!("upstream_url must start with http:// or https://");
+            }
+        }
+
         Ok(())
+    }
+}
+
+impl Default for ProxyMode {
+    fn default() -> Self {
+        Self::AuthRequest
     }
 }
 
@@ -142,8 +191,13 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             config_file: PathBuf::from("config.toml"),
+            mode: ProxyMode::AuthRequest,
             listen_addr: "127.0.0.1:4180".to_string(),
             public_base_url: "https://legacy-app.example.com".to_string(),
+            upstream_url: None,
+            protected_prefixes: vec!["/".to_string()],
+            public_prefixes: vec!["/healthz".to_string()],
+            upstream_timeout_secs: default_upstream_timeout_secs(),
             cookie_name: "__Host_simple_idm_sso".to_string(),
             cookie_secret: "CHANGE_ME_TO_RANDOM_32_PLUS_CHARS".to_string(),
             cookie_samesite: "Lax".to_string(),
@@ -167,5 +221,38 @@ impl Default for Config {
             groups_header_name: "X-Auth-Groups".to_string(),
             groups_header_format: "csv".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn auth_request_mode_does_not_require_upstream_url() {
+        let mut config = Config::default();
+        config.mode = ProxyMode::AuthRequest;
+        config.upstream_url = None;
+
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn reverse_proxy_mode_requires_upstream_url() {
+        let mut config = Config::default();
+        config.mode = ProxyMode::ReverseProxy;
+        config.upstream_url = None;
+
+        let err = config.validate().unwrap_err().to_string();
+        assert!(err.contains("upstream_url is required"));
+    }
+
+    #[test]
+    fn reverse_proxy_mode_accepts_http_upstream_url() {
+        let mut config = Config::default();
+        config.mode = ProxyMode::ReverseProxy;
+        config.upstream_url = Some("http://127.0.0.1:3000".to_string());
+
+        config.validate().unwrap();
     }
 }

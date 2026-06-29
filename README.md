@@ -16,7 +16,7 @@ The repository is a Cargo workspace with multiple binaries and shared core crate
 
 - `simple-idm-server` - OAuth2/OIDC server, Admin API and Admin Web UI
 - `simple-idm-ctl` - CLI and TUI administration client
-- `simple-idm-oauth2-proxy` - OIDC auth proxy for legacy apps and nginx `auth_request`
+- `simple-idm-oauth2-proxy` - OIDC auth adapter for trusted headers, nginx `auth_request`, and single-upstream reverse proxy mode
 - `simple-idm-ssh-login` - SSH certificate login client
 - `simple-idm-ssh-signer` - SSH certificate signer service
 - `simple-idm-core` - shared server/core library
@@ -435,21 +435,36 @@ simple-idm-ctl logout
 
 ## OAuth2 Proxy
 
-`simple-idm-oauth2-proxy` protects legacy applications that do not speak OAuth2/OIDC.
+`simple-idm-oauth2-proxy` protects applications that do not implement their own
+OAuth2/OIDC login flow.
 
-Typical architecture:
+Ingress/auth-request architecture:
 
 ```text
 browser -> nginx -> simple-idm-oauth2-proxy -> legacy app
 ```
 
+Small reverse-proxy architecture:
+
+```text
+browser -> simple-idm-oauth2-proxy -> app
+```
+
+The reverse proxy mode is a focused single-upstream OIDC adapter, not a general
+nginx/Traefik replacement. Use nginx, Traefik, HAProxy, or OpenShift Route for
+TLS termination, edge hardening, buffering, request limits, or complex routing.
+
 It can inject headers such as:
 
 ```text
+X-Auth-Subject
 X-Auth-User
 X-Auth-Email
 X-Auth-Groups
 ```
+
+`X-Auth-Subject` is the stable OIDC `sub` claim and should be used for audit
+and durable identity. `X-Auth-User` is display/login oriented.
 
 See:
 
