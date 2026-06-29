@@ -672,41 +672,31 @@ struct ClaimMapRow {
     client_name: String,
     group_name: Option<String>,
     claim_name: String,
-    claim_value: Option<serde_json::Value>,
+    claim_value: Option<String>,
+    claim_value_json: Option<String>,
     claim_value_kind: String,
 }
 
 impl ClaimMapRow {
     fn claim_value_display(&self) -> String {
-        match &self.claim_value {
-            Some(serde_json::Value::String(v)) => v.clone(),
-            Some(serde_json::Value::Array(values)) => values
-                .iter()
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(", "),
-            Some(serde_json::Value::Null) | None => String::new(),
-            Some(v) => v.to_string(),
+        if self.claim_value_kind == "array" {
+            return self.claim_value_array_values().join(", ");
         }
+        self.claim_value.clone().unwrap_or_default()
     }
 
     fn claim_value_array_csv(&self) -> String {
-        match &self.claim_value {
-            Some(serde_json::Value::Array(values)) => values
-                .iter()
-                .map(|v| match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
-            Some(serde_json::Value::String(v)) => v.clone(),
-            Some(serde_json::Value::Null) | None => String::new(),
-            Some(v) => v.to_string(),
+        if self.claim_value_kind == "array" {
+            return self.claim_value_array_values().join("\n");
         }
+        self.claim_value.clone().unwrap_or_default()
+    }
+
+    fn claim_value_array_values(&self) -> Vec<String> {
+        self.claim_value_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<Vec<String>>(json).ok())
+            .unwrap_or_default()
     }
 
     fn group_scope(&self) -> String {
@@ -2047,6 +2037,28 @@ fn split_csv(v: &str) -> Vec<String> {
         .filter(|x| !x.is_empty())
         .map(|x| x.to_string())
         .collect()
+}
+
+fn split_claim_values(v: &str) -> Vec<String> {
+    v.split([',', '\n'])
+        .map(|x| x.trim())
+        .filter(|x| !x.is_empty())
+        .map(|x| x.to_string())
+        .collect()
+}
+
+fn claim_value_columns(kind: &str, raw_value: &str) -> (String, Option<String>, Option<String>) {
+    if kind == "array" {
+        let values = split_claim_values(raw_value);
+        let json = serde_json::to_string(&values).unwrap_or_else(|_| "[]".to_string());
+        ("array".to_string(), None, Some(json))
+    } else {
+        (
+            "single".to_string(),
+            Some(raw_value.trim().to_string()),
+            None,
+        )
+    }
 }
 
 fn selected_grant_types(form_values: &[String], fallback_csv: Option<&str>) -> Vec<String> {
@@ -7843,6 +7855,7 @@ async fn claims_page(
         return redir.into_response();
     }
 
+    let mut page_error = query.error.clone();
     let claim_maps = match sqlx::query_as::<_, ClaimMapRow>(
         r#"SELECT cm.id,
                   cm.client_id,
@@ -7851,6 +7864,7 @@ async fn claims_page(
                   g.name AS group_name,
                   cm.claim_name,
                   cm.claim_value,
+                  cm.claim_value_json,
                   cm.claim_value_kind
            FROM claim_maps cm
            JOIN oauth_clients oc ON oc.id = cm.client_id
@@ -7865,8 +7879,8 @@ async fn claims_page(
     {
         Ok(v) => v,
         Err(e) => {
-            return redirect_with("/admin/ui/claims", "error", &format!("DB error: {e}"))
-                .into_response();
+            page_error = Some(format!("DB error: {e}"));
+            Vec::new()
         }
     };
 
@@ -7938,6 +7952,7 @@ async fn claims_page(
                g.name AS group_name,
                cm.claim_name,
                cm.claim_value,
+               cm.claim_value_json,
                cm.claim_value_kind
         FROM claim_maps cm
         JOIN oauth_clients oc ON oc.id = cm.client_id
@@ -7979,7 +7994,7 @@ async fn claims_page(
     render_template(ClaimsTemplate {
         sections: nav_items(AdminSection::Claims),
         message: query.message,
-        error: query.error,
+        error: page_error,
         client_rows,
         groups,
         selected_client,
@@ -8030,11 +8045,8 @@ async fn client_claims_create(
         .filter(|v| !v.is_empty())
         .and_then(|v| Uuid::parse_str(v).ok());
 
-    let claim_value_json = if form.claim_value_kind == "array" {
-        serde_json::json!(split_csv(&form.claim_value))
-    } else {
-        serde_json::json!(form.claim_value.trim())
-    };
+    let (claim_value_kind, claim_value, claim_value_json) =
+        claim_value_columns(form.claim_value_kind.trim(), &form.claim_value);
 
     let return_path = if headers
         .get(header::REFERER)
@@ -8056,14 +8068,15 @@ async fn client_claims_create(
         )
     };
     let result = sqlx::query(
-        r#"INSERT INTO claim_maps (tenant_id, client_id, group_id, claim_name, claim_value, claim_value_kind)
-           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5::claim_value_kind)"#,
+        r#"INSERT INTO claim_maps (tenant_id, client_id, group_id, claim_name, claim_value, claim_value_kind, claim_value_json)
+           VALUES ('11111111-1111-1111-1111-111111111111', $1, $2, $3, $4, $5, $6)"#,
     )
     .bind(client_id)
     .bind(group_id)
     .bind(form.claim_name.trim())
+    .bind(claim_value)
+    .bind(claim_value_kind)
     .bind(claim_value_json)
-    .bind(form.claim_value_kind.trim())
     .execute(&state.db_pool)
     .await;
 
@@ -8109,18 +8122,16 @@ async fn claim_maps_update(
         )
     };
     let return_path = scoped_return_path_from_referer(&headers, prefix, fallback, keys);
-    let claim_value_json = if form.claim_value_kind == "array" {
-        serde_json::json!(split_csv(&form.claim_value))
-    } else {
-        serde_json::json!(form.claim_value.trim())
-    };
+    let (claim_value_kind, claim_value, claim_value_json) =
+        claim_value_columns(form.claim_value_kind.trim(), &form.claim_value);
 
     let result = sqlx::query(
         r#"
         UPDATE claim_maps
         SET claim_name = $2,
             claim_value = $3,
-            claim_value_kind = $4::claim_value_kind,
+            claim_value_kind = $4,
+            claim_value_json = $5,
             updated_at = NOW()
         WHERE id = $1
           AND deleted_at IS NULL
@@ -8128,8 +8139,9 @@ async fn claim_maps_update(
     )
     .bind(id)
     .bind(form.claim_name.trim())
+    .bind(claim_value)
+    .bind(claim_value_kind)
     .bind(claim_value_json)
-    .bind(form.claim_value_kind.trim())
     .execute(&state.db_pool)
     .await;
 
