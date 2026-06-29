@@ -1,4 +1,4 @@
-/// HTML templates for OAuth2 Authorization Code Flow
+/// HTML templates for OAuth2 Authorization Code Flow.
 use axum::response::Html;
 use std::collections::HashMap;
 use std::sync::OnceLock;
@@ -39,39 +39,44 @@ fn get_branding() -> &'static UiBranding {
     UI_BRANDING.get_or_init(UiBranding::default)
 }
 
-fn apply_branding(mut html: String) -> String {
+fn brand_label() -> String {
     let branding = get_branding();
     let brand_name = escape_html(&branding.brand_name);
-    let page_title = escape_html(&branding.page_title);
-    let brand_label = if let Some(domain) = &branding.brand_domain {
-        format!("{} • {}", brand_name, escape_html(domain))
-    } else {
-        brand_name.clone()
-    };
-
-    html = html.replace("Cloud App SSO", &page_title);
-    html = html.replace("Cloud App", &brand_name);
-    html = html.replace(
-        "you@company.com",
-        &format!("user@{}", brand_name.to_lowercase()),
-    );
-    html = html.replace(
-        "<div class=\"mb-6\">",
-        &format!(
-            "<div class=\"mb-6\"><p class=\"mb-2 text-xs font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-slate-300\">{}</p>",
-            brand_label
-        ),
-    );
-
     if let Some(domain) = &branding.brand_domain {
-        let domain = escape_html(domain);
-        html = html.replace(
-            "Secure sign-in for internal dashboards and admin tools.",
-            &format!("Secure sign-in for {}.", domain),
-        );
+        format!("{} · {}", brand_name, escape_html(domain))
+    } else {
+        brand_name
     }
+}
 
-    html
+fn default_description() -> String {
+    let branding = get_branding();
+    if let Some(domain) = &branding.brand_domain {
+        format!("Secure sign-in for {}.", escape_html(domain))
+    } else {
+        "Secure sign-in for internal dashboards and admin tools.".to_string()
+    }
+}
+
+fn page_title(title: &str) -> String {
+    format!(
+        "{} - {}",
+        escape_html(title),
+        escape_html(&get_branding().page_title)
+    )
+}
+
+fn user_placeholder() -> String {
+    format!(
+        "user@{}",
+        get_branding()
+            .brand_name
+            .to_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+    )
 }
 
 fn escape_html(input: &str) -> String {
@@ -83,7 +88,80 @@ fn escape_html(input: &str) -> String {
         .replace('\'', "&#39;")
 }
 
-/// Generate login page HTML
+fn render_page(
+    title: &str,
+    eyebrow: &str,
+    heading: &str,
+    description: &str,
+    body: &str,
+    footer: &str,
+    width_class: &str,
+) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en" data-bs-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{}</title>
+  <link href="/admin/ui/static/css/tabler.min.css" rel="stylesheet">
+  <link href="/admin/ui/static/css/tabler-icons.min.css" rel="stylesheet">
+  <script>
+    (function () {{
+      const t = localStorage.getItem('theme') || 'auto';
+      if (t === 'auto') {{
+        const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
+      }} else {{
+        document.documentElement.setAttribute('data-bs-theme', t);
+      }}
+    }})();
+  </script>
+</head>
+<body class="d-flex align-items-center justify-content-center min-vh-100 bg-body">
+  <div class="container-tight py-4 {}">
+    <div class="card card-md">
+      <div class="card-body">
+        <div class="mb-4">
+          <div class="text-secondary text-uppercase fw-semibold small mb-2">{}</div>
+          <h1 class="h2 mb-2">{}</h1>
+          <p class="text-secondary mb-0">{}</p>
+        </div>
+        {}
+        <div class="mt-4 text-center text-secondary small">
+          {}
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"#,
+        page_title(title),
+        width_class,
+        escape_html(eyebrow),
+        escape_html(heading),
+        description,
+        body,
+        footer
+    )
+}
+
+fn alert(variant: &str, message: &str) -> String {
+    format!(
+        r#"<div class="alert alert-{}" role="alert">{}</div>"#,
+        variant,
+        escape_html(message)
+    )
+}
+
+fn oidc_footer(label: &str) -> String {
+    format!(
+        r#"{label} · <a href="/.well-known/openid-configuration">Configuration</a>"#,
+        label = escape_html(label)
+    )
+}
+
+/// Generate login page HTML.
 #[allow(dead_code)]
 pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> String {
     let client_id = params.get("client_id").map(|s| s.as_str()).unwrap_or("");
@@ -102,1138 +180,203 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
         .map(|s| s.as_str())
         .unwrap_or("");
 
-    let error_html = if let Some(err) = error {
-        format!(
-            r#"<div class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
-                <div class="flex items-center gap-2">
-                    <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                    </svg>
-                    <span>{}</span>
-                </div>
-            </div>"#,
-            err
-        )
-    } else {
-        String::new()
-    };
+    let error_html = error.map(|err| alert("danger", err)).unwrap_or_default();
+    let body = format!(
+        r#"{error_html}
+<div class="alert alert-info" role="alert">
+  Signing in to <strong>{client}</strong>
+</div>
+<form method="POST" action="/oauth2/login">
+  <input type="hidden" name="client_id" value="{client_id}">
+  <input type="hidden" name="redirect_uri" value="{redirect_uri}">
+  <input type="hidden" name="state" value="{state}">
+  <input type="hidden" name="nonce" value="{nonce}">
+  <input type="hidden" name="tenant" value="{tenant}">
+  <input type="hidden" name="scope" value="{scope}">
+  <input type="hidden" name="csrf_token" value="{csrf_token}">
+  <input type="hidden" name="code_challenge" value="{code_challenge}">
+  <input type="hidden" name="code_challenge_method" value="{code_challenge_method}">
+  <div class="mb-3">
+    <label class="form-label" for="username">Email or username</label>
+    <input class="form-control" type="text" id="username" name="username" required autofocus autocomplete="username" placeholder="{placeholder}">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="password">Password</label>
+    <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password" placeholder="********">
+  </div>
+  <button type="submit" class="btn btn-primary w-100">Sign in</button>
+</form>"#,
+        error_html = error_html,
+        client = escape_html(client_id),
+        client_id = escape_html(client_id),
+        redirect_uri = escape_html(redirect_uri),
+        state = escape_html(state),
+        nonce = escape_html(nonce),
+        tenant = escape_html(tenant),
+        scope = escape_html(scope),
+        csrf_token = escape_html(csrf_token),
+        code_challenge = escape_html(code_challenge),
+        code_challenge_method = escape_html(code_challenge_method),
+        placeholder = escape_html(&user_placeholder())
+    );
 
-    apply_branding(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Sign In - Cloud App SSO</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {{
-            darkMode: 'media',
-            theme: {{
-                extend: {{
-                    fontFamily: {{
-                        sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
-                    }}
-                }}
-            }}
-        }}
-    </script>
-    <style>
-        :root {{
-            --bg-start: #f1f5f9;
-            --bg-mid: #e2e8f0;
-            --bg-end: #f1f5f9;
-            --streak-1: rgba(59, 130, 246, 0.25);
-            --streak-2: rgba(96, 165, 250, 0.35);
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            :root {{
-                --bg-start: #05080f;
-                --bg-mid: #080f1a;
-                --bg-end: #05080f;
-                --streak-1: rgba(84, 141, 214, 0.6);
-                --streak-2: rgba(120, 170, 235, 0.75);
-            }}
-        }}
-
-        .bg-shell {{
-            background: linear-gradient(
-                135deg,
-                var(--bg-start) 0%,
-                var(--bg-mid) 50%,
-                var(--bg-end) 100%
-            );
-        }}
-
-        .bg-streak {{
-            position: absolute;
-            left: -30%;
-            top: -30%;
-            width: 200%;
-            height: 2px;
-            background: linear-gradient(
-                90deg,
-                transparent,
-                var(--streak-1),
-                var(--streak-2),
-                transparent
-            );
-            opacity: 0;
-            transform: rotate(35deg);
-            animation: streakMove 12s ease-in-out infinite;
-        }}
-
-        .bg-streak.streak-2 {{
-            animation-duration: 15s;
-            animation-delay: 3s;
-            height: 3px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-3 {{
-            animation-duration: 18s;
-            animation-delay: 6s;
-            height: 2px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-4 {{
-            animation-duration: 20s;
-            animation-delay: 9s;
-            height: 1px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-5 {{
-            animation-duration: 22s;
-            animation-delay: 12s;
-            height: 2px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-6 {{
-            animation-duration: 26s;
-            animation-delay: 15s;
-            height: 3px;
-            opacity: 0;
-        }}
-
-        @keyframes streakMove {{
-            0% {{
-                transform: translate(-40%, -40%) rotate(35deg);
-                opacity: 0;
-            }}
-            8% {{
-                opacity: 0.9;
-            }}
-            16% {{
-                opacity: 0;
-            }}
-            100% {{
-                transform: translate(40%, 40%) rotate(35deg);
-                opacity: 0;
-            }}
-        }}
-    </style>
-</head>
-<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
-    <div class="absolute inset-0 -z-10 bg-shell"></div>
-    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
-    <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
-            <div class="mb-6">
-                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
-                <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Sign in to your workspace</h1>
-                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Secure sign-in for internal dashboards and admin tools.</p>
-            </div>
-
-            <div class="space-y-4">
-                {}
-            </div>
-
-            <div class="mt-5 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-400">
-                Signing in to <span class="font-semibold text-slate-900 dark:text-white">{}</span>
-            </div>
-
-            <form method="POST" action="/oauth2/login" class="mt-6 space-y-4">
-                <input type="hidden" name="client_id" value="{}">
-                <input type="hidden" name="redirect_uri" value="{}">
-                <input type="hidden" name="state" value="{}">
-                <input type="hidden" name="nonce" value="{}">
-                <input type="hidden" name="tenant" value="{}">
-                <input type="hidden" name="scope" value="{}">
-                <input type="hidden" name="csrf_token" value="{}">
-                <input type="hidden" name="code_challenge" value="{}">
-                <input type="hidden" name="code_challenge_method" value="{}">
-
-                <div>
-                    <label for="username" class="text-sm font-medium text-slate-700 dark:text-slate-200">Email or username</label>
-                    <input
-                        type="text"
-                        id="username"
-                        name="username"
-                        required
-                        autofocus
-                        autocomplete="username"
-                        placeholder="you@company.com"
-                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
-                    >
-                </div>
-
-                <div>
-                    <label for="password" class="text-sm font-medium text-slate-700 dark:text-slate-200">Password</label>
-                    <input
-                        type="password"
-                        id="password"
-                        name="password"
-                        required
-                        autocomplete="current-password"
-                        placeholder="••••••••"
-                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
-                    >
-                </div>
-
-                <button type="submit" class="mt-2 w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
-                    Sign in
-                </button>
-            </form>
-
-            <div class="mt-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                Protected by OAuth 2.0 + OIDC •
-                <a class="font-medium text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white" href="/.well-known/openid-configuration">Configuration</a>
-            </div>
-        </div>
-    </div>
-</body>
-</html>"#,
-        error_html,
-        client_id,
-        client_id,
-        redirect_uri,
-        state,
-        nonce,
-        tenant,
-        scope,
-        csrf_token,
-        code_challenge,
-        code_challenge_method
-    ))
+    render_page(
+        "Sign in",
+        &brand_label(),
+        "Sign in to your workspace",
+        &default_description(),
+        &body,
+        &oidc_footer("Protected by OAuth 2.0 + OIDC"),
+        "",
+    )
 }
 
-/// Generate error page HTML
+/// Generate error page HTML.
 #[allow(dead_code)]
 pub fn error_page(error: &str, error_description: &str) -> String {
-    apply_branding(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Error - Cloud App SSO</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {{
-            darkMode: 'media',
-            theme: {{
-                extend: {{
-                    fontFamily: {{
-                        sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
-                    }}
-                }}
-            }}
-        }}
-    </script>
-    <style>
-        :root {{
-            --bg-start: #f1f5f9;
-            --bg-mid: #e2e8f0;
-            --bg-end: #f1f5f9;
-            --streak-1: rgba(59, 130, 246, 0.25);
-            --streak-2: rgba(96, 165, 250, 0.35);
-        }}
+    let body = format!(
+        r#"<div class="alert alert-danger" role="alert">
+  <div class="fw-semibold mb-1">Authorization error</div>
+  <div>{}</div>
+  <div class="small mt-2">Error code: <code>{}</code></div>
+</div>
+<a href="javascript:history.back()" class="btn btn-primary w-100">Go back</a>"#,
+        escape_html(error_description),
+        escape_html(error)
+    );
 
-        @media (prefers-color-scheme: dark) {{
-            :root {{
-                --bg-start: #05080f;
-                --bg-mid: #080f1a;
-                --bg-end: #05080f;
-                --streak-1: rgba(84, 141, 214, 0.6);
-                --streak-2: rgba(120, 170, 235, 0.75);
-            }}
-        }}
-
-        .bg-shell {{
-            background: linear-gradient(
-                135deg,
-                var(--bg-start) 0%,
-                var(--bg-mid) 50%,
-                var(--bg-end) 100%
-            );
-        }}
-
-        .bg-streak {{
-            position: absolute;
-            left: -30%;
-            top: -30%;
-            width: 200%;
-            height: 2px;
-            background: linear-gradient(
-                90deg,
-                transparent,
-                var(--streak-1),
-                var(--streak-2),
-                transparent
-            );
-            opacity: 0;
-            transform: rotate(35deg);
-            animation: streakMove 12s ease-in-out infinite;
-        }}
-
-        .bg-streak.streak-2 {{
-            animation-duration: 15s;
-            animation-delay: 3s;
-            height: 3px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-3 {{
-            animation-duration: 18s;
-            animation-delay: 6s;
-            height: 2px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-4 {{
-            animation-duration: 20s;
-            animation-delay: 9s;
-            height: 1px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-5 {{
-            animation-duration: 22s;
-            animation-delay: 12s;
-            height: 2px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-6 {{
-            animation-duration: 26s;
-            animation-delay: 15s;
-            height: 3px;
-            opacity: 0;
-        }}
-
-        @keyframes streakMove {{
-            0% {{
-                transform: translate(-40%, -40%) rotate(35deg);
-                opacity: 0;
-            }}
-            8% {{
-                opacity: 0.9;
-            }}
-            16% {{
-                opacity: 0;
-            }}
-            100% {{
-                transform: translate(40%, 40%) rotate(35deg);
-                opacity: 0;
-            }}
-        }}
-    </style>
-</head>
-<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
-    <div class="absolute inset-0 -z-10 bg-shell"></div>
-    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
-    <div class="relative z-10 mx-auto flex w-full max-w-lg items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-10 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
-            <div class="mb-6">
-                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
-                <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Sign in to your workspace</h1>
-                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Secure sign-in for internal dashboards and admin tools.</p>
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-300">
-                <div class="flex items-start gap-3">
-                    <div class="mt-0.5 flex h-9 w-9 items-center justify-center rounded-full bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-200">
-                        <svg class="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v4m0 4h.01M10.29 3.86l-7.1 12.27A2 2 0 004.9 19h14.2a2 2 0 001.71-2.87l-7.1-12.27a2 2 0 00-3.42 0z" />
-                        </svg>
-                    </div>
-                    <div>
-                        <p class="font-medium text-slate-900 dark:text-white">Authorization error</p>
-                        <p class="mt-1 text-sm text-slate-600 dark:text-slate-400">{}</p>
-                        <p class="mt-3 text-xs font-medium text-red-700 dark:text-red-300">Error code: {}</p>
-                    </div>
-                </div>
-            </div>
-
-            <div class="mt-6">
-                <a href="javascript:history.back()" class="inline-flex w-full items-center justify-center rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
-                    Go back
-                </a>
-            </div>
-
-            <div class="mt-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                Protected by OAuth 2.0 + OIDC •
-                <a class="font-medium text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white" href="/.well-known/openid-configuration">Configuration</a>
-            </div>
-        </div>
-    </div>
-</body>
-</html>"#,
-        error_description, error
-    ))
+    render_page(
+        "Error",
+        &brand_label(),
+        "Sign in to your workspace",
+        &default_description(),
+        &body,
+        &oidc_footer("Protected by OAuth 2.0 + OIDC"),
+        "container-narrow",
+    )
 }
 
 #[allow(dead_code)]
 pub fn password_reset_page(token: &str, error: Option<&str>) -> String {
-    let error_html = if let Some(err) = error {
-        format!(
-            r#"<div class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
-                <div class="flex items-center gap-2">
-                    <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                    </svg>
-                    <span>{}</span>
-                </div>
-            </div>"#,
-            err
-        )
-    } else {
-        String::new()
-    };
+    let error_html = error.map(|err| alert("danger", err)).unwrap_or_default();
+    let body = format!(
+        r#"{error_html}
+<form method="POST" action="/password/reset">
+  <input type="hidden" name="token" value="{token}">
+  <div class="mb-3">
+    <label class="form-label" for="password">New password</label>
+    <input class="form-control" type="password" id="password" name="password" required autocomplete="new-password" placeholder="Create a strong password">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="password_confirm">Confirm password</label>
+    <input class="form-control" type="password" id="password_confirm" name="password_confirm" required autocomplete="new-password" placeholder="Repeat your password">
+  </div>
+  <button type="submit" class="btn btn-primary w-100">Update password</button>
+</form>"#,
+        error_html = error_html,
+        token = escape_html(token)
+    );
 
-    apply_branding(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reset Password - Cloud App SSO</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {{
-            darkMode: 'media',
-            theme: {{
-                extend: {{
-                    fontFamily: {{
-                        sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
-                    }}
-                }}
-            }}
-        }}
-    </script>
-    <style>
-        :root {{
-            --bg-start: #f1f5f9;
-            --bg-mid: #e2e8f0;
-            --bg-end: #f1f5f9;
-            --streak-1: rgba(59, 130, 246, 0.25);
-            --streak-2: rgba(96, 165, 250, 0.35);
-        }}
-
-        @media (prefers-color-scheme: dark) {{
-            :root {{
-                --bg-start: #05080f;
-                --bg-mid: #080f1a;
-                --bg-end: #05080f;
-                --streak-1: rgba(84, 141, 214, 0.6);
-                --streak-2: rgba(120, 170, 235, 0.75);
-            }}
-        }}
-
-        .bg-shell {{
-            background: linear-gradient(
-                135deg,
-                var(--bg-start) 0%,
-                var(--bg-mid) 50%,
-                var(--bg-end) 100%
-            );
-        }}
-
-        .bg-streak {{
-            position: absolute;
-            left: -30%;
-            top: -30%;
-            width: 200%;
-            height: 2px;
-            background: linear-gradient(
-                90deg,
-                transparent,
-                var(--streak-1),
-                var(--streak-2),
-                transparent
-            );
-            opacity: 0;
-            transform: rotate(35deg);
-            animation: streakMove 12s ease-in-out infinite;
-        }}
-
-        .bg-streak.streak-2 {{
-            animation-duration: 15s;
-            animation-delay: 3s;
-            height: 3px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-3 {{
-            animation-duration: 18s;
-            animation-delay: 6s;
-            height: 2px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-4 {{
-            animation-duration: 20s;
-            animation-delay: 9s;
-            height: 1px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-5 {{
-            animation-duration: 22s;
-            animation-delay: 12s;
-            height: 2px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-6 {{
-            animation-duration: 26s;
-            animation-delay: 15s;
-            height: 3px;
-            opacity: 0;
-        }}
-
-        @keyframes streakMove {{
-            0% {{
-                transform: translate(-40%, -40%) rotate(35deg);
-                opacity: 0;
-            }}
-            8% {{
-                opacity: 0.9;
-            }}
-            16% {{
-                opacity: 0;
-            }}
-            100% {{
-                transform: translate(40%, 40%) rotate(35deg);
-                opacity: 0;
-            }}
-        }}
-    </style>
-</head>
-<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
-    <div class="absolute inset-0 -z-10 bg-shell"></div>
-    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
-    <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
-            <div class="mb-6">
-                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
-                <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Set a new password</h1>
-                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Choose a strong password you don't use elsewhere.</p>
-            </div>
-
-            <div class="space-y-4">
-                {}
-            </div>
-
-            <form method="POST" action="/password/reset" class="mt-6 space-y-4">
-                <input type="hidden" name="token" value="{}">
-                <div>
-                    <label for="password" class="text-sm font-medium text-slate-700 dark:text-slate-200">New password</label>
-                    <input
-                        type="password"
-                        id="password"
-                        name="password"
-                        required
-                        autocomplete="new-password"
-                        placeholder="Create a strong password"
-                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
-                    >
-                </div>
-
-                <div>
-                    <label for="password_confirm" class="text-sm font-medium text-slate-700 dark:text-slate-200">Confirm password</label>
-                    <input
-                        type="password"
-                        id="password_confirm"
-                        name="password_confirm"
-                        required
-                        autocomplete="new-password"
-                        placeholder="Repeat your password"
-                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
-                    >
-                </div>
-
-                <button type="submit" class="mt-2 w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
-                    Update password
-                </button>
-            </form>
-
-            <div class="mt-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                Protected by OAuth 2.0 + OIDC •
-                <a class="font-medium text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white" href="/.well-known/openid-configuration">Configuration</a>
-            </div>
-        </div>
-    </div>
-</body>
-</html>"#,
-        error_html, token
-    ))
+    render_page(
+        "Reset password",
+        &brand_label(),
+        "Set a new password",
+        "Choose a strong password you do not use elsewhere.",
+        &body,
+        &oidc_footer("Protected by OAuth 2.0 + OIDC"),
+        "",
+    )
 }
 
 #[allow(dead_code)]
 pub fn password_reset_success_page() -> String {
-    apply_branding(r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Password Updated - Cloud App SSO</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {
-            darkMode: 'media',
-            theme: {
-                extend: {
-                    fontFamily: {
-                        sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
-                    }
-                }
-            }
-        }
-    </script>
-    <style>
-        :root {
-            --bg-start: #f1f5f9;
-            --bg-mid: #e2e8f0;
-            --bg-end: #f1f5f9;
-            --streak-1: rgba(59, 130, 246, 0.25);
-            --streak-2: rgba(96, 165, 250, 0.35);
-        }
+    let body = r#"<div class="alert alert-success" role="alert">
+  Your password has been updated successfully.
+</div>"#;
 
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg-start: #05080f;
-                --bg-mid: #080f1a;
-                --bg-end: #05080f;
-                --streak-1: rgba(84, 141, 214, 0.6);
-                --streak-2: rgba(120, 170, 235, 0.75);
-            }
-        }
-
-        .bg-shell {
-            background: linear-gradient(
-                135deg,
-                var(--bg-start) 0%,
-                var(--bg-mid) 50%,
-                var(--bg-end) 100%
-            );
-        }
-
-        .bg-streak {
-            position: absolute;
-            left: -30%;
-            top: -30%;
-            width: 200%;
-            height: 2px;
-            background: linear-gradient(
-                90deg,
-                transparent,
-                var(--streak-1),
-                var(--streak-2),
-                transparent
-            );
-            opacity: 0;
-            transform: rotate(35deg);
-            animation: streakMove 12s ease-in-out infinite;
-        }
-
-        .bg-streak.streak-2 {
-            animation-duration: 15s;
-            animation-delay: 3s;
-            height: 3px;
-            opacity: 0;
-        }
-
-        .bg-streak.streak-3 {
-            animation-duration: 18s;
-            animation-delay: 6s;
-            height: 2px;
-            opacity: 0;
-        }
-
-        .bg-streak.streak-4 {
-            animation-duration: 20s;
-            animation-delay: 9s;
-            height: 1px;
-            opacity: 0;
-        }
-
-        .bg-streak.streak-5 {
-            animation-duration: 22s;
-            animation-delay: 12s;
-            height: 2px;
-            opacity: 0;
-        }
-
-        .bg-streak.streak-6 {
-            animation-duration: 26s;
-            animation-delay: 15s;
-            height: 3px;
-            opacity: 0;
-        }
-
-        @keyframes streakMove {
-            0% {
-                transform: translate(-40%, -40%) rotate(35deg);
-                opacity: 0;
-            }
-            8% {
-                opacity: 0.9;
-            }
-            16% {
-                opacity: 0;
-            }
-            100% {
-                transform: translate(40%, 40%) rotate(35deg);
-                opacity: 0;
-            }
-        }
-    </style>
-</head>
-<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
-    <div class="absolute inset-0 -z-10 bg-shell"></div>
-    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
-    <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
-            <div class="mb-6">
-                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Cloud App</p>
-                <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Password updated</h1>
-                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">You can now close this window or return to your app.</p>
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-800 dark:text-slate-300">
-                Your password has been updated successfully.
-            </div>
-
-            <div class="mt-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                Protected by OAuth 2.0 + OIDC •
-                <a class="font-medium text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white" href="/.well-known/openid-configuration">Configuration</a>
-            </div>
-        </div>
-    </div>
-</body>
-</html>"#
-        .to_string())
+    render_page(
+        "Password updated",
+        &brand_label(),
+        "Password updated",
+        "You can now close this window or return to your app.",
+        body,
+        &oidc_footer("Protected by OAuth 2.0 + OIDC"),
+        "",
+    )
 }
 
-/// Generate device verification form page HTML
+/// Generate device verification form page HTML.
 #[allow(dead_code)]
 pub fn device_verify_page(
     user_code: Option<&str>,
     error: Option<&str>,
     success: Option<&str>,
 ) -> String {
-    let error_html = if let Some(err) = error {
-        format!(
-            r#"<div class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200">
-                <div class="flex items-center gap-2">
-                    <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-                    </svg>
-                    <span>{}</span>
-                </div>
-            </div>"#,
-            err
-        )
-    } else {
-        String::new()
-    };
-
-    let success_html = if let Some(msg) = success {
-        format!(
-            r#"<div class="rounded-xl border border-green-200 bg-green-50 px-4 py-3 text-sm text-green-700 dark:border-green-500/30 dark:bg-green-500/10 dark:text-green-200">
-                <div class="flex items-center gap-2">
-                    <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                        <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
-                    </svg>
-                    <span>{}</span>
-                </div>
-            </div>"#,
-            msg
-        )
-    } else {
-        String::new()
-    };
-
+    let error_html = error.map(|err| alert("danger", err)).unwrap_or_default();
+    let success_html = success.map(|msg| alert("success", msg)).unwrap_or_default();
     let user_code_value = user_code.unwrap_or("");
 
-    apply_branding(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Device Authorization - Cloud App SSO</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script>
-        tailwind.config = {{
-            darkMode: 'media',
-            theme: {{
-                extend: {{
-                    fontFamily: {{
-                        sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
-                    }}
-                }}
-            }}
-        }}
-    </script>
-    <style>
-        :root {{
-            --bg-start: #f1f5f9;
-            --bg-mid: #e2e8f0;
-            --bg-end: #f1f5f9;
-            --streak-1: rgba(59, 130, 246, 0.25);
-            --streak-2: rgba(96, 165, 250, 0.35);
-        }}
+    let body = format!(
+        r#"{error_html}
+{success_html}
+<form method="POST" action="/device">
+  <div class="mb-3">
+    <label class="form-label" for="user_code">Device code</label>
+    <input class="form-control text-center font-monospace text-uppercase" type="text" id="user_code" name="user_code" value="{user_code}" required autofocus placeholder="XXXX-XXXX" pattern="[A-Z0-9]{{4}}-[A-Z0-9]{{4}}" maxlength="9">
+    <div class="form-hint">Format: XXXX-XXXX (8 characters)</div>
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="username">Email or username</label>
+    <input class="form-control" type="text" id="username" name="username" required autocomplete="username" placeholder="{placeholder}">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="password">Password</label>
+    <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password" placeholder="********">
+  </div>
+  <button type="submit" class="btn btn-primary w-100">Authorize device</button>
+</form>"#,
+        error_html = error_html,
+        success_html = success_html,
+        user_code = escape_html(user_code_value),
+        placeholder = escape_html(&user_placeholder())
+    );
 
-        @media (prefers-color-scheme: dark) {{
-            :root {{
-                --bg-start: #05080f;
-                --bg-mid: #080f1a;
-                --bg-end: #05080f;
-                --streak-1: rgba(84, 141, 214, 0.6);
-                --streak-2: rgba(120, 170, 235, 0.75);
-            }}
-        }}
-
-        .bg-shell {{
-            background: linear-gradient(
-                135deg,
-                var(--bg-start) 0%,
-                var(--bg-mid) 50%,
-                var(--bg-end) 100%
-            );
-        }}
-
-        .bg-streak {{
-            position: absolute;
-            left: -30%;
-            top: -30%;
-            width: 200%;
-            height: 2px;
-            background: linear-gradient(
-                90deg,
-                transparent,
-                var(--streak-1),
-                var(--streak-2),
-                transparent
-            );
-            opacity: 0;
-            transform: rotate(35deg);
-            animation: streakMove 12s ease-in-out infinite;
-        }}
-
-        .bg-streak.streak-2 {{
-            animation-duration: 15s;
-            animation-delay: 3s;
-            height: 3px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-3 {{
-            animation-duration: 18s;
-            animation-delay: 6s;
-            height: 2px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-4 {{
-            animation-duration: 20s;
-            animation-delay: 9s;
-            height: 1px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-5 {{
-            animation-duration: 22s;
-            animation-delay: 12s;
-            height: 2px;
-            opacity: 0;
-        }}
-
-        .bg-streak.streak-6 {{
-            animation-duration: 26s;
-            animation-delay: 15s;
-            height: 3px;
-            opacity: 0;
-        }}
-
-        @keyframes streakMove {{
-            0% {{
-                transform: translate(-40%, -40%) rotate(35deg);
-                opacity: 0;
-            }}
-            8% {{
-                opacity: 0.9;
-            }}
-            16% {{
-                opacity: 0;
-            }}
-            100% {{
-                transform: translate(40%, 40%) rotate(35deg);
-                opacity: 0;
-            }}
-        }}
-    </style>
-</head>
-<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
-    <div class="absolute inset-0 -z-10 bg-shell"></div>
-    <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
-    <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
-    <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
-        <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
-            <div class="mb-6">
-                <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">Device Authorization</p>
-                <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">Connect your device</h1>
-                <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">Enter the code shown on your device and sign in to authorize access.</p>
-            </div>
-
-            <div class="space-y-4">
-                {}
-                {}
-            </div>
-
-            <form method="POST" action="/device" class="mt-6 space-y-4">
-                <div>
-                    <label for="user_code" class="text-sm font-medium text-slate-700 dark:text-slate-200">Device code</label>
-                    <input
-                        type="text"
-                        id="user_code"
-                        name="user_code"
-                        value="{}"
-                        required
-                        autofocus
-                        placeholder="XXXX-XXXX"
-                        pattern="[A-Z0-9]{{4}}-[A-Z0-9]{{4}}"
-                        maxlength="9"
-                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 font-mono text-center tracking-wider uppercase shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
-                    >
-                    <p class="mt-1 text-xs text-slate-500 dark:text-slate-400">Format: XXXX-XXXX (8 characters)</p>
-                </div>
-
-                <div>
-                    <label for="username" class="text-sm font-medium text-slate-700 dark:text-slate-200">Email or username</label>
-                    <input
-                        type="text"
-                        id="username"
-                        name="username"
-                        required
-                        autocomplete="username"
-                        placeholder="you@company.com"
-                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
-                    >
-                </div>
-
-                <div>
-                    <label for="password" class="text-sm font-medium text-slate-700 dark:text-slate-200">Password</label>
-                    <input
-                        type="password"
-                        id="password"
-                        name="password"
-                        required
-                        autocomplete="current-password"
-                        placeholder="••••••••"
-                        class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 shadow-sm transition focus:border-slate-500 focus:outline-none focus:ring-2 focus:ring-slate-200 dark:border-slate-700 dark:bg-slate-900 dark:text-white dark:focus:border-slate-400 dark:focus:ring-slate-500/30"
-                    >
-                </div>
-
-                <button type="submit" class="mt-2 w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
-                    Authorize device
-                </button>
-            </form>
-
-            <div class="mt-6 text-center text-xs text-slate-500 dark:text-slate-400">
-                Protected by OAuth 2.0 Device Flow •
-                <a class="font-medium text-slate-700 hover:text-slate-900 dark:text-slate-300 dark:hover:text-white" href="/.well-known/openid-configuration">Configuration</a>
-            </div>
-        </div>
-    </div>
-</body>
-</html>"#,
-        error_html, success_html, user_code_value
-    ))
+    render_page(
+        "Device authorization",
+        "Device Authorization",
+        "Connect your device",
+        "Enter the code shown on your device and sign in to authorize access.",
+        &body,
+        &oidc_footer("Protected by OAuth 2.0 Device Flow"),
+        "",
+    )
 }
 
-/// Generate callback HTML
-/// This page will post a message to the opener window and close itself
+/// Generate callback HTML.
+/// This page will post a message to the opener window and close itself.
 #[allow(dead_code)]
 pub fn callback_page(success: bool, base_header: &str, detail: &str) -> Html<String> {
-    let (title, heading, box_classes, icon_svg) = if success {
-        (
-            "Login successful",
-            "Login successful!",
-            "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-200",
-            r#"<svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.707a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 10-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/>
-               </svg>"#,
-        )
+    let (title, heading, variant) = if success {
+        ("Login successful", "Login successful", "success")
     } else {
-        (
-            "Login failed",
-            "Login failed!",
-            "border-red-200 bg-red-50 text-red-700 dark:border-red-500/30 dark:bg-red-500/10 dark:text-red-200",
-            r#"<svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-                <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clip-rule="evenodd"/>
-               </svg>"#,
-        )
+        ("Login failed", "Login failed", "danger")
     };
 
-    // (Volitelné) velmi jednoduché HTML escaping, ať ti tam jednou nepřileze '<'
-    let detail = detail
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;");
+    let detail = escape_html(detail);
+    let body = format!(
+        r#"<div class="alert alert-{variant}" role="alert">{detail}</div>
+<button type="button" onclick="window.close();" class="btn btn-primary w-100">Close window</button>"#,
+        variant = variant,
+        detail = detail
+    );
 
-    Html(apply_branding(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{title}</title>
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {{
-      darkMode: 'media',
-      theme: {{
-        extend: {{
-          fontFamily: {{
-            sans: ['Avenir Next', 'Trebuchet MS', 'Lucida Grande', 'sans-serif']
-          }}
-        }}
-      }}
-    }}
-  </script>
-  <style>
-    :root {{
-      --bg-start: #f1f5f9;
-      --bg-mid: #e2e8f0;
-      --bg-end: #f1f5f9;
-      --streak-1: rgba(59, 130, 246, 0.25);
-      --streak-2: rgba(96, 165, 250, 0.35);
-    }}
-    @media (prefers-color-scheme: dark) {{
-      :root {{
-        --bg-start: #05080f;
-        --bg-mid: #080f1a;
-        --bg-end: #05080f;
-        --streak-1: rgba(84, 141, 214, 0.6);
-        --streak-2: rgba(120, 170, 235, 0.75);
-      }}
-    }}
-    .bg-shell {{
-      background: linear-gradient(135deg, var(--bg-start) 0%, var(--bg-mid) 50%, var(--bg-end) 100%);
-    }}
-    .bg-streak {{
-      position: absolute;
-      left: -30%;
-      top: -30%;
-      width: 200%;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, var(--streak-1), var(--streak-2), transparent);
-      opacity: 0;
-      transform: rotate(35deg);
-      animation: streakMove 12s ease-in-out infinite;
-    }}
-    .bg-streak.streak-2 {{ animation-duration: 15s; animation-delay: 3s; height: 3px; }}
-    .bg-streak.streak-3 {{ animation-duration: 18s; animation-delay: 6s; height: 2px; }}
-    .bg-streak.streak-4 {{ animation-duration: 20s; animation-delay: 9s; height: 1px; }}
-    .bg-streak.streak-5 {{ animation-duration: 22s; animation-delay: 12s; height: 2px; }}
-    .bg-streak.streak-6 {{ animation-duration: 26s; animation-delay: 15s; height: 3px; }}
-    @keyframes streakMove {{
-      0% {{ transform: translate(-40%, -40%) rotate(35deg); opacity: 0; }}
-      8% {{ opacity: 0.9; }}
-      16% {{ opacity: 0; }}
-      100% {{ transform: translate(40%, 40%) rotate(35deg); opacity: 0; }}
-    }}
-  </style>
-</head>
-
-<body class="relative min-h-screen overflow-hidden px-4 py-10 font-sans text-slate-900 dark:text-slate-100">
-  <div class="absolute inset-0 -z-10 bg-shell"></div>
-  <div class="bg-streak streak-1 z-0 pointer-events-none"></div>
-  <div class="bg-streak streak-2 z-0 pointer-events-none"></div>
-  <div class="bg-streak streak-3 z-0 pointer-events-none"></div>
-  <div class="bg-streak streak-4 z-0 pointer-events-none"></div>
-  <div class="bg-streak streak-5 z-0 pointer-events-none"></div>
-  <div class="bg-streak streak-6 z-0 pointer-events-none"></div>
-
-  <div class="relative z-10 mx-auto flex w-full max-w-md items-center justify-center">
-    <div class="rounded-2xl border border-slate-200 bg-white p-8 shadow-md dark:border-slate-800 dark:bg-slate-900 dark:shadow-xl">
-      <div class="mb-6">
-        <p class="text-xs font-semibold uppercase tracking-[0.2em] text-slate-500 dark:text-slate-400">{base_header}</p>
-        <h1 class="mt-2 text-2xl font-semibold text-slate-900 dark:text-white">{heading}</h1>
-        <p class="mt-2 text-sm text-slate-500 dark:text-slate-400">{detail}</p>
-      </div>
-
-      <div class="rounded-xl border px-4 py-3 text-sm {box_classes}">
-        <div class="flex items-center gap-2">
-          {icon_svg}
-          <span>{detail}</span>
-        </div>
-      </div>
-
-      <div class="mt-6 flex flex-col gap-3">
-        <button type="button"
-          onclick="window.close();"
-          class="w-full rounded-xl bg-slate-900 px-4 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900 dark:hover:bg-slate-200">
-          Close window
-        </button>
-
-        <div class="text-center text-xs text-slate-500 dark:text-slate-400">
-          Protected by OAuth 2.0 Device Flow
-        </div>
-      </div>
-    </div>
-  </div>
-</body>
-</html>
-"#,
-        title = title,
-        base_header = base_header,
-        heading = heading,
-        detail = detail,
-        box_classes = box_classes,
-        icon_svg = icon_svg,
-    )))
+    Html(render_page(
+        title,
+        base_header,
+        heading,
+        &detail,
+        &body,
+        "Protected by OAuth 2.0 Device Flow",
+        "",
+    ))
 }

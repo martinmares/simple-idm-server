@@ -20,29 +20,86 @@ pub fn callback_page(success: bool, base_header: &str, detail: &str) -> Html<Str
         .replace('"', "&quot;")
         .replace('\'', "&#39;");
 
-    let badge = if success {
-        "border-emerald-200 bg-emerald-50 text-emerald-700"
-    } else {
-        "border-red-200 bg-red-50 text-red-700"
-    };
+    let badge = if success { "success" } else { "danger" };
 
     Html(format!(
         r#"<!DOCTYPE html>
-<html lang=\"en\">
+<html lang="en">
 <head>
-  <meta charset=\"UTF-8\">
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{}</title>
-  <script src=\"https://cdn.tailwindcss.com\"></script>
+  <style>
+    :root {{
+      color-scheme: light dark;
+      --bg: #f9fafb;
+      --fg: #1f2937;
+      --muted: #6b7280;
+      --card: #ffffff;
+      --border: #e5e7eb;
+      --success-bg: #dff6e5;
+      --success-fg: #1b7f37;
+      --success-border: #a9e5b8;
+      --danger-bg: #fae1e1;
+      --danger-fg: #b42323;
+      --danger-border: #f3b8b8;
+    }}
+    @media (prefers-color-scheme: dark) {{
+      :root {{
+        --bg: #111827;
+        --fg: #e5e7eb;
+        --muted: #9ca3af;
+        --card: #1f2937;
+        --border: #374151;
+        --success-bg: #12351f;
+        --success-fg: #8bd79d;
+        --success-border: #2f7d46;
+        --danger-bg: #3a1616;
+        --danger-fg: #e98e8e;
+        --danger-border: #7f2d2d;
+      }}
+    }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 1rem;
+      background: var(--bg);
+      color: var(--fg);
+      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    .card {{
+      width: 100%;
+      max-width: 28rem;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: var(--card);
+      padding: 1.5rem;
+      box-shadow: 0 10px 28px rgba(0, 0, 0, .18);
+    }}
+    .badge {{
+      margin-top: 1rem;
+      border: 1px solid var(--{}-border);
+      border-radius: 6px;
+      background: var(--{}-bg);
+      color: var(--{}-fg);
+      padding: .75rem 1rem;
+      font-size: .875rem;
+    }}
+    h1 {{ margin: 0; font-size: 1.25rem; }}
+    p {{ color: var(--muted); font-size: .75rem; margin: .75rem 0 0; }}
+  </style>
 </head>
-<body class=\"min-h-screen bg-slate-50 flex items-center justify-center p-4\">
-  <div class=\"w-full max-w-md rounded-2xl border border-slate-200 bg-white p-6 shadow-lg\">
-    <h1 class=\"text-xl font-bold text-slate-900\">{}</h1>
-    <div class=\"mt-4 rounded-lg border px-4 py-3 text-sm {}\">{}</div>
-    <p class=\"mt-3 text-xs text-slate-500\">You can close this window.</p>
+<body>
+  <div class="card">
+    <h1>{}</h1>
+    <div class="badge">{}</div>
+    <p>You can close this window.</p>
   </div>
 </body>
 </html>"#,
-        title, heading, badge, detail
+        title, badge, badge, badge, heading, detail
     ))
 }
