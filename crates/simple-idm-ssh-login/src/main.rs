@@ -2,8 +2,15 @@ use clap::{Parser, Subcommand};
 use simple_idm_core::ssh_login::{SshLoginConfig, commands};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (git ",
+    env!("SIMPLE_IDM_GIT_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "simple-idm-ssh-login")]
+#[command(name = "simple-idm-ssh-login", version = VERSION)]
 #[command(about = "SSH certificate login via Simple IDM", long_about = None)]
 struct Cli {
     #[command(subcommand)]

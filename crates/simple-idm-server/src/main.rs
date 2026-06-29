@@ -17,6 +17,13 @@ use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 mod web_admin;
 
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (git ",
+    env!("SIMPLE_IDM_GIT_SHA"),
+    ")"
+);
+
 fn install_rustls_provider() {
     if rustls::crypto::CryptoProvider::get_default().is_none() {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
@@ -24,7 +31,7 @@ fn install_rustls_provider() {
 }
 
 #[derive(Parser, Debug)]
-#[command(name = "simple-idm-server")]
+#[command(name = "simple-idm-server", version = VERSION)]
 struct CliArgs {
     /// Explicit path to env file (has priority over ./.env and /app/.env)
     #[arg(long)]

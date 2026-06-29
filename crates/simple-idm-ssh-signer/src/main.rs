@@ -14,8 +14,15 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (git ",
+    env!("SIMPLE_IDM_GIT_SHA"),
+    ")"
+);
+
 #[derive(Parser)]
-#[command(name = "simple-idm-ssh-signer")]
+#[command(name = "simple-idm-ssh-signer", version = VERSION)]
 #[command(about = "SSH certificate signer for Simple IDM", long_about = None)]
 struct Cli {
     /// Path to config file (TOML)

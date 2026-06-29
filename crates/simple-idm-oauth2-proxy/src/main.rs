@@ -14,6 +14,7 @@ use axum::{
     routing::{any, get},
 };
 use base64::Engine;
+use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use simple_idm_core::proxy::config::{Config, ProxyMode};
@@ -26,6 +27,21 @@ use tokio_tungstenite::{
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (git ",
+    env!("SIMPLE_IDM_GIT_SHA"),
+    ")"
+);
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "simple-idm-oauth2-proxy",
+    version = VERSION,
+    about = "OAuth2/OIDC proxy for Simple IDM"
+)]
+struct Cli;
+
 #[derive(Clone)]
 struct AppState {
     config: Config,
@@ -36,6 +52,8 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let _cli = Cli::parse();
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()

@@ -20,6 +20,13 @@ use std::process::Command;
 use tabled::{Table, Tabled, settings::Style};
 use tokio::sync::oneshot;
 
+const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (git ",
+    env!("SIMPLE_IDM_GIT_SHA"),
+    ")"
+);
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Session {
     access_token: String,
@@ -118,7 +125,7 @@ fn is_session_valid(session: &Session) -> bool {
 #[derive(Parser, Debug)]
 #[command(
     name = "simple-idm-ctl",
-    version,
+    version = VERSION,
     about = "Admin CLI for simple-idm-server"
 )]
 struct Cli {
