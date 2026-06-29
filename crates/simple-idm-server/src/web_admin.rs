@@ -2,7 +2,7 @@ use askama::Template;
 use axum::{
     Router,
     extract::{Form, Multipart, Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -10,6 +10,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rand::RngExt;
+use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde_json::json;
@@ -30,6 +31,10 @@ use uuid::Uuid;
 
 const ADMIN_SESSION_COOKIE: &str = "sidm_admin_session";
 const ADMIN_SESSION_TTL_SECONDS: i64 = 8 * 60 * 60;
+
+#[derive(RustEmbed)]
+#[folder = "static/"]
+struct AdminAssets;
 
 #[derive(Clone)]
 pub struct WebAdminState {
@@ -1138,6 +1143,7 @@ pub fn router(state: WebAdminState) -> Router {
             get(federated_onboarding_callback),
         )
         .route("/admin/ui/static/users.js", get(users_js))
+        .route("/admin/ui/static/{*path}", get(admin_static_asset))
         .route("/admin/ui", get(ui_dashboard))
         .route("/admin/ui/", get(ui_dashboard))
         .route("/admin/ui/audit", get(audit_page))
@@ -1334,6 +1340,40 @@ async fn users_js() -> impl IntoResponse {
         )],
         USERS_PAGE_JS,
     )
+}
+
+async fn admin_static_asset(Path(path): Path<String>) -> Response {
+    let path = path.trim_start_matches('/');
+    let Some(file) = AdminAssets::get(path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(admin_static_content_type(path)),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+
+    (headers, file.data.into_owned()).into_response()
+}
+
+fn admin_static_content_type(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or_default() {
+        "css" => "text/css; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    }
 }
 
 const USERS_PAGE_JS: &str = r#"

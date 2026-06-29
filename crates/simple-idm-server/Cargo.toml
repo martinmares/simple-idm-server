@@ -55,6 +55,7 @@ anyhow = "1.0"
 validator = { version = "0.20", features = ["derive"] }
 regex = "1.12"
 tempfile = "3.27"
+rust-embed = "8.7"
 
 # HTTP client (for OIDC discovery)
 reqwest = { version = "0.13", features = ["json", "form"] }
