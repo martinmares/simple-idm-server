@@ -476,23 +476,39 @@ fn build_auth_headers(config: &Config, session: &Session) -> HeaderMap {
 }
 
 fn inject_auth_headers(config: &Config, session: &Session, headers: &mut HeaderMap) {
-    headers.insert(
+    insert_auth_header(
+        headers,
         HeaderName::from_static("x-auth-user"),
-        HeaderValue::from_str(&session.username).unwrap(),
+        &session.username,
     );
-    headers.insert(
+    insert_auth_header(
+        headers,
         HeaderName::from_static("x-auth-subject"),
-        HeaderValue::from_str(&session.subject).unwrap(),
+        &session.subject,
     );
     if let Some(ref email) = session.email {
-        headers.insert(
-            HeaderName::from_static("x-auth-email"),
-            HeaderValue::from_str(email).unwrap(),
-        );
+        insert_auth_header(headers, HeaderName::from_static("x-auth-email"), email);
     }
     let groups_header = serialize_groups(&session.groups, &config.groups_header_format);
-    let header_name: HeaderName = config.groups_header_name.parse().unwrap();
-    headers.insert(header_name, HeaderValue::from_str(&groups_header).unwrap());
+    match config.groups_header_name.parse::<HeaderName>() {
+        Ok(header_name) => insert_auth_header(headers, header_name, &groups_header),
+        Err(err) => tracing::warn!(
+            "Invalid groups header name '{}'; skipping groups header: {}",
+            config.groups_header_name,
+            err
+        ),
+    }
+}
+
+fn insert_auth_header(headers: &mut HeaderMap, name: HeaderName, value: &str) {
+    match HeaderValue::from_str(value) {
+        Ok(value) => {
+            headers.insert(name, value);
+        }
+        Err(err) => {
+            tracing::warn!("Skipping invalid auth header '{}': {}", name, err);
+        }
+    }
 }
 
 fn is_protected_path(config: &Config, path: &str) -> bool {

@@ -28,7 +28,13 @@ Cíl: forenzní stopa pro autentizaci, autorizaci a admin operace.
   - `AUTH_PROTECTION_ENABLED`,
   - `AUTH_FAILURE_WINDOW_SECONDS`,
   - `AUTH_MAX_FAILURES`,
-  - `AUTH_LOCKOUT_SECONDS`.
+  - `AUTH_LOCKOUT_SECONDS`,
+  - `AUTH_THROTTLE_CLEAR_ON_START` (pouze development/recovery).
+
+`AUTH_THROTTLE_CLEAR_ON_START=true` při startu serveru smaže tabulku
+`auth_throttle`. Default je `false`, protože perzistentní lockout má přežít
+restart služby. Pokud je reset zapnutý, server loguje výrazný `SECURITY WARNING`
+a admin Web UI zobrazuje červený konfigurační banner.
 
 ## Formát
 - Strukturované logy přes `tracing` (JSON/plain dle runtime konfigurace).

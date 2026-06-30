@@ -336,6 +336,31 @@ For `federated`, the user is linked by invitation and then approved by an admin.
 
 For `ad`, the selected `auth_provider_id` decides which AD/LDAP provider is used for password verification, onboarding and role sync.
 
+## Authentication Throttling
+
+Repeated authentication failures are tracked in the `auth_throttle` database table.
+The lockout survives service restarts by default, so restart loops cannot bypass
+brute-force protection.
+
+Runtime knobs:
+
+```text
+AUTH_PROTECTION_ENABLED=true
+AUTH_FAILURE_WINDOW_SECONDS=900
+AUTH_MAX_FAILURES=5
+AUTH_LOCKOUT_SECONDS=900
+```
+
+For development or emergency recovery only, the table can be cleared on server
+startup:
+
+```text
+AUTH_THROTTLE_CLEAR_ON_START=true
+```
+
+This is intentionally unsafe for production. When enabled, startup logs emit a
+`SECURITY WARNING` and the admin Web UI shows a prominent warning banner.
+
 ## OAuth2 Endpoints
 
 OIDC discovery:
