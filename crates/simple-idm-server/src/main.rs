@@ -92,6 +92,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.ui.brand_domain.clone(),
         config.ui.page_title.clone(),
     );
+    web_admin::set_auth_throttle_clear_on_start(config.auth_protection.clear_on_start);
 
     tracing::info!("Starting simple-idm-server");
     tracing::info!("Server: {}:{}", config.server.host, config.server.port);
@@ -114,6 +115,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Spusť migrace
     db::run_migrations(&db_pool).await?;
     tracing::info!("Migrations completed");
+
+    if config.auth_protection.clear_on_start {
+        tracing::warn!(
+            "SECURITY WARNING: AUTH_THROTTLE_CLEAR_ON_START=true; clearing auth_throttle table on startup. This weakens brute-force protection and should only be used for development/test recovery."
+        );
+        let deleted = sqlx::query("DELETE FROM auth_throttle")
+            .execute(&db_pool)
+            .await?
+            .rows_affected();
+        tracing::warn!(
+            "SECURITY WARNING: cleared {} auth throttle row(s) from auth_throttle",
+            deleted
+        );
+    }
 
     // Inicializuj JWT service
     let jwt_service = Arc::new(auth::JwtService::new(

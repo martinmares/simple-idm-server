@@ -110,6 +110,7 @@ pub struct AuthProtectionConfig {
     pub failure_window_seconds: i64,
     pub max_failures: i32,
     pub lockout_seconds: i64,
+    pub clear_on_start: bool,
 }
 
 impl Config {
@@ -267,6 +268,10 @@ impl Config {
             .unwrap_or_else(|_| "900".to_string())
             .parse()
             .unwrap_or(900);
+        let auth_throttle_clear_on_start = env::var("AUTH_THROTTLE_CLEAR_ON_START")
+            .unwrap_or_else(|_| "false".to_string())
+            .parse()
+            .unwrap_or(false);
 
         validate_admin_root_token_policy(&app_env, &admin_root_token)?;
 
@@ -336,6 +341,7 @@ impl Config {
                 failure_window_seconds: auth_failure_window_seconds,
                 max_failures: auth_max_failures,
                 lockout_seconds: auth_lockout_seconds,
+                clear_on_start: auth_throttle_clear_on_start,
             },
         })
     }

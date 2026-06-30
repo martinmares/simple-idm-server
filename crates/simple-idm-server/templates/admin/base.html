@@ -155,6 +155,15 @@
     <div class="page-wrapper">
       <div class="page-body">
         <div class="container-xl">
+          {% if let Some(warn) = admin_security_warning() %}
+          <div class="alert alert-danger d-flex align-items-start gap-2" role="alert">
+            <i class="ti ti-alert-triangle fs-2"></i>
+            <div>
+              <div class="fw-bold">Unsafe server configuration</div>
+              <div>{{ warn }}</div>
+            </div>
+          </div>
+          {% endif %}
           {% if let Some(msg) = message %}
           <div class="alert alert-success" role="alert">{{ msg }}</div>
           {% endif %}
