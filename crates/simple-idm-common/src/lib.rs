@@ -1,105 +1,152 @@
-use axum::response::Html;
+use axum::{
+    http::{HeaderMap, HeaderValue, StatusCode, header},
+    response::{Html, IntoResponse, Response},
+};
+use rust_embed::RustEmbed;
+
+#[derive(RustEmbed)]
+#[folder = "static/"]
+struct UiAssets;
+
+pub fn embedded_asset_response(path: &str) -> Response {
+    let path = path.trim_start_matches('/');
+    let Some(file) = UiAssets::get(path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(asset_content_type(path)),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+
+    (headers, file.data.into_owned()).into_response()
+}
+
+pub fn tabler_standalone_page(
+    title: &str,
+    eyebrow: &str,
+    heading: &str,
+    description: &str,
+    body: &str,
+    footer: &str,
+    width_class: &str,
+) -> String {
+    format!(
+        r#"<!doctype html>
+<html lang="en" data-bs-theme="auto">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>{tabler_css}</style>
+  <style>{tabler_icons_css}</style>
+  <script>
+    (function () {{
+      const t = localStorage.getItem('theme') || 'auto';
+      if (t === 'auto') {{
+        const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
+      }} else {{
+        document.documentElement.setAttribute('data-bs-theme', t);
+      }}
+    }})();
+  </script>
+</head>
+<body class="d-flex align-items-center justify-content-center min-vh-100 bg-body">
+  <div class="container-tight py-4 {width_class}">
+    <div class="card card-md">
+      <div class="card-body">
+        <div class="mb-4">
+          <div class="text-secondary text-uppercase fw-semibold small mb-2">{eyebrow}</div>
+          <h1 class="h2 mb-2">{heading}</h1>
+          <p class="text-secondary mb-0">{description}</p>
+        </div>
+        {body}
+        <div class="mt-4 text-center text-secondary small">
+          {footer}
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>"#,
+        title = escape_html(title),
+        tabler_css = embedded_text("css/tabler.min.css"),
+        tabler_icons_css = embedded_text("css/tabler-icons.min.css"),
+        width_class = width_class,
+        eyebrow = escape_html(eyebrow),
+        heading = escape_html(heading),
+        description = escape_html(description),
+        body = body,
+        footer = footer,
+    )
+}
 
 pub fn callback_page(success: bool, base_header: &str, detail: &str) -> Html<String> {
-    let title = if success {
-        format!("{} successful", base_header)
+    let (title, heading, variant) = if success {
+        (
+            format!("{} successful", base_header),
+            format!("{} successful", base_header),
+            "success",
+        )
     } else {
-        format!("{} failed", base_header)
+        (
+            format!("{} failed", base_header),
+            format!("{} failed", base_header),
+            "danger",
+        )
     };
 
-    let heading = if success {
-        format!("{} successful", base_header)
-    } else {
-        format!("{} failed", base_header)
-    };
+    let detail = escape_html(detail);
+    let body = format!(
+        r#"<div class="alert alert-{variant}" role="alert">{detail}</div>
+<button type="button" onclick="window.close();" class="btn btn-primary w-100">Close window</button>"#,
+        variant = variant,
+        detail = detail
+    );
 
-    let detail = detail
+    Html(tabler_standalone_page(
+        &title,
+        base_header,
+        &heading,
+        &detail,
+        &body,
+        "You can close this window.",
+        "",
+    ))
+}
+
+pub fn escape_html(input: &str) -> String {
+    input
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
-        .replace('\'', "&#39;");
+        .replace('\'', "&#39;")
+}
 
-    let badge = if success { "success" } else { "danger" };
+fn embedded_text(path: &str) -> String {
+    UiAssets::get(path)
+        .map(|file| String::from_utf8_lossy(file.data.as_ref()).into_owned())
+        .unwrap_or_default()
+}
 
-    Html(format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>{}</title>
-  <style>
-    :root {{
-      color-scheme: light dark;
-      --bg: #f9fafb;
-      --fg: #1f2937;
-      --muted: #6b7280;
-      --card: #ffffff;
-      --border: #e5e7eb;
-      --success-bg: #dff6e5;
-      --success-fg: #1b7f37;
-      --success-border: #a9e5b8;
-      --danger-bg: #fae1e1;
-      --danger-fg: #b42323;
-      --danger-border: #f3b8b8;
-    }}
-    @media (prefers-color-scheme: dark) {{
-      :root {{
-        --bg: #111827;
-        --fg: #e5e7eb;
-        --muted: #9ca3af;
-        --card: #1f2937;
-        --border: #374151;
-        --success-bg: #12351f;
-        --success-fg: #8bd79d;
-        --success-border: #2f7d46;
-        --danger-bg: #3a1616;
-        --danger-fg: #e98e8e;
-        --danger-border: #7f2d2d;
-      }}
-    }}
-    body {{
-      margin: 0;
-      min-height: 100vh;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      padding: 1rem;
-      background: var(--bg);
-      color: var(--fg);
-      font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }}
-    .card {{
-      width: 100%;
-      max-width: 28rem;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      background: var(--card);
-      padding: 1.5rem;
-      box-shadow: 0 10px 28px rgba(0, 0, 0, .18);
-    }}
-    .badge {{
-      margin-top: 1rem;
-      border: 1px solid var(--{}-border);
-      border-radius: 6px;
-      background: var(--{}-bg);
-      color: var(--{}-fg);
-      padding: .75rem 1rem;
-      font-size: .875rem;
-    }}
-    h1 {{ margin: 0; font-size: 1.25rem; }}
-    p {{ color: var(--muted); font-size: .75rem; margin: .75rem 0 0; }}
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>{}</h1>
-    <div class="badge">{}</div>
-    <p>You can close this window.</p>
-  </div>
-</body>
-</html>"#,
-        title, badge, badge, badge, heading, detail
-    ))
+fn asset_content_type(path: &str) -> &'static str {
+    match path.rsplit('.').next().unwrap_or_default() {
+        "css" => "text/css; charset=utf-8",
+        "js" => "application/javascript; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "ttf" => "font/ttf",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        _ => "application/octet-stream",
+    }
 }

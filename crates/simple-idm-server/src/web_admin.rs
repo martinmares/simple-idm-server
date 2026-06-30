@@ -2,7 +2,7 @@ use askama::Template;
 use axum::{
     Router,
     extract::{Form, Multipart, Path, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
     routing::{get, post},
 };
@@ -10,11 +10,11 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{DateTime, NaiveDateTime, Utc};
 use rand::RngExt;
-use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde_json::json;
 use sha2::Digest;
+use simple_idm_common::embedded_asset_response;
 use simple_idm_core::{
     admin::middleware::AdminAuth,
     db::{DbPool, models::User},
@@ -51,6 +51,7 @@ impl Default for WebAdminBranding {
 }
 
 static WEB_ADMIN_BRANDING: OnceLock<WebAdminBranding> = OnceLock::new();
+static AUTH_THROTTLE_CLEAR_ON_START: OnceLock<bool> = OnceLock::new();
 
 pub fn set_branding_from_config(
     brand_name: String,
@@ -64,8 +65,23 @@ pub fn set_branding_from_config(
     });
 }
 
+pub fn set_auth_throttle_clear_on_start(enabled: bool) {
+    let _ = AUTH_THROTTLE_CLEAR_ON_START.set(enabled);
+}
+
 fn web_admin_branding() -> &'static WebAdminBranding {
     WEB_ADMIN_BRANDING.get_or_init(WebAdminBranding::default)
+}
+
+fn auth_throttle_clear_on_start_warning() -> Option<String> {
+    if *AUTH_THROTTLE_CLEAR_ON_START.get_or_init(|| false) {
+        Some(
+            "SECURITY WARNING: AUTH_THROTTLE_CLEAR_ON_START=true. Authentication throttle records are cleared on every server startup. Disable this outside temporary development or recovery work."
+                .to_string(),
+        )
+    } else {
+        None
+    }
 }
 
 fn admin_brand_label() -> String {
@@ -98,13 +114,13 @@ trait AdminTemplateBranding {
     fn admin_product_title(&self) -> String {
         admin_product_title()
     }
+
+    fn admin_security_warning(&self) -> Option<String> {
+        auth_throttle_clear_on_start_warning()
+    }
 }
 
 impl<T> AdminTemplateBranding for T {}
-
-#[derive(RustEmbed)]
-#[folder = "static/"]
-struct AdminAssets;
 
 #[derive(Clone)]
 pub struct WebAdminState {
@@ -129,6 +145,7 @@ pub struct UserCreateForm {
     email: String,
     password: Option<String>,
     auth_mode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     auth_provider_id: Option<Uuid>,
     is_active: Option<String>,
     first_name: Option<String>,
@@ -143,6 +160,7 @@ pub struct UserUpdateForm {
     email: String,
     password: Option<String>,
     auth_mode: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     auth_provider_id: Option<Uuid>,
     is_active: Option<String>,
     first_name: Option<String>,
@@ -150,6 +168,17 @@ pub struct UserUpdateForm {
     recovery_email: Option<String>,
     phone_e164: Option<String>,
     note: Option<String>,
+}
+
+fn deserialize_optional_uuid<'de, D>(deserializer: D) -> Result<Option<Uuid>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    match value.as_deref().map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(raw) => Uuid::parse_str(raw).map(Some).map_err(de::Error::custom),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1403,37 +1432,7 @@ async fn users_js() -> impl IntoResponse {
 }
 
 async fn admin_static_asset(Path(path): Path<String>) -> Response {
-    let path = path.trim_start_matches('/');
-    let Some(file) = AdminAssets::get(path) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static(admin_static_content_type(path)),
-    );
-    headers.insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=31536000, immutable"),
-    );
-
-    (headers, file.data.into_owned()).into_response()
-}
-
-fn admin_static_content_type(path: &str) -> &'static str {
-    match path.rsplit('.').next().unwrap_or_default() {
-        "css" => "text/css; charset=utf-8",
-        "js" => "application/javascript; charset=utf-8",
-        "svg" => "image/svg+xml",
-        "woff2" => "font/woff2",
-        "woff" => "font/woff",
-        "ttf" => "font/ttf",
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        _ => "application/octet-stream",
-    }
+    embedded_asset_response(&path)
 }
 
 const USERS_PAGE_JS: &str = r#"
@@ -8440,5 +8439,32 @@ async fn claim_patterns_deactivate(
             &format!("Pattern delete failed: {e}"),
         )
         .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn user_update_form_accepts_empty_auth_provider_id() {
+        let form: UserUpdateForm = serde_urlencoded::from_str(
+            "email=user%40example.com&password=&auth_mode=local&auth_provider_id=&first_name=John&last_name=Doe",
+        )
+        .unwrap();
+
+        assert_eq!(form.auth_provider_id, None);
+        assert_eq!(form.first_name.as_deref(), Some("John"));
+        assert_eq!(form.last_name.as_deref(), Some("Doe"));
+    }
+
+    #[test]
+    fn user_create_form_accepts_empty_auth_provider_id() {
+        let form: UserCreateForm = serde_urlencoded::from_str(
+            "username=user&email=user%40example.com&password=secret&auth_mode=local&auth_provider_id=",
+        )
+        .unwrap();
+
+        assert_eq!(form.auth_provider_id, None);
     }
 }

@@ -3632,6 +3632,7 @@ name = "simple-idm-common"
 version = "0.9.0"
 dependencies = [
  "axum",
+ "rust-embed",
 ]
 
 [[package]]
@@ -3728,6 +3729,7 @@ dependencies = [
  "futures-util",
  "reqwest 0.13.1",
  "serde_json",
+ "simple-idm-common",
  "simple-idm-core",
  "tokio",
  "tokio-tungstenite",
@@ -3739,7 +3741,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-server"
-version = "0.9.5"
+version = "0.9.6"
 dependencies = [
  "anyhow",
  "argon2",
@@ -3761,7 +3763,6 @@ dependencies = [
  "regex",
  "reqwest 0.13.1",
  "rsa",
- "rust-embed",
  "rustls",
  "serde",
  "serde_json",

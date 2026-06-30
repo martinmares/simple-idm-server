@@ -22,6 +22,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
+use simple_idm_common::tabler_standalone_page;
 use sqlx;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -2472,8 +2473,19 @@ pub async fn handle_logout(
         state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
     let cookie = build_auth_session_cookie(None, 0, secure);
 
-    let mut response = Html("<html><body><h1>Logged out</h1><p>You have been successfully logged out.</p></body></html>")
-        .into_response();
+    let body = r#"<div class="alert alert-info mb-0" role="alert">
+  You have been signed out from Simple IDM.
+</div>"#;
+    let html = tabler_standalone_page(
+        "Signed out - Simple IDM",
+        "Simple IDM",
+        "Signed out",
+        "Your SSO session has been closed.",
+        body,
+        "Protected by Simple IDM",
+        "",
+    );
+    let mut response = Html(html).into_response();
 
     response
         .headers_mut()

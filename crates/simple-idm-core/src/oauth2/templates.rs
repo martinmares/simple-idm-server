@@ -1,5 +1,6 @@
 /// HTML templates for OAuth2 Authorization Code Flow.
 use axum::response::Html;
+use simple_idm_common::tabler_standalone_page;
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
@@ -59,11 +60,7 @@ fn default_description() -> String {
 }
 
 fn page_title(title: &str) -> String {
-    format!(
-        "{} - {}",
-        escape_html(title),
-        escape_html(&get_branding().page_title)
-    )
+    format!("{} - {}", title, get_branding().page_title)
 }
 
 fn user_placeholder() -> String {
@@ -97,52 +94,14 @@ fn render_page(
     footer: &str,
     width_class: &str,
 ) -> String {
-    format!(
-        r#"<!doctype html>
-<html lang="en" data-bs-theme="auto">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{}</title>
-  <link href="/admin/ui/static/css/tabler.min.css" rel="stylesheet">
-  <link href="/admin/ui/static/css/tabler-icons.min.css" rel="stylesheet">
-  <script>
-    (function () {{
-      const t = localStorage.getItem('theme') || 'auto';
-      if (t === 'auto') {{
-        const dark = window.matchMedia('(prefers-color-scheme: dark)').matches;
-        document.documentElement.setAttribute('data-bs-theme', dark ? 'dark' : 'light');
-      }} else {{
-        document.documentElement.setAttribute('data-bs-theme', t);
-      }}
-    }})();
-  </script>
-</head>
-<body class="d-flex align-items-center justify-content-center min-vh-100 bg-body">
-  <div class="container-tight py-4 {}">
-    <div class="card card-md">
-      <div class="card-body">
-        <div class="mb-4">
-          <div class="text-secondary text-uppercase fw-semibold small mb-2">{}</div>
-          <h1 class="h2 mb-2">{}</h1>
-          <p class="text-secondary mb-0">{}</p>
-        </div>
-        {}
-        <div class="mt-4 text-center text-secondary small">
-          {}
-        </div>
-      </div>
-    </div>
-  </div>
-</body>
-</html>"#,
-        page_title(title),
-        width_class,
-        escape_html(eyebrow),
-        escape_html(heading),
+    tabler_standalone_page(
+        &page_title(title),
+        eyebrow,
+        heading,
         description,
         body,
-        footer
+        footer,
+        width_class,
     )
 }
 

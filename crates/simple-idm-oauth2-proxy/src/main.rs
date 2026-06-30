@@ -17,6 +17,7 @@ use base64::Engine;
 use clap::Parser;
 use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
+use simple_idm_common::tabler_standalone_page;
 use simple_idm_core::proxy::config::{Config, ProxyMode};
 use simple_idm_core::proxy::oidc::OidcClient;
 use simple_idm_core::proxy::session::{Session, SessionStore};
@@ -402,55 +403,19 @@ async fn handle_logout(State(state): State<AppState>, headers: HeaderMap) -> imp
         state.config.cookie_name
     );
 
-    let body = r#"<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Signed out</title>
-  <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0;
-      min-height: 100vh;
-      display: grid;
-      place-items: center;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      background: #0f172a;
-      color: #e5e7eb;
-    }
-    main {
-      width: min(440px, calc(100vw - 32px));
-      border: 1px solid #334155;
-      border-radius: 10px;
-      background: #111827;
-      padding: 28px;
-      box-shadow: 0 20px 50px rgba(0,0,0,.25);
-    }
-    h1 { margin: 0 0 10px; font-size: 24px; }
-    p { margin: 0 0 18px; color: #9ca3af; line-height: 1.45; }
-    a {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-height: 38px;
-      padding: 0 14px;
-      border-radius: 7px;
-      background: #2563eb;
-      color: white;
-      text-decoration: none;
-      font-weight: 600;
-    }
-  </style>
-</head>
-<body>
-  <main>
-    <h1>Signed out</h1>
-    <p>You have been signed out from this application. Your SSO session may still be active.</p>
-    <a href="start?rd=%2F">Sign in again</a>
-  </main>
-</body>
-</html>"#;
+    let body = r#"<div class="alert alert-info" role="alert">
+  You have been signed out from this application. Your SSO session may still be active.
+</div>
+<a class="btn btn-primary w-100" href="start?rd=%2F">Sign in again</a>"#;
+    let body = tabler_standalone_page(
+        "Signed out",
+        "Simple IDM OAuth2 Proxy",
+        "Signed out",
+        "You have been signed out from this application.",
+        body,
+        "Your central SSO session may still be active.",
+        "",
+    );
 
     let mut response = Html(body).into_response();
 

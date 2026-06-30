@@ -29,6 +29,7 @@ pub async fn security_headers_middleware(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let is_https = request_is_https(&req, cfg.trust_proxy_headers);
+    let path = req.uri().path().to_string();
 
     let mut resp = next.run(req).await;
     let headers = resp.headers_mut();
@@ -41,12 +42,15 @@ pub async fn security_headers_middleware(
         "referrer-policy",
         HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
-    headers.insert(
-        "content-security-policy",
-        HeaderValue::from_static(
-            "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
-        ),
-    );
+    let csp = if matches!(path.as_str(), "/oauth2/authorize" | "/oauth2/login") {
+        // OAuth browser login ends with a 303 to a registered client redirect_uri.
+        // Chrome applies form-action to that navigation chain, so strict 'self'
+        // breaks valid cross-origin callbacks such as registry.cloud-app.cz/callback.
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https: http://localhost:* http://127.0.0.1:*"
+    } else {
+        "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+    };
+    headers.insert("content-security-policy", HeaderValue::from_static(csp));
 
     if is_https && matches!(cfg.app_env.as_str(), "prod" | "production") {
         headers.insert(
