@@ -220,8 +220,10 @@ pub async fn handle_device_verify(
     axum::extract::Form(req): axum::extract::Form<DeviceVerifyRequest>,
 ) -> impl IntoResponse {
     let mut throttle_keys = vec![format!("login:{}", req.username.trim().to_lowercase())];
-    if let Some(ip) = throttle::extract_client_ip(&headers, state.trust_proxy_headers) {
-        throttle_keys.push(format!("ip:{}", ip));
+    let client_ip = throttle::extract_client_ip(&headers, state.trust_proxy_headers)
+        .unwrap_or_else(|| "unknown".to_string());
+    if client_ip != "unknown" {
+        throttle_keys.push(format!("ip:{}", client_ip));
     }
     if state.auth_protection.enabled {
         for key in &throttle_keys {
@@ -380,7 +382,7 @@ pub async fn handle_device_verify(
                 "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)",
             )
             .bind(&req.user_code)
-            .bind("unknown") // TODO: extract real IP from request
+            .bind(&client_ip)
             .execute(&state.db_pool)
             .await;
 
@@ -439,7 +441,7 @@ pub async fn handle_device_verify(
             "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)",
         )
         .bind(&req.user_code)
-        .bind("unknown") // TODO: extract real IP from request
+        .bind(&client_ip)
         .execute(&state.db_pool)
         .await;
 
