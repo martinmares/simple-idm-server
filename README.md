@@ -6,6 +6,7 @@ Simple IDM is a Rust-based OAuth2/OIDC identity stack for small and medium envir
 - compact JWT tokens
 - group and claim mapping
 - legacy application SSO through reverse proxy headers
+- direct AD/LDAP auth proxy for small internal apps without OIDC
 - SSH certificate login
 - delegated authentication through Google/OIDC or AD/LDAP
 - browser-based and terminal administration
@@ -17,6 +18,7 @@ The repository is a Cargo workspace with multiple binaries and shared core crate
 - `simple-idm-server` - OAuth2/OIDC server, Admin API and Admin Web UI
 - `simple-idm-ctl` - CLI and TUI administration client
 - `simple-idm-oauth2-proxy` - OIDC auth adapter for trusted headers, nginx `auth_request`, and single-upstream reverse proxy mode
+- `simple-idm-ad-proxy` - AD/LDAP login adapter for nginx `auth_request` and trusted headers
 - `simple-idm-ssh-login` - SSH certificate login client
 - `simple-idm-ssh-signer` - SSH certificate signer service
 - `simple-idm-core` - shared server/core library

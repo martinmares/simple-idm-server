@@ -156,20 +156,7 @@ pub async fn verify_ldap_password(cfg: &LdapAuthConfig, login: &str, password: &
 async fn connect_and_bind_service(cfg: &LdapAuthConfig) -> Result<ldap3::Ldap> {
     cfg.validate()?;
 
-    let url = cfg.url();
-    let (conn, mut ldap) = LdapConnAsync::new(&url)
-        .await
-        .with_context(|| format!("Failed to connect to LDAP server: {}", url))?;
-    ldap3::drive!(conn);
-
-    match cfg.tls_mode {
-        LdapTlsMode::Ldaps => {}
-        LdapTlsMode::StartTls => {
-            return Err(anyhow!(
-                "StartTLS mode is not implemented in MVP; use LDAPS"
-            ));
-        }
-    }
+    let mut ldap = connect_ldap(cfg).await?;
 
     let bind_dn = cfg
         .bind_dn
@@ -185,6 +172,51 @@ async fn connect_and_bind_service(cfg: &LdapAuthConfig) -> Result<ldap3::Ldap> {
         .context("LDAP service bind request failed")?
         .success()
         .context("LDAP service bind failed")?;
+
+    Ok(ldap)
+}
+
+async fn connect_and_bind_user(
+    cfg: &LdapAuthConfig,
+    bind_login: &str,
+    password: &str,
+) -> Result<ldap3::Ldap> {
+    cfg.validate()?;
+
+    if password.is_empty() {
+        return Err(anyhow!("Password must not be empty"));
+    }
+
+    let mut ldap = connect_ldap(cfg).await?;
+
+    ldap.simple_bind(bind_login, password)
+        .await
+        .context("LDAP user bind request failed")?
+        .success()
+        .context("LDAP user bind failed")?;
+
+    Ok(ldap)
+}
+
+async fn connect_ldap(cfg: &LdapAuthConfig) -> Result<ldap3::Ldap> {
+    if cfg.allow_insecure {
+        tracing::warn!("LDAP allow_insecure=true is not fully supported in MVP");
+    }
+
+    let url = cfg.url();
+    let (conn, ldap) = LdapConnAsync::new(&url)
+        .await
+        .with_context(|| format!("Failed to connect to LDAP server: {}", url))?;
+    ldap3::drive!(conn);
+
+    match cfg.tls_mode {
+        LdapTlsMode::Ldaps => {}
+        LdapTlsMode::StartTls => {
+            return Err(anyhow!(
+                "StartTLS mode is not implemented in MVP; use LDAPS"
+            ));
+        }
+    }
 
     Ok(ldap)
 }
@@ -252,8 +284,30 @@ fn format_ad_object_guid(raw: &[u8]) -> Option<String> {
 pub async fn fetch_ldap_user_data(cfg: &LdapAuthConfig, login: &str) -> Result<LdapUserData> {
     let mut ldap = connect_and_bind_service(cfg).await?;
     let user_dn = find_user_dn(&mut ldap, cfg, login).await?;
+    fetch_ldap_user_data_by_dn(&mut ldap, cfg, &user_dn).await
+}
 
-    let escaped_dn = ldap3::ldap_escape(&user_dn);
+/// Verify user credentials and fetch AD/LDAP profile attributes + direct roles.
+///
+/// This variant binds directly as the user, then reads the user object through
+/// the same LDAP connection. It is useful when no service account is available.
+pub async fn fetch_ldap_user_data_with_user_bind(
+    cfg: &LdapAuthConfig,
+    bind_login: &str,
+    password: &str,
+    search_login: &str,
+) -> Result<LdapUserData> {
+    let mut ldap = connect_and_bind_user(cfg, bind_login, password).await?;
+    let user_dn = find_user_dn(&mut ldap, cfg, search_login).await?;
+    fetch_ldap_user_data_by_dn(&mut ldap, cfg, &user_dn).await
+}
+
+async fn fetch_ldap_user_data_by_dn(
+    ldap: &mut ldap3::Ldap,
+    cfg: &LdapAuthConfig,
+    user_dn: &str,
+) -> Result<LdapUserData> {
+    let escaped_dn = ldap3::ldap_escape(user_dn);
     let user_dn_filter = format!("(distinguishedName={})", escaped_dn);
 
     let (entries, _res) = ldap

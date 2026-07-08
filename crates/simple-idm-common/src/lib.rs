@@ -2,6 +2,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{Html, IntoResponse, Response},
 };
+use base64::Engine;
 use rust_embed::RustEmbed;
 
 #[derive(RustEmbed)]
@@ -76,8 +77,8 @@ pub fn tabler_standalone_page(
 </body>
 </html>"#,
         title = escape_html(title),
-        tabler_css = embedded_text("css/tabler.min.css"),
-        tabler_icons_css = embedded_text("css/tabler-icons.min.css"),
+        tabler_css = embedded_tabler_css(),
+        tabler_icons_css = embedded_tabler_icons_css(),
         width_class = width_class,
         eyebrow = escape_html(eyebrow),
         heading = escape_html(heading),
@@ -134,6 +135,40 @@ fn embedded_text(path: &str) -> String {
     UiAssets::get(path)
         .map(|file| String::from_utf8_lossy(file.data.as_ref()).into_owned())
         .unwrap_or_default()
+}
+
+fn embedded_tabler_css() -> String {
+    embedded_text("css/tabler.min.css").replace("/*# sourceMappingURL=tabler.min.css.map */", "")
+}
+
+fn embedded_tabler_icons_css() -> String {
+    let css = embedded_text("css/tabler-icons.min.css")
+        .replace("/*# sourceMappingURL=tabler-icons.min.css.map */", "");
+    let Some(font) = UiAssets::get("fonts/tabler-icons.woff2") else {
+        return css;
+    };
+
+    let font_b64 = base64::engine::general_purpose::STANDARD.encode(font.data.as_ref());
+    let font_face = format!(
+        r#"@font-face{{font-family:"tabler-icons";font-style:normal;font-weight:400;src:url("data:font/woff2;base64,{font_b64}") format("woff2")}}"#
+    );
+    replace_tabler_icons_font_face(&css, &font_face)
+}
+
+fn replace_tabler_icons_font_face(css: &str, replacement: &str) -> String {
+    let Some(start) = css.find(r#"@font-face{font-family:"tabler-icons""#) else {
+        return css.to_string();
+    };
+    let Some(end_rel) = css[start..].find("}.ti{") else {
+        return css.to_string();
+    };
+    let end = start + end_rel + 1;
+
+    let mut out = String::with_capacity(css.len() + replacement.len());
+    out.push_str(&css[..start]);
+    out.push_str(replacement);
+    out.push_str(&css[end..]);
+    out
 }
 
 fn asset_content_type(path: &str) -> &'static str {

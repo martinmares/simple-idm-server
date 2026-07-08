@@ -11,6 +11,10 @@ steps:
     dst: /usr/local/bin/simple-idm-oauth2-proxy
     mode: "0755"
   - action: add-file
+    src: ./target/x86_64-unknown-linux-musl/release/simple-idm-ad-proxy
+    dst: /usr/local/bin/simple-idm-ad-proxy
+    mode: "0755"
+  - action: add-file
     src: ./target/x86_64-unknown-linux-musl/release/simple-idm-server
     dst: /usr/local/bin/simple-idm-server
     mode: "0755"
