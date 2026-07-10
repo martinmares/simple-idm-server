@@ -3,7 +3,7 @@ use axum::{
     Form, Router,
     extract::{Query, State},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use base64::Engine;
@@ -135,7 +135,7 @@ struct HeaderConfig {
     #[serde(default = "default_true")]
     emit_x_auth: bool,
     #[serde(default = "default_true")]
-    emit_grafana_webauth: bool,
+    emit_webauth: bool,
     #[serde(default = "default_groups_header_name")]
     groups_header_name: String,
     #[serde(default = "default_groups_header_format")]
@@ -146,7 +146,7 @@ impl Default for HeaderConfig {
     fn default() -> Self {
         Self {
             emit_x_auth: true,
-            emit_grafana_webauth: true,
+            emit_webauth: true,
             groups_header_name: default_groups_header_name(),
             groups_header_format: default_groups_header_format(),
         }
@@ -176,7 +176,7 @@ struct Session {
     email: Option<String>,
     subject: String,
     groups: Vec<String>,
-    grafana_role: Option<String>,
+    header_role: Option<String>,
     raw_ad_groups: Vec<String>,
     expires_at: DateTime<Utc>,
 }
@@ -307,13 +307,12 @@ async fn handle_login(State(state): State<AppState>, Form(form): Form<LoginForm>
     let password = form.password.as_str();
 
     if username.is_empty() || password.is_empty() {
-        return Redirect::temporary(&format!(
+        return redirect_see_other(&format!(
             "{}?rd={}&error={}",
             login_path(&state.config),
             urlencoding::encode(&rd),
             urlencoding::encode("Username and password are required")
-        ))
-        .into_response();
+        ));
     }
 
     let ldap_user = match authenticate_and_fetch_user(&state.config.ldap, username, password).await
@@ -321,13 +320,12 @@ async fn handle_login(State(state): State<AppState>, Form(form): Form<LoginForm>
         Ok(user) => user,
         Err(err) => {
             tracing::warn!(username = %username, error = ?err, "AD login failed");
-            return Redirect::temporary(&format!(
+            return redirect_see_other(&format!(
                 "{}?rd={}&error={}",
                 login_path(&state.config),
                 urlencoding::encode(&rd),
                 urlencoding::encode(login_error_message(&err))
-            ))
-            .into_response();
+            ));
         }
     };
 
@@ -339,32 +337,37 @@ async fn handle_login(State(state): State<AppState>, Form(form): Form<LoginForm>
             raw_ad_groups_count = ldap_user.roles.len(),
             "AD login denied because no configured role mapping matched"
         );
-        return Redirect::temporary(&format!(
+        return redirect_see_other(&format!(
             "{}?rd={}&error={}",
             login_path(&state.config),
             urlencoding::encode(&rd),
             urlencoding::encode("You do not have permission to access this application")
-        ))
-        .into_response();
+        ));
     }
 
     let session = build_session(&state.config, username, ldap_user, mapped);
     let session_id = session.session_id.clone();
     let username = session.username.clone();
     let mapped_groups = session.groups.clone();
-    let mapped_role = session.grafana_role.clone();
+    let mapped_role = session.header_role.clone();
     state.sessions.insert(session);
 
     tracing::info!(
         username = %username,
         groups = ?mapped_groups,
-        grafana_role = ?mapped_role,
+        header_role = ?mapped_role,
         "AD login accepted"
     );
 
     let cookie = session_cookie(&state.config, &session_id);
-    let mut response = Redirect::temporary(&rd).into_response();
+    let mut response = redirect_see_other(&rd);
     append_set_cookie(response.headers_mut(), &cookie);
+    response
+}
+
+fn redirect_see_other(location: &str) -> Response {
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    insert_header(response.headers_mut(), header::LOCATION, location);
     response
 }
 
@@ -497,7 +500,7 @@ fn build_session(config: &Config, login: &str, user: LdapUserData, mapped: Mappe
         email,
         subject,
         groups: mapped.groups,
-        grafana_role: mapped.role,
+        header_role: mapped.role,
         raw_ad_groups: user.roles,
         expires_at: issued_at + Duration::seconds(config.session_max_age_seconds),
     }
@@ -541,7 +544,7 @@ fn map_roles(config: &Config, ad_groups: &[String]) -> MappedRoles {
         }
 
         if let Some(role) = mapping.emit_header_role.as_deref() {
-            role_candidates.push((mapping.priority, normalize_grafana_role(role)));
+            role_candidates.push((mapping.priority, normalize_header_role(role)));
         }
     }
 
@@ -549,7 +552,7 @@ fn map_roles(config: &Config, ad_groups: &[String]) -> MappedRoles {
 
     role_candidates.sort_by(|a, b| {
         a.0.cmp(&b.0)
-            .then_with(|| grafana_role_rank(&b.1).cmp(&grafana_role_rank(&a.1)))
+            .then_with(|| header_role_rank(&b.1).cmp(&header_role_rank(&a.1)))
     });
 
     MappedRoles {
@@ -591,7 +594,7 @@ fn extract_cn(dn: &str) -> Option<&str> {
     rest.split(',').next()
 }
 
-fn normalize_grafana_role(role: &str) -> String {
+fn normalize_header_role(role: &str) -> String {
     match role.trim().to_ascii_lowercase().as_str() {
         "admin" => "Admin".to_string(),
         "edit" | "editor" => "Editor".to_string(),
@@ -600,7 +603,7 @@ fn normalize_grafana_role(role: &str) -> String {
     }
 }
 
-fn grafana_role_rank(role: &str) -> i32 {
+fn header_role_rank(role: &str) -> i32 {
     match role {
         "Admin" => 3,
         "Editor" => 2,
@@ -634,12 +637,12 @@ fn build_auth_headers(config: &Config, session: &Session) -> HeaderMap {
                 err
             ),
         }
-        if let Some(role) = session.grafana_role.as_deref() {
+        if let Some(role) = session.header_role.as_deref() {
             insert_header(&mut headers, HeaderName::from_static("x-auth-role"), role);
         }
     }
 
-    if config.headers.emit_grafana_webauth {
+    if config.headers.emit_webauth {
         insert_header(
             &mut headers,
             HeaderName::from_static("x-webauth-user"),
@@ -652,7 +655,7 @@ fn build_auth_headers(config: &Config, session: &Session) -> HeaderMap {
                 email,
             );
         }
-        if let Some(role) = session.grafana_role.as_deref() {
+        if let Some(role) = session.header_role.as_deref() {
             insert_header(
                 &mut headers,
                 HeaderName::from_static("x-webauth-role"),

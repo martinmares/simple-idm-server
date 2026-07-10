@@ -84,7 +84,7 @@ X-Auth-Groups: grafana_viewer,ocp_tsm_admin
 X-Auth-Role: Viewer
 ```
 
-Grafana-compatible headers:
+WEBAUTH-compatible headers:
 
 ```text
 X-WEBAUTH-USER: <username>

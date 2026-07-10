@@ -44,7 +44,7 @@ require_mapped_group = true
 
 [headers]
 emit_x_auth = true
-emit_grafana_webauth = true
+emit_webauth = true
 groups_header_name = "X-Auth-Groups"
 groups_header_format = "csv" # csv | jsonb64
 
