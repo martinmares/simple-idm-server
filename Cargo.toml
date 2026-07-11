@@ -8,6 +8,7 @@ members = [
     "crates/simple-idm-ctl",
     "crates/simple-idm-oauth2-proxy",
     "crates/simple-idm-oidc-metadata-proxy",
+    "crates/simple-idm-token-proxy",
     "crates/simple-idm-ad-proxy",
     "crates/simple-idm-ssh-login",
     "crates/simple-idm-ssh-signer",
