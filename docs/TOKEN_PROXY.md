@@ -51,11 +51,16 @@ Build the Linux binary from the repository root:
 just release-linux-token-proxy
 ```
 
-Then build the image with the repository root as the Docker context:
+The Docker build context must be the repository root because the local Linux
+binary is under `target/`. From the repository root:
 
 ```bash
-docker build \
-  -f crates/simple-idm-token-proxy/Dockerfile \
-  -t simple-idm-token-proxy:local \
-  .
+just image-token-proxy
+```
+
+Or, when standing in the directory containing the Dockerfile:
+
+```bash
+cd crates/simple-idm-token-proxy
+docker build -f Dockerfile -t simple-idm-token-proxy:local ../..
 ```

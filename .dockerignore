@@ -4,6 +4,15 @@
 
 # Rust
 target/
+# Keep only the statically linked workload token proxy release binary for
+# Dockerfile-token-proxy. Every other build artifact stays excluded.
+!target/
+target/*
+!target/x86_64-unknown-linux-musl/
+target/x86_64-unknown-linux-musl/*
+!target/x86_64-unknown-linux-musl/release/
+target/x86_64-unknown-linux-musl/release/*
+!target/x86_64-unknown-linux-musl/release/simple-idm-token-proxy
 **/*.rs.bk
 *.pdb
 

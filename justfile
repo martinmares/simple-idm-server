@@ -32,6 +32,9 @@ release-linux-ssh-signer:
 
 release-linux-bins: release-linux-server release-linux-ctl release-linux-oauth2-proxy release-linux-oidc-metadata-proxy release-linux-token-proxy release-linux-ad-proxy release-linux-ssh-login release-linux-ssh-signer
 
+image-token-proxy tag="simple-idm-token-proxy:local":
+    docker build -f Dockerfile-token-proxy -t {{ tag }} .
+
 release-macos:
     cargo build --release --workspace
 
