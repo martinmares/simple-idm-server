@@ -74,7 +74,7 @@ upstream applications.
 
 ## Headers
 
-Generic headers:
+Canonical headers (enabled by default):
 
 ```text
 X-Auth-Subject: <AD objectGUID or fallback identity>
@@ -84,7 +84,7 @@ X-Auth-Groups: grafana_viewer,ocp_tsm_admin
 X-Auth-Role: Viewer
 ```
 
-WEBAUTH-compatible headers:
+Optional WEBAUTH compatibility aliases (`emit_webauth = true`):
 
 ```text
 X-WEBAUTH-USER: <username>
@@ -92,6 +92,11 @@ X-WEBAUTH-EMAIL: <email>
 X-WEBAUTH-GROUPS: grafana_viewer
 X-WEBAUTH-ROLE: Viewer
 ```
+
+Applications in the Simple IDM stack should consume only the canonical
+`X-Auth-*` contract. Keep WEBAUTH aliases disabled unless an upstream product
+requires them. For Grafana, nginx can map the canonical response headers to
+Grafana's configured `X-WEBAUTH-*` names at the final proxy boundary.
 
 ## nginx `auth_request`
 
@@ -175,5 +180,7 @@ whitelist = 127.0.0.1
 headers = Email:X-WEBAUTH-EMAIL Role:X-WEBAUTH-ROLE Groups:X-WEBAUTH-GROUPS
 ```
 
-The proxy emits `X-WEBAUTH-ROLE` as `Admin`, `Editor`, or `Viewer` when a role
-mapping sets `emit_header_role`.
+The recommended nginx integration reads `X-Auth-*` from the AD proxy
+`auth_request` response and sets the Grafana-specific `X-WEBAUTH-*` request
+headers only when proxying to Grafana. Set `emit_webauth = true` only when
+Grafana receives the AD proxy response headers directly.

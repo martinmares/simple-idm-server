@@ -134,7 +134,7 @@ impl Default for AuthzConfig {
 struct HeaderConfig {
     #[serde(default = "default_true")]
     emit_x_auth: bool,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     emit_webauth: bool,
     #[serde(default = "default_groups_header_name")]
     groups_header_name: String,
@@ -146,7 +146,7 @@ impl Default for HeaderConfig {
     fn default() -> Self {
         Self {
             emit_x_auth: true,
-            emit_webauth: true,
+            emit_webauth: false,
             groups_header_name: default_groups_header_name(),
             groups_header_format: default_groups_header_format(),
         }
@@ -1006,6 +1006,14 @@ fn default_role_priority() -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_headers_are_the_default() {
+        let headers = HeaderConfig::default();
+        assert!(headers.emit_x_auth);
+        assert!(!headers.emit_webauth);
+        assert_eq!(headers.groups_header_name, "X-Auth-Groups");
+    }
 
     #[test]
     fn extracts_cn_from_dn() {

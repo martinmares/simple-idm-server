@@ -44,7 +44,9 @@ require_mapped_group = true
 
 [headers]
 emit_x_auth = true
-emit_webauth = true
+# Optional compatibility aliases for software configured around
+# X-WEBAUTH-* (for example Grafana without an nginx header mapping).
+emit_webauth = false
 groups_header_name = "X-Auth-Groups"
 groups_header_format = "csv" # csv | jsonb64
 
