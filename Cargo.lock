@@ -3853,12 +3853,16 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-token-proxy"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
  "clap",
  "reqwest 0.13.1",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

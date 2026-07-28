@@ -1,10 +1,11 @@
 use std::{
     net::SocketAddr,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 
+use anyhow::Context;
 use axum::{
     Router,
     body::Bytes,
@@ -13,9 +14,11 @@ use axum::{
     response::{IntoResponse, Response},
     routing::any,
 };
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use reqwest::Url;
-use tokio::{fs, net::TcpListener};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use tokio::{fs, io::AsyncWriteExt, net::TcpListener};
 use tracing::{error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
@@ -30,22 +33,29 @@ const VERSION: &str = concat!(
 #[command(
     name = "simple-idm-token-proxy",
     version = VERSION,
-    about = "Small localhost reverse proxy that injects a fresh workload identity bearer token"
+    about = "Workload identity bearer-token proxy and authenticated asset fetcher"
 )]
 struct Cli {
-    /// Local listen address for the workload client.
-    #[arg(
-        long,
-        env = "SIMPLE_IDM_TOKEN_PROXY_LISTEN",
-        default_value = "127.0.0.1:9999"
-    )]
-    listen: SocketAddr,
+    #[command(subcommand)]
+    command: Command,
+}
 
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Run a localhost reverse proxy that injects a fresh bearer token.
+    Serve(ServeArgs),
+
+    /// Download authenticated runtime assets and exit.
+    Fetch(FetchArgs),
+}
+
+#[derive(Args, Debug, Clone)]
+struct CommonArgs {
     /// Upstream HTTP API base URL.
     #[arg(long, env = "SIMPLE_IDM_TOKEN_PROXY_UPSTREAM")]
     upstream: Url,
 
-    /// Projected workload identity token file. Required.
+    /// Projected workload identity token file.
     #[arg(long, env = "SIMPLE_IDM_TOKEN_PROXY_TOKEN_FILE")]
     token_file: PathBuf,
 
@@ -66,6 +76,45 @@ struct Cli {
     insecure_upstream_tls: bool,
 }
 
+#[derive(Args, Debug)]
+struct ServeArgs {
+    /// Local listen address for the workload client.
+    #[arg(
+        long,
+        env = "SIMPLE_IDM_TOKEN_PROXY_LISTEN",
+        default_value = "127.0.0.1:9999"
+    )]
+    listen: SocketAddr,
+
+    #[command(flatten)]
+    common: CommonArgs,
+}
+
+#[derive(Args, Debug)]
+struct FetchArgs {
+    #[command(flatten)]
+    common: CommonArgs,
+
+    /// Root directory below which fetched files are materialized.
+    #[arg(long, value_name = "DIR")]
+    output_dir: PathBuf,
+
+    /// JSON array of objects with source, target, optional mode and sha256.
+    #[arg(long, value_name = "JSON")]
+    files_json: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FetchFile {
+    source: String,
+    target: String,
+    #[serde(default = "default_file_mode")]
+    mode: String,
+    #[serde(default)]
+    sha256: String,
+}
+
 #[derive(Clone)]
 struct AppState {
     client: reqwest::Client,
@@ -78,40 +127,98 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let cli = Cli::parse();
-    if !cli.token_file.is_file() {
-        anyhow::bail!(
-            "token file does not exist or is not a file: {}",
-            cli.token_file.display()
-        );
+    match cli.command {
+        Command::Serve(args) => serve(args).await,
+        Command::Fetch(args) => fetch(args).await,
     }
+}
 
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(cli.timeout_seconds))
-        .redirect(reqwest::redirect::Policy::none());
-    if cli.insecure_upstream_tls {
-        warn!("insecure upstream TLS verification is enabled");
-        client_builder = client_builder.danger_accept_invalid_certs(true);
-    }
+async fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    validate_token_file(&args.common.token_file)?;
+    let client = build_client(&args.common)?;
 
     let state = AppState {
-        client: client_builder.build()?,
-        upstream: cli.upstream.clone(),
-        token_file: Arc::new(cli.token_file.clone()),
+        client,
+        upstream: args.common.upstream.clone(),
+        token_file: Arc::new(args.common.token_file.clone()),
     };
 
     info!("starting simple-idm-token-proxy");
-    info!("listen address: {}", cli.listen);
-    info!("upstream: {}", redact_url(&cli.upstream));
-    info!("token file: {}", cli.token_file.display());
+    info!("listen address: {}", args.listen);
+    info!("upstream: {}", redact_url(&args.common.upstream));
+    info!("token file: {}", args.common.token_file.display());
 
     let app = Router::new()
         .route("/healthz", any(healthz))
         .fallback(any(proxy))
         .with_state(state);
 
-    let listener = TcpListener::bind(cli.listen).await?;
+    let listener = TcpListener::bind(args.listen).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn fetch(args: FetchArgs) -> anyhow::Result<()> {
+    validate_token_file(&args.common.token_file)?;
+    let files: Vec<FetchFile> =
+        serde_json::from_str(&args.files_json).context("invalid --files-json")?;
+    validate_fetch_files(&files)?;
+    if files.is_empty() {
+        anyhow::bail!("--files-json must contain at least one file");
+    }
+
+    let client = build_client(&args.common)?;
+    let token = read_token(&args.common.token_file).await?;
+    let output_dir = absolute_output_dir(&args.output_dir)?;
+    fs::create_dir_all(&output_dir)
+        .await
+        .with_context(|| format!("create output directory {}", output_dir.display()))?;
+
+    let staging_dir = output_dir.join(format!(".runtime-assets-staging-{}", std::process::id()));
+    if fs::try_exists(&staging_dir).await? {
+        fs::remove_dir_all(&staging_dir).await?;
+    }
+    fs::create_dir_all(&staging_dir).await?;
+
+    let result = fetch_all_to_staging(&client, &args.common.upstream, &token, &staging_dir, &files)
+        .await
+        .and_then(|_| commit_staged_files(&staging_dir, &output_dir, &files));
+
+    if let Err(err) = fs::remove_dir_all(&staging_dir).await {
+        warn!(
+            "failed to remove staging directory {}: {err}",
+            staging_dir.display()
+        );
+    }
+    result?;
+
+    info!("runtime assets ready: {} files", files.len());
+    Ok(())
+}
+
+fn validate_token_file(token_file: &Path) -> anyhow::Result<()> {
+    if !token_file.is_file() {
+        anyhow::bail!(
+            "token file does not exist or is not a file: {}",
+            token_file.display()
+        );
+    }
+    Ok(())
+}
+
+fn build_client(args: &CommonArgs) -> anyhow::Result<reqwest::Client> {
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(args.timeout_seconds))
+        .redirect(reqwest::redirect::Policy::none());
+    if args.insecure_upstream_tls {
+        warn!("insecure upstream TLS verification is enabled");
+        client_builder = client_builder.danger_accept_invalid_certs(true);
+    }
+    Ok(client_builder.build()?)
+}
+
+fn default_file_mode() -> String {
+    "0440".to_string()
 }
 
 async fn healthz() -> impl IntoResponse {
@@ -191,13 +298,201 @@ async fn read_token(path: &Path) -> anyhow::Result<String> {
     Ok(token.to_string())
 }
 
+fn validate_fetch_files(files: &[FetchFile]) -> anyhow::Result<()> {
+    let mut targets = std::collections::HashSet::new();
+    for file in files {
+        let source = file.source.trim();
+        if source.is_empty() || !source.starts_with('/') {
+            anyhow::bail!("fetch source must be an absolute HTTP path: {source:?}");
+        }
+        let source_uri: Uri = source
+            .parse()
+            .with_context(|| format!("invalid fetch source URI: {source}"))?;
+        if source_uri.path().split('/').any(|part| part == "..") {
+            anyhow::bail!("fetch source must not contain '..': {source}");
+        }
+
+        let target = safe_relative_target(&file.target)?;
+        if !targets.insert(target.to_path_buf()) {
+            anyhow::bail!("duplicate fetch target: {}", target.display());
+        }
+        parse_file_mode(&file.mode)?;
+        validate_sha256(&file.sha256)?;
+    }
+    Ok(())
+}
+
+fn safe_relative_target(target: &str) -> anyhow::Result<&Path> {
+    let raw = target.trim();
+    if raw.contains('\\')
+        || raw
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        anyhow::bail!("fetch target contains an unsafe path segment: {raw:?}");
+    }
+    let target = Path::new(raw);
+    if target.as_os_str().is_empty() || target.is_absolute() {
+        anyhow::bail!("fetch target must be a non-empty relative path: {target:?}");
+    }
+    if target.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        anyhow::bail!("fetch target must stay below --output-dir: {target:?}");
+    }
+    Ok(target)
+}
+
+fn parse_file_mode(mode: &str) -> anyhow::Result<u32> {
+    let mode = mode.trim();
+    if mode.len() != 4 || !mode.starts_with('0') || !mode.chars().all(|c| ('0'..='7').contains(&c))
+    {
+        anyhow::bail!("file mode must use four octal digits such as 0440: {mode:?}");
+    }
+    let parsed = u32::from_str_radix(mode, 8)?;
+    if parsed > 0o777 {
+        anyhow::bail!("special permission bits are not supported: {mode}");
+    }
+    Ok(parsed)
+}
+
+fn validate_sha256(expected: &str) -> anyhow::Result<()> {
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let digest = expected.strip_prefix("sha256:").unwrap_or(expected);
+    if digest.len() != 64 || !digest.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("invalid SHA-256 digest: {expected:?}");
+    }
+    Ok(())
+}
+
+fn absolute_output_dir(output_dir: &Path) -> anyhow::Result<PathBuf> {
+    if !output_dir.is_absolute() {
+        anyhow::bail!(
+            "--output-dir must be an absolute path: {}",
+            output_dir.display()
+        );
+    }
+    Ok(output_dir.to_path_buf())
+}
+
+async fn fetch_all_to_staging(
+    client: &reqwest::Client,
+    upstream: &Url,
+    token: &str,
+    staging_dir: &Path,
+    files: &[FetchFile],
+) -> anyhow::Result<()> {
+    for file in files {
+        let uri: Uri = file.source.parse()?;
+        let url = build_upstream_url(upstream, &uri)?;
+        info!("fetching {}", url.path());
+        let response = client
+            .get(url.clone())
+            .bearer_auth(token)
+            .send()
+            .await
+            .with_context(|| format!("request {}", url.path()))?;
+        let status = response.status();
+        if !status.is_success() {
+            anyhow::bail!("fetch {} failed: HTTP {}", url.path(), status.as_u16());
+        }
+        let bytes = response
+            .bytes()
+            .await
+            .with_context(|| format!("read response {}", url.path()))?;
+        verify_sha256(&bytes, &file.sha256).with_context(|| format!("verify {}", url.path()))?;
+
+        let target = staging_dir.join(safe_relative_target(&file.target)?);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).await?;
+        }
+        let mut output = fs::File::create(&target)
+            .await
+            .with_context(|| format!("create {}", target.display()))?;
+        output.write_all(&bytes).await?;
+        output.sync_all().await?;
+        set_file_mode(&target, parse_file_mode(&file.mode)?).await?;
+        info!(
+            "staged {} mode={} bytes={}",
+            file.target,
+            file.mode,
+            bytes.len()
+        );
+    }
+    Ok(())
+}
+
+fn verify_sha256(bytes: &[u8], expected: &str) -> anyhow::Result<()> {
+    let expected = expected.trim();
+    if expected.is_empty() {
+        return Ok(());
+    }
+    let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
+    let actual = format!("{:x}", Sha256::digest(bytes));
+    if !actual.eq_ignore_ascii_case(expected) {
+        anyhow::bail!("SHA-256 mismatch: expected {expected}, got {actual}");
+    }
+    Ok(())
+}
+
+async fn set_file_mode(path: &Path, mode: u32) -> anyhow::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).await?;
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, mode);
+        warn!("file modes are not supported on this platform");
+    }
+    Ok(())
+}
+
+fn commit_staged_files(
+    staging_dir: &Path,
+    output_dir: &Path,
+    files: &[FetchFile],
+) -> anyhow::Result<()> {
+    for file in files {
+        let relative = safe_relative_target(&file.target)?;
+        let staged = staging_dir.join(relative);
+        let target = output_dir.join(relative);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&staged, &target).with_context(|| {
+            format!(
+                "move staged file {} to {}",
+                staged.display(),
+                target.display()
+            )
+        })?;
+        info!(
+            "stored {} mode={} path={}",
+            file.source,
+            file.mode,
+            target.display()
+        );
+    }
+    Ok(())
+}
+
 fn build_upstream_url(base: &Url, uri: &Uri) -> anyhow::Result<Url> {
     let request_path = uri.path();
     let base_path = base.path().trim_end_matches('/');
 
-    let path = if base_path.is_empty() || base_path == "/" {
-        request_path.to_string()
-    } else if request_path == base_path || request_path.starts_with(&format!("{base_path}/")) {
+    let path = if base_path.is_empty()
+        || base_path == "/"
+        || request_path == base_path
+        || request_path.starts_with(&format!("{base_path}/"))
+    {
         request_path.to_string()
     } else if request_path == "/" {
         base_path.to_string()
@@ -257,7 +552,11 @@ fn init_tracing() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::http::header;
+    use axum::{
+        http::{HeaderValue, header},
+        routing::get,
+    };
+    use tempfile::tempdir;
 
     #[test]
     fn appends_request_path_to_upstream_base_path() {
@@ -297,5 +596,89 @@ mod tests {
     fn redacts_password_in_logged_upstream_url() {
         let url = Url::parse("https://user:secret@example.com/config").unwrap();
         assert_eq!(redact_url(&url), "https://user:***@example.com/config");
+    }
+
+    #[test]
+    fn validates_relative_fetch_targets_and_modes() {
+        let files = vec![FetchFile {
+            source: "/api/v1/assets/file.bin".to_string(),
+            target: "ssl/file.bin".to_string(),
+            mode: "0440".to_string(),
+            sha256: String::new(),
+        }];
+        validate_fetch_files(&files).unwrap();
+
+        let mut invalid = files.clone();
+        invalid[0].target = "../token".to_string();
+        assert!(validate_fetch_files(&invalid).is_err());
+
+        let mut invalid = files;
+        invalid[0].mode = "440".to_string();
+        assert!(validate_fetch_files(&invalid).is_err());
+
+        assert!(safe_relative_target("ssl//file.bin").is_err());
+        assert!(safe_relative_target(r"ssl\file.bin").is_err());
+    }
+
+    #[tokio::test]
+    async fn fetches_binary_file_with_bearer_token() {
+        const BODY: &[u8] = b"\0binary\xffcontent";
+        let app = Router::new().route(
+            "/config/api/v1/assets/file.bin",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(
+                    headers.get(header::AUTHORIZATION),
+                    Some(&HeaderValue::from_static("Bearer projected-token"))
+                );
+                BODY
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let root = tempdir().unwrap();
+        let token_file = root.path().join("token");
+        fs::write(&token_file, "projected-token\n").await.unwrap();
+        let output_dir = root.path().join("output");
+        let digest = format!("{:x}", Sha256::digest(BODY));
+        let files = serde_json::to_string(&[serde_json::json!({
+            "source": "/api/v1/assets/file.bin",
+            "target": "ssl/file.bin",
+            "mode": "0440",
+            "sha256": digest,
+        })])
+        .unwrap();
+
+        fetch(FetchArgs {
+            common: CommonArgs {
+                upstream: Url::parse(&format!("http://{address}/config")).unwrap(),
+                token_file,
+                timeout_seconds: 5,
+                insecure_upstream_tls: false,
+            },
+            output_dir: output_dir.clone(),
+            files_json: files,
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            fs::read(output_dir.join("ssl/file.bin")).await.unwrap(),
+            BODY
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(output_dir.join("ssl/file.bin"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o440);
+        }
+        server.abort();
     }
 }

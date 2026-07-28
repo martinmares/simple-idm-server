@@ -1,10 +1,12 @@
 # simple-idm-token-proxy
 
-`simple-idm-token-proxy` is a small localhost reverse proxy for workloads that
-need to call a protected HTTP API without embedding token handling in the
-application.
+`simple-idm-token-proxy` provides two explicit modes:
 
-For every proxied request it reads the current token from a required file and
+- `serve` runs a localhost reverse proxy for workloads that need to call a
+  protected HTTP API without embedding token handling in the application.
+- `fetch` downloads authenticated runtime assets into a shared volume and exits.
+
+In `serve` mode, every proxied request reads the current token from a required file and
 sends it upstream as:
 
 ```http
@@ -17,13 +19,13 @@ ServiceAccount token rotation is picked up without restarting the workload.
 The proxy does not validate the token and does not implement login or policy.
 The upstream service remains responsible for JWT validation and authorization.
 
-## Example
+## Proxy mode
 
 ```bash
-simple-idm-token-proxy \
+simple-idm-token-proxy serve \
   --listen 127.0.0.1:9999 \
   --upstream https://config.example.com/simple-config-server \
-  --token-file /var/run/secrets/workload-identity/simple-config
+  --token-file /var/run/secrets/workload-identity/simple-config/token
 ```
 
 The token file is intentionally mandatory; there is no implicit default path.
@@ -39,6 +41,38 @@ SIMPLE_IDM_TOKEN_PROXY_TOKEN_FILE=/var/run/secrets/workload-identity/simple-conf
 If the upstream URL includes a path prefix, the proxy accepts both a request
 with that prefix and a request without it. This lets an application call the
 localhost proxy using its normal upstream-relative paths.
+
+## Fetch mode
+
+`fetch` is intended for Kubernetes/OpenShift init containers. It reads the same
+projected token, downloads all declared files sequentially, stages them below
+`--output-dir`, and publishes them only after every download and optional
+SHA-256 check succeeds.
+
+```bash
+simple-idm-token-proxy fetch \
+  --upstream https://config.example.com/simple-config-server \
+  --token-file /var/run/secrets/workload-identity/simple-config/token \
+  --output-dir /app/runtime-config \
+  --files-json '[
+    {
+      "source": "/api/v1/tenants/default/envs/test/assets/files/ssl/client-keystore.jks",
+      "target": "client-keystore.jks",
+      "mode": "0440",
+      "sha256": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    },
+    {
+      "source": "/api/v1/tenants/default/envs/test/assets/files/ssl/client-truststore.jks",
+      "target": "client-truststore.jks",
+      "mode": "0440"
+    }
+  ]'
+```
+
+Fetch targets must be relative paths below `--output-dir`. Absolute paths,
+empty path segments, `.` and `..` are rejected. Modes use four octal digits.
+Redirects are intentionally disabled and any non-success HTTP status fails the
+command.
 
 For a controlled sandbox with an internal CA, TLS verification can be disabled
 explicitly with `--insecure-upstream-tls`. Do not use that flag in production.
@@ -58,9 +92,5 @@ binary is under `target/`. From the repository root:
 just image-token-proxy
 ```
 
-Or, when standing in the directory containing the Dockerfile:
-
-```bash
-cd crates/simple-idm-token-proxy
-docker build -f Dockerfile -t simple-idm-token-proxy:local ../..
-```
+The image entrypoint is the binary itself, so container arguments must begin
+with either `serve` or `fetch`.
