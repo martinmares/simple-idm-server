@@ -67,6 +67,10 @@ struct CommonArgs {
     )]
     timeout_seconds: u64,
 
+    /// PEM bundle with additional trusted upstream certificate authorities.
+    #[arg(long, env = "SIMPLE_IDM_TOKEN_PROXY_CA_FILE", value_name = "FILE")]
+    ca_file: Option<PathBuf>,
+
     /// Allow invalid upstream TLS certificates. Use only in controlled sandboxes.
     #[arg(
         long,
@@ -207,14 +211,41 @@ fn validate_token_file(token_file: &Path) -> anyhow::Result<()> {
 }
 
 fn build_client(args: &CommonArgs) -> anyhow::Result<reqwest::Client> {
+    if args.ca_file.is_some() && args.insecure_upstream_tls {
+        anyhow::bail!("--ca-file cannot be combined with --insecure-upstream-tls");
+    }
+
     let mut client_builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(args.timeout_seconds))
         .redirect(reqwest::redirect::Policy::none());
+    if let Some(path) = &args.ca_file {
+        let certificates = load_ca_certificates(path)?;
+        info!(
+            "loaded {} additional CA certificate(s) from {}",
+            certificates.len(),
+            path.display()
+        );
+        client_builder = client_builder.tls_certs_merge(certificates);
+    }
     if args.insecure_upstream_tls {
         warn!("insecure upstream TLS verification is enabled");
         client_builder = client_builder.danger_accept_invalid_certs(true);
     }
     Ok(client_builder.build()?)
+}
+
+fn load_ca_certificates(path: &Path) -> anyhow::Result<Vec<reqwest::Certificate>> {
+    let pem = std::fs::read(path)
+        .with_context(|| format!("read CA certificate bundle {}", path.display()))?;
+    let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+        .with_context(|| format!("parse CA certificate bundle {}", path.display()))?;
+    if certificates.is_empty() {
+        anyhow::bail!(
+            "CA certificate bundle contains no certificates: {}",
+            path.display()
+        );
+    }
+    Ok(certificates)
 }
 
 fn default_file_mode() -> String {
@@ -558,6 +589,70 @@ mod tests {
     };
     use tempfile::tempdir;
 
+    const TEST_CA_PEM: &str = r#"-----BEGIN CERTIFICATE-----
+MIIBtjCCAVugAwIBAgITBmyf1XSXNmY/Owua2eiedgPySjAKBggqhkjOPQQDAjA5
+MQswCQYDVQQGEwJVUzEPMA0GA1UEChMGQW1hem9uMRkwFwYDVQQDExBBbWF6b24g
+Um9vdCBDQSAzMB4XDTE1MDUyNjAwMDAwMFoXDTQwMDUyNjAwMDAwMFowOTELMAkG
+A1UEBhMCVVMxDzANBgNVBAoTBkFtYXpvbjEZMBcGA1UEAxMQQW1hem9uIFJvb3Qg
+Q0EgMzBZMBMGByqGSM49AgEGCCqGSM49AwEHA0IABCmXp8ZBf8ANm+gBG1bG8lKl
+ui2yEujSLtf6ycXYqm0fc4E7O5hrOXwzpcVOho6AF2hiRVd9RFgdszflZwjrZt6j
+QjBAMA8GA1UdEwEB/wQFMAMBAf8wDgYDVR0PAQH/BAQDAgGGMB0GA1UdDgQWBBSr
+ttvXBp43rDCGB5Fwx5zEGbF4wDAKBggqhkjOPQQDAgNJADBGAiEA4IWSoxe3jfkr
+BqWTrBqYaGFy+uGh0PsceGCmQ5nFuMQCIQCcAu/xlJyzlvnrxir4tiz+OpAUFteM
+YyRIHN8wfdVoOw==
+-----END CERTIFICATE-----"#;
+
+    #[test]
+    fn loads_additional_ca_bundle() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("ca.pem");
+        std::fs::write(&path, TEST_CA_PEM).unwrap();
+
+        let certificates = load_ca_certificates(&path).unwrap();
+
+        assert_eq!(certificates.len(), 1);
+    }
+
+    #[test]
+    fn rejects_invalid_ca_bundle() {
+        let root = tempdir().unwrap();
+        let path = root.path().join("ca.pem");
+        std::fs::write(
+            &path,
+            "-----BEGIN CERTIFICATE-----\ninvalid\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        let args = CommonArgs {
+            upstream: Url::parse("https://example.com").unwrap(),
+            token_file: root.path().join("token"),
+            timeout_seconds: 5,
+            ca_file: Some(path),
+            insecure_upstream_tls: false,
+        };
+
+        assert!(build_client(&args).is_err());
+    }
+
+    #[test]
+    fn rejects_ca_file_with_insecure_tls() {
+        let args = CommonArgs {
+            upstream: Url::parse("https://example.com").unwrap(),
+            token_file: PathBuf::from("/tmp/token"),
+            timeout_seconds: 5,
+            ca_file: Some(PathBuf::from("/tmp/ca.pem")),
+            insecure_upstream_tls: true,
+        };
+
+        let error = build_client(&args).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("--ca-file cannot be combined with --insecure-upstream-tls")
+        );
+    }
+
     #[test]
     fn appends_request_path_to_upstream_base_path() {
         let base = Url::parse("https://example.com/config").unwrap();
@@ -657,6 +752,7 @@ mod tests {
                 upstream: Url::parse(&format!("http://{address}/config")).unwrap(),
                 token_file,
                 timeout_seconds: 5,
+                ca_file: None,
                 insecure_upstream_tls: false,
             },
             output_dir: output_dir.clone(),

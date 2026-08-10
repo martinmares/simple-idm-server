@@ -25,7 +25,8 @@ The upstream service remains responsible for JWT validation and authorization.
 simple-idm-token-proxy serve \
   --listen 127.0.0.1:9999 \
   --upstream https://config.example.com/simple-config-server \
-  --token-file /var/run/secrets/workload-identity/simple-config/token
+  --token-file /var/run/secrets/workload-identity/simple-config/token \
+  --ca-file /var/run/certs/internal-ca.pem
 ```
 
 The token file is intentionally mandatory; there is no implicit default path.
@@ -35,7 +36,8 @@ Equivalent environment variables:
 ```env
 SIMPLE_IDM_TOKEN_PROXY_LISTEN=127.0.0.1:9999
 SIMPLE_IDM_TOKEN_PROXY_UPSTREAM=https://config.example.com/simple-config-server
-SIMPLE_IDM_TOKEN_PROXY_TOKEN_FILE=/var/run/secrets/workload-identity/simple-config
+SIMPLE_IDM_TOKEN_PROXY_TOKEN_FILE=/var/run/secrets/workload-identity/simple-config/token
+SIMPLE_IDM_TOKEN_PROXY_CA_FILE=/var/run/certs/internal-ca.pem
 ```
 
 If the upstream URL includes a path prefix, the proxy accepts both a request
@@ -53,6 +55,7 @@ SHA-256 check succeeds.
 simple-idm-token-proxy fetch \
   --upstream https://config.example.com/simple-config-server \
   --token-file /var/run/secrets/workload-identity/simple-config/token \
+  --ca-file /var/run/certs/internal-ca.pem \
   --output-dir /app/runtime-config \
   --files-json '[
     {
@@ -74,8 +77,13 @@ empty path segments, `.` and `..` are rejected. Modes use four octal digits.
 Redirects are intentionally disabled and any non-success HTTP status fails the
 command.
 
-For a controlled sandbox with an internal CA, TLS verification can be disabled
-explicitly with `--insecure-upstream-tls`. Do not use that flag in production.
+Use `--ca-file` or `SIMPLE_IDM_TOKEN_PROXY_CA_FILE` for an internal certificate
+authority. The PEM file may contain multiple certificates; they are added to
+the normal trust roots rather than replacing them.
+
+For a controlled sandbox, TLS verification can instead be disabled explicitly
+with `--insecure-upstream-tls`. It cannot be combined with `--ca-file`. Do not
+use insecure TLS in production.
 
 ## Container image
 
