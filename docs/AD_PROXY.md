@@ -42,6 +42,28 @@ finds the user with `user_filter`, verifies the submitted password by binding as
 that user, then reads profile attributes and `memberOf` through the technical
 account.
 
+Multiple proxy instances on one host can share the service-account identity
+without duplicating it in every TOML file:
+
+```toml
+[ldap]
+mode = "service_account"
+host = "ad.example.cz"
+port = 636
+base_dn_file = "shared/base-dn"
+bind_dn_file = "shared/bind-dn"
+bind_password_file = "shared/bind-password"
+```
+
+Relative paths are resolved against the directory containing the proxy TOML
+file. Every value supports either its inline form (`base_dn`, `bind_dn`,
+`bind_password`) or its `_file` form, never both. Files must contain one UTF-8
+line; one trailing LF or CRLF is removed. Restrict the password file to the
+service account, for example with `chmod 600 shared/bind-password`. Values are
+loaded only at process startup, so changing a file requires restarting the
+proxy instance. `AD_PROXY_LDAP_BIND_PASSWORD` counts as the inline password and
+therefore must not be combined with `bind_password_file`.
+
 When no technical account is available, use direct user bind:
 
 ```toml

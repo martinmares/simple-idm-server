@@ -16,7 +16,10 @@ use simple_idm_ad_auth::{
     fetch_ldap_user_data_with_user_bind, verify_ldap_password,
 };
 use simple_idm_common::{escape_html, tabler_standalone_page};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 const VERSION: &str = concat!(
@@ -82,9 +85,13 @@ struct LdapConfig {
     host: String,
     #[serde(default = "default_ldaps_port")]
     port: u16,
+    #[serde(default)]
     base_dn: String,
+    base_dn_file: Option<PathBuf>,
     bind_dn: Option<String>,
+    bind_dn_file: Option<PathBuf>,
     bind_password: Option<String>,
+    bind_password_file: Option<PathBuf>,
     user_bind_format: Option<String>,
     #[serde(default = "default_user_filter")]
     user_filter: String,
@@ -96,17 +103,12 @@ struct LdapConfig {
     allow_insecure: bool,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum LdapAuthMode {
+    #[default]
     ServiceAccount,
     BindAsUser,
-}
-
-impl Default for LdapAuthMode {
-    fn default() -> Self {
-        Self::ServiceAccount
-    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -791,6 +793,12 @@ impl Config {
             .with_context(|| format!("failed to parse config file: {}", config_file.display()))?;
         config.config_file = config_file;
         config.apply_env_overrides();
+        let config_dir = config
+            .config_file
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        config.ldap.resolve_file_values(&config_dir)?;
         config.validate()?;
         Ok(config)
     }
@@ -842,15 +850,14 @@ impl Config {
         if self.session_max_age_seconds <= 0 {
             anyhow::bail!("session_max_age_seconds must be > 0");
         }
-        if !self.external_base_path.is_empty() {
-            if !self.external_base_path.starts_with('/')
+        if !self.external_base_path.is_empty()
+            && (!self.external_base_path.starts_with('/')
                 || self.external_base_path.starts_with("//")
-                || self.external_base_path.ends_with('/')
-            {
-                anyhow::bail!(
-                    "external_base_path must be empty or a relative path like /_auth/grafana without trailing /"
-                );
-            }
+                || self.external_base_path.ends_with('/'))
+        {
+            anyhow::bail!(
+                "external_base_path must be empty or a relative path like /_auth/grafana without trailing /"
+            );
         }
         if safe_redirect_path(Some(&self.default_redirect_path)) != self.default_redirect_path {
             anyhow::bail!("default_redirect_path must be a relative path starting with /");
@@ -870,6 +877,31 @@ impl Config {
 }
 
 impl LdapConfig {
+    fn resolve_file_values(&mut self, config_dir: &Path) -> Result<()> {
+        resolve_required_file_backed_value(
+            &mut self.base_dn,
+            self.base_dn_file.as_deref(),
+            config_dir,
+            "ldap.base_dn",
+            false,
+        )?;
+        resolve_optional_file_backed_value(
+            &mut self.bind_dn,
+            self.bind_dn_file.as_deref(),
+            config_dir,
+            "ldap.bind_dn",
+            false,
+        )?;
+        resolve_optional_file_backed_value(
+            &mut self.bind_password,
+            self.bind_password_file.as_deref(),
+            config_dir,
+            "ldap.bind_password",
+            true,
+        )?;
+        Ok(())
+    }
+
     fn validate_mode(&self) -> Result<()> {
         match self.mode {
             LdapAuthMode::ServiceAccount => {
@@ -933,6 +965,107 @@ impl LdapConfig {
             allow_insecure: self.allow_insecure,
         }
     }
+}
+
+const MAX_LDAP_VALUE_FILE_BYTES: u64 = 64 * 1024;
+
+fn resolve_required_file_backed_value(
+    inline: &mut String,
+    file: Option<&Path>,
+    config_dir: &Path,
+    field: &str,
+    secret: bool,
+) -> Result<()> {
+    let inline_is_set = !inline.trim().is_empty();
+    if inline_is_set && file.is_some() {
+        anyhow::bail!("configure exactly one of {field} or {field}_file");
+    }
+    if !inline_is_set {
+        let path =
+            file.ok_or_else(|| anyhow!("configure exactly one of {field} or {field}_file"))?;
+        *inline = read_ldap_value_file(path, config_dir, field, secret)?;
+    }
+    Ok(())
+}
+
+fn resolve_optional_file_backed_value(
+    inline: &mut Option<String>,
+    file: Option<&Path>,
+    config_dir: &Path,
+    field: &str,
+    secret: bool,
+) -> Result<()> {
+    let inline_is_set = inline
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty());
+    if inline_is_set && file.is_some() {
+        anyhow::bail!("configure at most one of {field} or {field}_file");
+    }
+    if let Some(path) = file {
+        *inline = Some(read_ldap_value_file(path, config_dir, field, secret)?);
+    } else if !inline_is_set {
+        *inline = None;
+    }
+    Ok(())
+}
+
+fn read_ldap_value_file(
+    path: &Path,
+    config_dir: &Path,
+    field: &str,
+    secret: bool,
+) -> Result<String> {
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        config_dir.join(path)
+    };
+    let metadata = std::fs::metadata(&resolved)
+        .with_context(|| format!("failed to inspect {field}_file: {}", resolved.display()))?;
+    if !metadata.is_file() {
+        anyhow::bail!("{field}_file is not a regular file: {}", resolved.display());
+    }
+    if metadata.len() > MAX_LDAP_VALUE_FILE_BYTES {
+        anyhow::bail!(
+            "{field}_file exceeds {MAX_LDAP_VALUE_FILE_BYTES} bytes: {}",
+            resolved.display()
+        );
+    }
+
+    #[cfg(unix)]
+    if secret {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o077 != 0 {
+            tracing::warn!(
+                path = %resolved.display(),
+                "LDAP password file is accessible by group or other users; recommended mode is 0600"
+            );
+        }
+    }
+
+    let content = std::fs::read_to_string(&resolved)
+        .with_context(|| format!("failed to read {field}_file: {}", resolved.display()))?;
+    let value = content
+        .strip_suffix("\r\n")
+        .or_else(|| content.strip_suffix('\n'))
+        .unwrap_or(&content);
+    if value.contains('\0') {
+        anyhow::bail!("{field}_file contains a NUL byte: {}", resolved.display());
+    }
+    if value.contains(['\r', '\n']) {
+        anyhow::bail!(
+            "{field}_file must contain exactly one line: {}",
+            resolved.display()
+        );
+    }
+    if value.trim().is_empty() {
+        anyhow::bail!("{field}_file is empty: {}", resolved.display());
+    }
+    Ok(if secret {
+        value.to_string()
+    } else {
+        value.trim().to_string()
+    })
 }
 
 fn default_listen_addr() -> String {
@@ -1042,8 +1175,11 @@ mod tests {
                 host: "ad.example.test".to_string(),
                 port: 636,
                 base_dn: "DC=example,DC=test".to_string(),
+                base_dn_file: None,
                 bind_dn: Some("CN=svc,DC=example,DC=test".to_string()),
+                bind_dn_file: None,
                 bind_password: Some("secret".to_string()),
+                bind_password_file: None,
                 user_bind_format: None,
                 user_filter: default_user_filter(),
                 tls_mode: LdapTlsModeConfig::Ldaps,
@@ -1111,8 +1247,11 @@ mod tests {
                 host: "ad.example.test".to_string(),
                 port: 636,
                 base_dn: "DC=example,DC=test".to_string(),
+                base_dn_file: None,
                 bind_dn: Some("CN=svc,DC=example,DC=test".to_string()),
+                bind_dn_file: None,
                 bind_password: Some("secret".to_string()),
+                bind_password_file: None,
                 user_bind_format: None,
                 user_filter: default_user_filter(),
                 tls_mode: LdapTlsModeConfig::Ldaps,
@@ -1156,8 +1295,11 @@ mod tests {
             host: "ad.example.test".to_string(),
             port: 636,
             base_dn: "DC=example,DC=test".to_string(),
+            base_dn_file: None,
             bind_dn: None,
+            bind_dn_file: None,
             bind_password: None,
+            bind_password_file: None,
             user_bind_format: Some("{login}@AD.CETIN".to_string()),
             user_filter: default_user_filter(),
             tls_mode: LdapTlsModeConfig::Ldaps,
@@ -1176,8 +1318,11 @@ mod tests {
             host: "ad.example.test".to_string(),
             port: 636,
             base_dn: "DC=example,DC=test".to_string(),
+            base_dn_file: None,
             bind_dn: None,
+            bind_dn_file: None,
             bind_password: None,
+            bind_password_file: None,
             user_bind_format: None,
             user_filter: default_user_filter(),
             tls_mode: LdapTlsModeConfig::Ldaps,
@@ -1186,5 +1331,94 @@ mod tests {
         };
 
         assert!(ldap.validate_mode().is_err());
+    }
+
+    #[test]
+    fn resolves_shared_ldap_values_from_files_relative_to_config() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "simple-idm-ad-proxy-config-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(directory.join("shared")).expect("create temporary config dir");
+        std::fs::write(directory.join("shared/base-dn"), "DC=AD,DC=CETIN\n")
+            .expect("write base DN");
+        std::fs::write(directory.join("shared/bind-dn"), "su_technical_user\r\n")
+            .expect("write bind DN");
+        std::fs::write(
+            directory.join("shared/bind-password"),
+            " secret with spaces \n",
+        )
+        .expect("write bind password");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                directory.join("shared/bind-password"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .expect("restrict password file");
+        }
+
+        let mut ldap = LdapConfig {
+            mode: LdapAuthMode::ServiceAccount,
+            host: "ad.example.test".to_string(),
+            port: 636,
+            base_dn: String::new(),
+            base_dn_file: Some(PathBuf::from("shared/base-dn")),
+            bind_dn: None,
+            bind_dn_file: Some(PathBuf::from("shared/bind-dn")),
+            bind_password: None,
+            bind_password_file: Some(PathBuf::from("shared/bind-password")),
+            user_bind_format: None,
+            user_filter: default_user_filter(),
+            tls_mode: LdapTlsModeConfig::Ldaps,
+            timeout_seconds: 5,
+            allow_insecure: false,
+        };
+
+        ldap.resolve_file_values(&directory)
+            .expect("resolve shared LDAP files");
+        assert_eq!(ldap.base_dn, "DC=AD,DC=CETIN");
+        assert_eq!(ldap.bind_dn.as_deref(), Some("su_technical_user"));
+        assert_eq!(ldap.bind_password.as_deref(), Some(" secret with spaces "));
+        assert!(ldap.validate_mode().is_ok());
+
+        std::fs::remove_dir_all(directory).expect("remove temporary config dir");
+    }
+
+    #[test]
+    fn rejects_inline_and_file_forms_for_the_same_ldap_value() {
+        let mut ldap = LdapConfig {
+            mode: LdapAuthMode::ServiceAccount,
+            host: "ad.example.test".to_string(),
+            port: 636,
+            base_dn: "DC=example,DC=test".to_string(),
+            base_dn_file: Some(PathBuf::from("shared/base-dn")),
+            bind_dn: Some("CN=svc,DC=example,DC=test".to_string()),
+            bind_dn_file: None,
+            bind_password: Some("secret".to_string()),
+            bind_password_file: None,
+            user_bind_format: None,
+            user_filter: default_user_filter(),
+            tls_mode: LdapTlsModeConfig::Ldaps,
+            timeout_seconds: 5,
+            allow_insecure: false,
+        };
+
+        let error = ldap
+            .resolve_file_values(Path::new("."))
+            .expect_err("ambiguous LDAP source must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("configure exactly one of ldap.base_dn or ldap.base_dn_file")
+        );
     }
 }

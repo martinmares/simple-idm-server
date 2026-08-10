@@ -27,6 +27,11 @@ port = 636
 base_dn = "DC=example,DC=cz"
 bind_dn = "CN=svc-auth,OU=Service Accounts,DC=example,DC=cz"
 bind_password = "CHANGE_ME"
+# Each value above can instead be loaded from a dedicated file. Configure
+# exactly one form per value; relative paths are resolved against this TOML file.
+# base_dn_file = "shared/base-dn"
+# bind_dn_file = "shared/bind-dn"
+# bind_password_file = "shared/bind-password"
 # Used only when mode = "bind_as_user".
 # Common AD examples:
 #   user_bind_format = "{login}@AD.CETIN"
