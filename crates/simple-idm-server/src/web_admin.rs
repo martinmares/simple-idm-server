@@ -234,6 +234,7 @@ pub struct GroupReparentForm {
 pub struct TenantUpdateForm {
     name: String,
     mode: String,
+    mfa_policy: String,
     is_active: Option<String>,
 }
 
@@ -618,6 +619,8 @@ struct UserRow {
     federated_provider_type: Option<String>,
     federated_subject: Option<String>,
     federated_approval_status: Option<String>,
+    mfa_status: String,
+    recovery_codes_remaining: i64,
 }
 
 impl UserRow {
@@ -669,6 +672,7 @@ struct TenantRow {
     name: String,
     mode: String,
     is_active: bool,
+    mfa_policy: String,
     users_count: i64,
     groups_count: i64,
     clients_count: i64,
@@ -1256,6 +1260,7 @@ pub fn router(state: WebAdminState) -> Router {
             get(users_import_page).post(users_import_submit),
         )
         .route("/admin/ui/users/{id}/update", post(users_update))
+        .route("/admin/ui/users/{id}/mfa-reset", post(users_mfa_reset))
         .route(
             "/admin/ui/users/{id}/patterns/create",
             post(user_patterns_create),
@@ -4056,7 +4061,24 @@ async fn users_page(
              fui.federated_provider_slug,
              fui.federated_provider_type,
              fui.federated_subject,
-             fui.federated_approval_status
+             fui.federated_approval_status,
+             COALESCE(
+               (
+                 SELECT ua.status
+                 FROM user_authenticators ua
+                 WHERE ua.user_id = users.id
+                   AND ua.kind = 'totp'
+                   AND ua.status IN ('active', 'pending')
+                 ORDER BY CASE ua.status WHEN 'active' THEN 0 ELSE 1 END, ua.updated_at DESC
+                 LIMIT 1
+               ),
+               'not_enrolled'
+             ) AS mfa_status,
+             (
+               SELECT COUNT(*)
+               FROM user_recovery_codes urc
+               WHERE urc.user_id = users.id AND urc.used_at IS NULL
+             ) AS recovery_codes_remaining
            FROM users
            LEFT JOIN identity_providers aip ON aip.id = users.auth_provider_id AND aip.deleted_at IS NULL
            LEFT JOIN user_external_identities uei
@@ -4182,7 +4204,24 @@ async fn users_page(
              fui.federated_provider_slug,
              fui.federated_provider_type,
              fui.federated_subject,
-             fui.federated_approval_status
+             fui.federated_approval_status,
+             COALESCE(
+               (
+                 SELECT ua.status
+                 FROM user_authenticators ua
+                 WHERE ua.user_id = users.id
+                   AND ua.kind = 'totp'
+                   AND ua.status IN ('active', 'pending')
+                 ORDER BY CASE ua.status WHEN 'active' THEN 0 ELSE 1 END, ua.updated_at DESC
+                 LIMIT 1
+               ),
+               'not_enrolled'
+             ) AS mfa_status,
+             (
+               SELECT COUNT(*)
+               FROM user_recovery_codes urc
+               WHERE urc.user_id = users.id AND urc.used_at IS NULL
+             ) AS recovery_codes_remaining
            FROM users
            LEFT JOIN identity_providers aip ON aip.id = users.auth_provider_id AND aip.deleted_at IS NULL
            LEFT JOIN user_external_identities uei
@@ -5207,6 +5246,58 @@ async fn users_deactivate(
     }
 }
 
+async fn users_mfa_reset(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let return_path = users_return_path_from_referer(&headers);
+    match simple_idm_core::mfa::admin_reset_user_mfa(&state.db_pool, id).await {
+        Ok(true) => {
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "auth.mfa.admin_reset",
+                "user",
+                Some(id),
+                "success",
+                Some(json!({
+                    "effect": "authenticators_revoked_recovery_codes_deleted_sessions_revoked"
+                })),
+            )
+            .await;
+            redirect_with(
+                &return_path,
+                "message",
+                "MFA reset. Existing sessions were revoked; required MFA will enroll again at next login.",
+            )
+            .into_response()
+        }
+        Ok(false) => redirect_with(
+            &return_path,
+            "error",
+            "MFA reset is available only for active local users",
+        )
+        .into_response(),
+        Err(err) => {
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "auth.mfa.admin_reset",
+                "user",
+                Some(id),
+                "failure",
+                Some(json!({ "error": err.to_string() })),
+            )
+            .await;
+            redirect_with(&return_path, "error", &format!("MFA reset failed: {err}"))
+                .into_response()
+        }
+    }
+}
+
 async fn users_restore(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -6065,6 +6156,7 @@ async fn tenants_page(
             t.name,
             t.mode::text AS mode,
             t.is_active,
+            t.mfa_policy,
             (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.deleted_at IS NULL) AS users_count,
             (SELECT COUNT(*) FROM groups g WHERE g.tenant_id = t.id AND g.deleted_at IS NULL) AS groups_count,
             (SELECT COUNT(*) FROM oauth_clients oc WHERE oc.tenant_id = t.id AND oc.deleted_at IS NULL) AS clients_count,
@@ -6153,12 +6245,18 @@ async fn tenants_update(
             .into_response();
     }
 
+    let mfa_policy = form.mfa_policy.trim();
+    if !matches!(mfa_policy, "disabled" | "optional" | "required") {
+        return redirect_with("/admin/ui/tenants", "error", "Invalid MFA policy").into_response();
+    }
+
     let result = sqlx::query(
         r#"
         UPDATE tenants
         SET name = $2,
             mode = $3::tenant_mode,
-            is_active = $4,
+            mfa_policy = $4,
+            is_active = $5,
             updated_at = NOW()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -6166,6 +6264,7 @@ async fn tenants_update(
     .bind(id)
     .bind(name)
     .bind(mode)
+    .bind(mfa_policy)
     .bind(parse_checkbox(&form.is_active))
     .execute(&state.db_pool)
     .await;

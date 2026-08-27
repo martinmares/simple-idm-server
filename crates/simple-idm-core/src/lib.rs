@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod group_patterns;
 pub mod jwks;
+pub mod mfa;
 pub mod oauth2;
 pub mod oidc;
 pub mod onboarding_cleanup;

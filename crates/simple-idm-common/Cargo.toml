@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 axum = "0.8"
 base64 = "0.22"
-rust-embed = "8.7"
+rust-embed = "8.12"

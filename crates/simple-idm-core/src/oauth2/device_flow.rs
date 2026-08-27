@@ -4,6 +4,7 @@ use crate::auth::{
 };
 use crate::client_group_filters::apply_client_group_filters;
 use crate::db::models::{DeviceCode, OAuthClient, OAuthClientGroupPattern, User};
+use crate::mfa::{self, MfaPolicy};
 use axum::{
     Form, Json,
     extract::{Query, State},
@@ -65,6 +66,7 @@ pub struct DeviceVerifyRequest {
     pub user_code: String,
     pub username: String,
     pub password: String,
+    pub mfa_code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -453,12 +455,80 @@ pub async fn handle_device_verify(
         .into_response();
     }
 
+    let mut amr = vec![if user.auth_mode.eq_ignore_ascii_case("ad") {
+        "federated".to_string()
+    } else {
+        "pwd".to_string()
+    }];
+    let mut acr = Some(if user.auth_mode.eq_ignore_ascii_case("ad") {
+        "urn:simple-idm:acr:federated".to_string()
+    } else {
+        "urn:simple-idm:acr:password".to_string()
+    });
+
+    if user.auth_mode.eq_ignore_ascii_case("local") {
+        let policy = mfa::tenant_mfa_policy(&state.db_pool, user.tenant_id)
+            .await
+            .unwrap_or(MfaPolicy::Disabled);
+        let authenticator = mfa::active_totp_authenticator(&state.db_pool, user.id)
+            .await
+            .unwrap_or(None);
+
+        if policy == MfaPolicy::Required && authenticator.is_none() {
+            return Html(templates::device_verify_page(
+                Some(&req.user_code),
+                Some("MFA enrollment is required. Sign in through a browser first to enroll an authenticator."),
+                None,
+            ))
+            .into_response();
+        }
+
+        if policy == MfaPolicy::Required
+            || (policy == MfaPolicy::Optional && authenticator.is_some())
+        {
+            let code = req.mfa_code.as_deref().unwrap_or("").trim();
+            let verified = if let Some(authenticator) = authenticator.as_ref() {
+                mfa::verify_totp(&state.db_pool, authenticator, code)
+                    .await
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            let recovery = if verified {
+                false
+            } else {
+                mfa::consume_recovery_code(&state.db_pool, user.id, code)
+                    .await
+                    .unwrap_or(false)
+            };
+            if !verified && !recovery {
+                let _ = sqlx::query(
+                    "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)",
+                )
+                .bind(&req.user_code)
+                .bind(&client_ip)
+                .execute(&state.db_pool)
+                .await;
+                return Html(templates::device_verify_page(
+                    Some(&req.user_code),
+                    Some("Invalid MFA or recovery code"),
+                    None,
+                ))
+                .into_response();
+            }
+            amr.push(if recovery { "recovery" } else { "otp" }.to_string());
+            acr = Some("urn:simple-idm:acr:mfa".to_string());
+        }
+    }
+
     // Označ device code jako autorizovaný
     if sqlx::query(
-        "UPDATE device_codes SET is_authorized = true, user_id = $1 WHERE user_code = $2",
+        "UPDATE device_codes SET is_authorized = true, user_id = $1, amr = $3, acr = $4 WHERE user_code = $2",
     )
     .bind(user.id)
     .bind(&req.user_code)
+    .bind(&amr)
+    .bind(&acr)
     .execute(&state.db_pool)
     .await
     .is_err()
@@ -799,6 +869,8 @@ pub async fn handle_device_token_internal(
         Some(device_code.scope.clone()),
         filtered_group_names.clone(),
         custom_claims.clone(),
+        device_code.amr.clone(),
+        device_code.acr.clone(),
         state.access_token_expiry,
     ) {
         Ok(token) => token,
@@ -824,6 +896,8 @@ pub async fn handle_device_token_internal(
             filtered_group_names,
             custom_claims,
             None, // device flow nemá nonce
+            device_code.amr.clone(),
+            device_code.acr.clone(),
             state.access_token_expiry,
         ) {
             Ok(token) => Some(token),

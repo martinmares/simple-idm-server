@@ -12,7 +12,7 @@ mod utils;
 
 pub use authorization_code::{
     handle_authorize, handle_federated_callback, handle_federated_start, handle_login,
-    handle_logout, handle_token,
+    handle_logout, handle_mfa, handle_token, show_mfa_form,
 };
 pub use client_credentials::{OAuth2State, handle_client_credentials};
 pub use device_flow::{

@@ -172,14 +172,16 @@ pub async fn handle_revoke(
 
     if sqlx::query(
         r#"
-        INSERT INTO used_refresh_tokens (token, client_id, user_id, scope, expires_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO used_refresh_tokens (token, client_id, user_id, scope, amr, acr, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(&refresh_token.token)
     .bind(refresh_token.client_id)
     .bind(refresh_token.user_id)
     .bind(&refresh_token.scope)
+    .bind(&refresh_token.amr)
+    .bind(refresh_token.acr.as_deref())
     .bind(refresh_token.expires_at)
     .execute(&mut *tx)
     .await

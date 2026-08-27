@@ -101,6 +101,19 @@
         <td>
           <div>{{ r.username }}</div>
           <div class="small text-secondary mt-1">auth: {{ r.auth_mode }}</div>
+          {% if r.auth_mode == "local" %}
+          <div class="small mt-1">
+            MFA:
+            {% if r.mfa_status == "active" %}
+            <span class="badge bg-green-lt">TOTP active</span>
+            <span class="text-secondary">{{ r.recovery_codes_remaining }} recovery codes</span>
+            {% else if r.mfa_status == "pending" %}
+            <span class="badge bg-yellow-lt">enrollment pending</span>
+            {% else %}
+            <span class="badge bg-secondary-lt">not enrolled</span>
+            {% endif %}
+          </div>
+          {% endif %}
           {% if let Some(ext_id) = r.external_user_id %}
           <div class="small text-secondary mt-1">
             external:
@@ -175,6 +188,11 @@
             <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#user-edit-{{ r.id }}">
               Edit
             </button>
+            {% if r.auth_mode == "local" && r.mfa_status != "not_enrolled" %}
+            <form method="post" action="/admin/ui/users/{{ r.id }}/mfa-reset" data-confirm="Reset MFA for {{ r.username }}? Existing authenticator and recovery codes will be revoked, and all login sessions will be terminated." data-confirm-action="Reset MFA" data-confirm-variant="warning">
+              <button class="btn btn-sm btn-outline-warning" type="submit">Reset MFA</button>
+            </form>
+            {% endif %}
             {% if r.auth_mode == "ad" %}
             <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#ad-map-{{ r.id }}">
               Map roles

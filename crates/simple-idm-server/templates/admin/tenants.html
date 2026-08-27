@@ -28,6 +28,7 @@
             <tr>
               <th>Tenant</th>
               <th>Mode</th>
+              <th>MFA</th>
               <th>Status</th>
               <th class="text-end">Objects</th>
               <th class="w-1">Actions</th>
@@ -41,6 +42,15 @@
                 <div class="text-secondary small"><code>{{ t.slug }}</code></div>
               </td>
               <td><span class="badge bg-blue-lt">{{ t.mode }}</span></td>
+              <td>
+                {% if t.mfa_policy == "required" %}
+                <span class="badge bg-green-lt">required</span>
+                {% else if t.mfa_policy == "optional" %}
+                <span class="badge bg-yellow-lt">optional</span>
+                {% else %}
+                <span class="badge bg-secondary-lt">disabled</span>
+                {% endif %}
+              </td>
               <td>
                 {% if t.is_active %}
                 <span class="badge bg-green-lt">active</span>
@@ -185,6 +195,15 @@
               <option value="multi" {% if t.mode == "multi" %}selected{% endif %}>multi</option>
             </select>
             <div class="form-text">Current deployment still uses the default tenant path. This flag documents intended mode.</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">MFA policy for local accounts</label>
+            <select class="form-select" name="mfa_policy">
+              <option value="disabled" {% if t.mfa_policy == "disabled" %}selected{% endif %}>disabled</option>
+              <option value="optional" {% if t.mfa_policy == "optional" %}selected{% endif %}>optional</option>
+              <option value="required" {% if t.mfa_policy == "required" %}selected{% endif %}>required</option>
+            </select>
+            <div class="form-text">Federated and AD identities continue to use MFA at their upstream identity provider.</div>
           </div>
           <label class="form-check form-switch">
             <input class="form-check-input" type="checkbox" name="is_active" {% if t.is_active %}checked{% endif %}>

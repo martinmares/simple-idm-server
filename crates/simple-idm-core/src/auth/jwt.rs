@@ -42,6 +42,10 @@ pub struct Claims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub preferred_username: Option<String>,
     pub groups: Vec<String>, // User groups
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub amr: Vec<String>, // Authentication Methods References (OIDC)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acr: Option<String>, // Authentication Context Class Reference (OIDC)
     #[serde(flatten)]
     pub custom_claims: HashMap<String, serde_json::Value>, // Custom claim maps
 }
@@ -114,6 +118,8 @@ impl JwtService {
         scope: Option<String>,
         groups: Vec<String>,
         custom_claims: HashMap<String, serde_json::Value>,
+        amr: Vec<String>,
+        acr: Option<String>,
         expiry_seconds: i64,
     ) -> Result<String, JwtError> {
         let now = Utc::now();
@@ -130,6 +136,8 @@ impl JwtService {
             email,
             preferred_username,
             groups,
+            amr,
+            acr,
             custom_claims,
         };
 
@@ -149,6 +157,8 @@ impl JwtService {
         groups: Vec<String>,
         custom_claims: HashMap<String, serde_json::Value>,
         nonce: Option<String>,
+        amr: Vec<String>,
+        acr: Option<String>,
         expiry_seconds: i64,
     ) -> Result<String, JwtError> {
         let now = Utc::now();
@@ -165,6 +175,8 @@ impl JwtService {
             email,
             preferred_username,
             groups,
+            amr,
+            acr,
             custom_claims,
         };
 

@@ -8,6 +8,7 @@ use crate::db::models::{
     AuthenticationSession, AuthorizationCode, OAuthClient, OAuthClientGroupPattern, RefreshToken,
     UsedRefreshToken, User,
 };
+use crate::mfa::{self, MfaPolicy, NewMfaTransaction};
 use crate::secret_crypto::decrypt_secret;
 use axum::http::header::SET_COOKIE;
 use axum::{
@@ -20,6 +21,7 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
+use qrcode::{QrCode, render::svg};
 use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use simple_idm_common::tabler_standalone_page;
@@ -126,6 +128,28 @@ pub struct LoginResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct MfaCodeRequest {
+    pub code: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingAuthorization {
+    user_id: Uuid,
+    client_id: Uuid,
+    redirect_uri: String,
+    scope: String,
+    state: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<String>,
+    nonce: Option<String>,
+}
+
+struct AuthorizationCompletion {
+    redirect_url: String,
+    session_token: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct TokenRequest {
     pub grant_type: String,
@@ -179,6 +203,30 @@ async fn get_auth_session_from_cookie(
     .fetch_optional(db_pool)
     .await
     .ok()??;
+
+    // A password-only session must never bypass a tenant policy that was
+    // changed to require MFA after the session was issued.
+    let policy = sqlx::query_as::<_, (String, String)>(
+        r#"
+        SELECT u.auth_mode, t.mfa_policy
+        FROM users u
+        JOIN tenants t ON t.id = u.tenant_id
+        WHERE u.id = $1 AND u.is_active = true AND u.deleted_at IS NULL AND t.is_active = true
+        "#,
+    )
+    .bind(session.user_id)
+    .fetch_optional(db_pool)
+    .await
+    .ok()??;
+    if policy.0.eq_ignore_ascii_case("local")
+        && MfaPolicy::parse(&policy.1) == MfaPolicy::Required
+        && !session
+            .amr
+            .iter()
+            .any(|method| method == "otp" || method == "recovery")
+    {
+        return None;
+    }
 
     Some(session)
 }
@@ -294,8 +342,9 @@ pub async fn handle_authorize(
         if let Err(e) = sqlx::query(
             r#"
             INSERT INTO authorization_codes
-            (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+            (code, client_id, user_id, redirect_uri, scope, code_challenge,
+             code_challenge_method, nonce, amr, acr, expires_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
             "#,
         )
         .bind(&code)
@@ -306,15 +355,14 @@ pub async fn handle_authorize(
         .bind(code_challenge)
         .bind(code_challenge_method)
         .bind(nonce)
+        .bind(&auth_session.amr)
+        .bind(auth_session.acr.as_deref())
         .bind(expires_at)
         .execute(&state.db_pool)
         .await
         {
             tracing::error!("Failed to store authorization code for SSO: {:?}", e);
-            let html = templates::error_page(
-                "server_error",
-                "Failed to create authorization code",
-            );
+            let html = templates::error_page("server_error", "Failed to create authorization code");
             return Html(html).into_response();
         }
 
@@ -400,6 +448,8 @@ async fn create_auth_session(
     user_id: Uuid,
     client_id: Option<Uuid>,
     session_expiry_seconds: i64,
+    amr: &[String],
+    acr: Option<&str>,
 ) -> Result<String, sqlx::Error> {
     // Generate random session token
     let session_token: String = rand::rng()
@@ -414,18 +464,86 @@ async fn create_auth_session(
     sqlx::query(
         r#"
         INSERT INTO authentication_sessions
-        (session_token, user_id, client_id, expires_at)
-        VALUES ($1, $2, $3, $4)
+        (session_token, user_id, client_id, expires_at, amr, acr)
+        VALUES ($1, $2, $3, $4, $5, $6)
         "#,
     )
     .bind(&session_token)
     .bind(user_id)
     .bind(client_id)
     .bind(expires_at)
+    .bind(amr)
+    .bind(acr)
     .execute(db_pool)
     .await?;
 
     Ok(session_token)
+}
+
+async fn complete_user_authorization(
+    state: &OAuth2State,
+    pending: PendingAuthorization,
+    amr: Vec<String>,
+    acr: Option<String>,
+) -> Result<AuthorizationCompletion, String> {
+    let code: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    let expires_at = Utc::now() + Duration::minutes(10);
+
+    sqlx::query(
+        r#"
+        INSERT INTO authorization_codes
+          (code, client_id, user_id, redirect_uri, scope, code_challenge,
+           code_challenge_method, nonce, amr, acr, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        "#,
+    )
+    .bind(&code)
+    .bind(pending.client_id)
+    .bind(pending.user_id)
+    .bind(&pending.redirect_uri)
+    .bind(&pending.scope)
+    .bind(pending.code_challenge.as_deref())
+    .bind(pending.code_challenge_method.as_deref())
+    .bind(pending.nonce.as_deref())
+    .bind(&amr)
+    .bind(acr.as_deref())
+    .bind(expires_at)
+    .execute(&state.db_pool)
+    .await
+    .map_err(|err| format!("Failed to create authorization code: {err}"))?;
+
+    let session_token = match create_auth_session(
+        &state.db_pool,
+        pending.user_id,
+        Some(pending.client_id),
+        state.auth_session_expiry,
+        &amr,
+        acr.as_deref(),
+    )
+    .await
+    {
+        Ok(token) => Some(token),
+        Err(err) => {
+            tracing::warn!(user_id = %pending.user_id, "Failed to create authentication session: {err}");
+            None
+        }
+    };
+
+    let mut redirect = Url::parse(&pending.redirect_uri)
+        .map_err(|_| "Invalid redirect URI in authorization transaction".to_string())?;
+    redirect.query_pairs_mut().append_pair("code", &code);
+    if let Some(value) = pending.state {
+        redirect.query_pairs_mut().append_pair("state", &value);
+    }
+
+    Ok(AuthorizationCompletion {
+        redirect_url: redirect.into(),
+        session_token,
+    })
 }
 
 async fn resolve_identity_provider_for_client(
@@ -923,8 +1041,9 @@ pub async fn handle_federated_callback(
     if sqlx::query(
         r#"
         INSERT INTO authorization_codes
-        (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+        (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method,
+         nonce, amr, acr, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
         "#,
     )
     .bind(&code_out)
@@ -935,12 +1054,18 @@ pub async fn handle_federated_callback(
     .bind(code_challenge)
     .bind(code_challenge_method)
     .bind(nonce)
+    .bind(vec!["federated".to_string()])
+    .bind("urn:simple-idm:acr:federated")
     .bind(expires_at)
     .execute(&state.db_pool)
     .await
     .is_err()
     {
-        return Html(templates::error_page("server_error", "Failed to store authorization code")).into_response();
+        return Html(templates::error_page(
+            "server_error",
+            "Failed to store authorization code",
+        ))
+        .into_response();
     }
 
     let secure =
@@ -950,6 +1075,8 @@ pub async fn handle_federated_callback(
         user.id,
         Some(local_client.id),
         state.auth_session_expiry,
+        &["federated".to_string()],
+        Some("urn:simple-idm:acr:federated"),
     )
     .await
     .ok();
@@ -1197,102 +1324,468 @@ pub async fn handle_login(
             }
         };
 
-    // Normalize empty PKCE fields (Grafana can submit empty values)
-    let code_challenge = req.code_challenge.as_deref().and_then(non_empty);
-    let code_challenge_method = req.code_challenge_method.as_deref().and_then(non_empty);
-    let nonce = req.nonce.as_deref().and_then(non_empty);
-
-    // Vygeneruj authorization code
-    let code: String = rand::rng()
-        .sample_iter(rand::distr::Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect();
-
-    let expires_at = Utc::now() + Duration::minutes(10);
-    let scope = req.scope.unwrap_or_else(|| client.scope.clone());
-
-    // Ulož code do DB
-    if sqlx::query(
-        r#"
-        INSERT INTO authorization_codes
-        (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method, nonce, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-        "#,
-    )
-    .bind(&code)
-    .bind(client.id)
-    .bind(user.id)
-    .bind(&req.redirect_uri)
-    .bind(&scope)
-    .bind(code_challenge)
-    .bind(code_challenge_method)
-    .bind(nonce)
-    .bind(expires_at)
-    .execute(&state.db_pool)
-    .await
-    .is_err()
-    {
-        let html = templates::error_page(
-            "server_error",
-            "Failed to create authorization code",
-        );
+    if !is_redirect_uri_allowed(&client, &req.redirect_uri) {
+        let html = templates::error_page("invalid_request", "Invalid redirect_uri for this client");
         return Html(html).into_response();
     }
 
-    // Create authentication session for SSO
-    let session_token = match create_auth_session(
-        &state.db_pool,
-        user.id,
-        Some(client.id),
-        state.auth_session_expiry,
-    )
-    .await
-    {
-        Ok(token) => token,
-        Err(_) => {
-            tracing::warn!("Failed to create auth session for user {}", user.id);
-            // Continue without session - not critical for this flow
-            String::new()
-        }
+    // Normalize empty PKCE fields (Grafana can submit empty values)
+    let pending = PendingAuthorization {
+        user_id: user.id,
+        client_id: client.id,
+        redirect_uri: req.redirect_uri.clone(),
+        scope: req.scope.clone().unwrap_or_else(|| client.scope.clone()),
+        state: req.state.clone(),
+        code_challenge: req
+            .code_challenge
+            .as_deref()
+            .and_then(non_empty)
+            .map(str::to_string),
+        code_challenge_method: req
+            .code_challenge_method
+            .as_deref()
+            .and_then(non_empty)
+            .map(str::to_string),
+        nonce: req.nonce.as_deref().and_then(non_empty).map(str::to_string),
     };
 
+    // MFA is enforced only for identities managed locally by Simple IDM.
+    // AD and federated identities delegate authentication policy upstream.
+    if user.auth_mode.eq_ignore_ascii_case("local") {
+        let policy = match mfa::tenant_mfa_policy(&state.db_pool, user.tenant_id).await {
+            Ok(policy) => policy,
+            Err(err) => {
+                tracing::error!(user_id = %user.id, "Failed to load tenant MFA policy: {err}");
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to evaluate MFA policy",
+                ))
+                .into_response();
+            }
+        };
+        let authenticator = match mfa::active_totp_authenticator(&state.db_pool, user.id).await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(user_id = %user.id, "Failed to load MFA authenticator: {err}");
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to evaluate MFA state",
+                ))
+                .into_response();
+            }
+        };
+        let stage = match (policy, authenticator.is_some()) {
+            (MfaPolicy::Required, false) => Some("enroll"),
+            (MfaPolicy::Required, true) | (MfaPolicy::Optional, true) => Some("challenge"),
+            _ => None,
+        };
+
+        if let Some(stage) = stage {
+            let transaction = NewMfaTransaction {
+                tenant_id: user.tenant_id,
+                user_id: user.id,
+                client_id: client.id,
+                redirect_uri: &pending.redirect_uri,
+                scope: &pending.scope,
+                state: pending.state.as_deref(),
+                code_challenge: pending.code_challenge.as_deref(),
+                code_challenge_method: pending.code_challenge_method.as_deref(),
+                nonce: pending.nonce.as_deref(),
+                stage,
+            };
+            let token = match mfa::create_login_transaction(&state.db_pool, transaction).await {
+                Ok(token) => token,
+                Err(err) => {
+                    tracing::error!(user_id = %user.id, "Failed to create MFA transaction: {err}");
+                    return Html(templates::error_page(
+                        "server_error",
+                        "Failed to start MFA verification",
+                    ))
+                    .into_response();
+                }
+            };
+            audit::emit_event(
+                &state.db_pool,
+                "auth.mfa.required",
+                "user",
+                Some(user.id),
+                "success",
+                Some(serde_json::json!({"stage": stage, "client_id": client.client_id})),
+            )
+            .await;
+            clear_failures(&state.db_pool, "oauth2_login", &login_throttle_keys).await;
+            let secure =
+                state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+            let mut response = Redirect::to("/oauth2/mfa").into_response();
+            response.headers_mut().insert(
+                SET_COOKIE,
+                build_mfa_transaction_cookie(Some(&token), secure)
+                    .parse()
+                    .expect("valid MFA cookie"),
+            );
+            return response;
+        }
+    }
+
+    let (amr, acr) = if user.auth_mode.eq_ignore_ascii_case("federated") {
+        (
+            vec!["federated".to_string()],
+            Some("urn:simple-idm:acr:federated".to_string()),
+        )
+    } else {
+        (
+            vec!["pwd".to_string()],
+            Some("urn:simple-idm:acr:password".to_string()),
+        )
+    };
+    let scope_for_audit = pending.scope.clone();
+    let completion =
+        match complete_user_authorization(state.as_ref(), pending, amr.clone(), acr).await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(user_id = %user.id, "{err}");
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to complete sign-in",
+                ))
+                .into_response();
+            }
+        };
     audit::emit_event(
         &state.db_pool,
         "auth.login",
         "session",
         Some(user.id),
         "success",
-        Some(serde_json::json!({
-            "client_id": client.client_id,
-            "scope": scope
-        })),
+        Some(serde_json::json!({"client_id": client.client_id, "scope": scope_for_audit, "amr": amr})),
     )
     .await;
     clear_failures(&state.db_pool, "oauth2_login", &login_throttle_keys).await;
+    authorization_completion_response(state.as_ref(), &headers, completion)
+}
 
-    // Redirect zpět na aplikaci s authorization code
-    let mut redirect_url = req.redirect_uri.clone();
-    redirect_url.push_str(&format!("?code={}", code));
-    if let Some(state) = req.state {
-        redirect_url.push_str(&format!("&state={}", state));
+pub async fn show_mfa_form(State(state): State<Arc<OAuth2State>>, headers: HeaderMap) -> Response {
+    let Some(token) = cookie_value(&headers, "mfa_transaction") else {
+        return Html(templates::error_page(
+            "invalid_request",
+            "The MFA sign-in transaction is missing. Start sign-in again.",
+        ))
+        .into_response();
+    };
+    match render_mfa_transaction_page(state.as_ref(), &token, None).await {
+        Ok(html) => Html(html).into_response(),
+        Err(err) => {
+            tracing::warn!("Cannot render MFA transaction: {err}");
+            Html(templates::error_page(
+                "invalid_request",
+                "The MFA sign-in transaction is invalid or expired. Start sign-in again.",
+            ))
+            .into_response()
+        }
+    }
+}
+
+pub async fn handle_mfa(
+    State(state): State<Arc<OAuth2State>>,
+    headers: HeaderMap,
+    Form(req): Form<MfaCodeRequest>,
+) -> Response {
+    let Some(token) = cookie_value(&headers, "mfa_transaction") else {
+        return Html(templates::error_page(
+            "invalid_request",
+            "The MFA sign-in transaction is missing. Start sign-in again.",
+        ))
+        .into_response();
+    };
+    let transaction = match mfa::load_login_transaction(&state.db_pool, &token).await {
+        Ok(value) => value,
+        Err(_) => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "The MFA sign-in transaction is invalid or expired. Start sign-in again.",
+            ))
+            .into_response();
+        }
+    };
+
+    let user = match sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = $1 AND tenant_id = $2 AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(transaction.user_id)
+    .bind(transaction.tenant_id)
+    .fetch_optional(&state.db_pool)
+    .await
+    {
+        Ok(Some(user)) if user.auth_mode.eq_ignore_ascii_case("local") => user,
+        _ => {
+            return Html(templates::error_page(
+                "access_denied",
+                "This MFA transaction no longer belongs to an active locally managed account.",
+            ))
+            .into_response();
+        }
+    };
+
+    let submitted = req.code.trim();
+    let (verified, amr, recovery_codes) = if transaction.stage == "enroll" {
+        let enrollment = match mfa::ensure_pending_totp(
+            &state.db_pool,
+            user.tenant_id,
+            user.id,
+            &user.email,
+            "Simple IDM",
+        )
+        .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(user_id = %user.id, "Failed to load TOTP enrollment: {err}");
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to load MFA enrollment",
+                ))
+                .into_response();
+            }
+        };
+        let authenticator = match mfa::pending_totp_authenticator(&state.db_pool, user.id).await {
+            Ok(Some(value)) if value.id == enrollment.authenticator_id => value,
+            _ => {
+                return Html(templates::error_page(
+                    "server_error",
+                    "MFA enrollment state is invalid",
+                ))
+                .into_response();
+            }
+        };
+        match mfa::verify_totp(&state.db_pool, &authenticator, submitted).await {
+            Ok(true) => {
+                match mfa::activate_totp_and_generate_recovery_codes(&state.db_pool, &authenticator)
+                    .await
+                {
+                    Ok(codes) => (
+                        true,
+                        vec!["pwd".to_string(), "otp".to_string()],
+                        Some(codes),
+                    ),
+                    Err(err) => {
+                        tracing::error!(user_id = %user.id, "Failed to activate TOTP: {err}");
+                        return Html(templates::error_page(
+                            "server_error",
+                            "Failed to activate MFA",
+                        ))
+                        .into_response();
+                    }
+                }
+            }
+            Ok(false) => (false, Vec::new(), None),
+            Err(err) => {
+                tracing::warn!(user_id = %user.id, "TOTP verification failed: {err}");
+                (false, Vec::new(), None)
+            }
+        }
+    } else {
+        let authenticator = match mfa::active_totp_authenticator(&state.db_pool, user.id).await {
+            Ok(Some(value)) => value,
+            _ => {
+                return Html(templates::error_page(
+                    "access_denied",
+                    "No active authenticator is available for this account.",
+                ))
+                .into_response();
+            }
+        };
+        let looks_like_totp = submitted.len() == 6 && submitted.bytes().all(|b| b.is_ascii_digit());
+        if looks_like_totp {
+            match mfa::verify_totp(&state.db_pool, &authenticator, submitted).await {
+                Ok(true) => (true, vec!["pwd".to_string(), "otp".to_string()], None),
+                _ => (false, Vec::new(), None),
+            }
+        } else {
+            match mfa::consume_recovery_code(&state.db_pool, user.id, submitted).await {
+                Ok(true) => (true, vec!["pwd".to_string(), "recovery".to_string()], None),
+                _ => (false, Vec::new(), None),
+            }
+        }
+    };
+
+    if !verified {
+        mfa::register_failed_attempt(&state.db_pool, &token).await;
+        audit::emit_event(
+            &state.db_pool,
+            "auth.mfa.verify",
+            "user",
+            Some(user.id),
+            "failure",
+            Some(serde_json::json!({"stage": transaction.stage})),
+        )
+        .await;
+        return match render_mfa_transaction_page(
+            state.as_ref(),
+            &token,
+            Some("The verification code is invalid or has already been used."),
+        )
+        .await
+        {
+            Ok(html) => Html(html).into_response(),
+            Err(_) => Html(templates::error_page(
+                "access_denied",
+                "Too many invalid attempts or the MFA transaction expired. Start sign-in again.",
+            ))
+            .into_response(),
+        };
     }
 
-    // Set session cookie if session was created
-    if !session_token.is_empty() {
-        let secure =
-            state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
-        let cookie =
-            build_auth_session_cookie(Some(&session_token), state.auth_session_expiry, secure);
+    let transaction = match mfa::consume_login_transaction(&state.db_pool, &token).await {
+        Ok(value) => value,
+        Err(_) => {
+            return Html(templates::error_page(
+                "invalid_request",
+                "The MFA sign-in transaction expired. Start sign-in again.",
+            ))
+            .into_response();
+        }
+    };
+    let pending = pending_from_mfa_transaction(transaction);
+    let completion = match complete_user_authorization(
+        state.as_ref(),
+        pending,
+        amr.clone(),
+        Some("urn:simple-idm:acr:mfa".to_string()),
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::error!(user_id = %user.id, "{err}");
+            return Html(templates::error_page(
+                "server_error",
+                "Failed to complete sign-in",
+            ))
+            .into_response();
+        }
+    };
+    audit::emit_event(
+        &state.db_pool,
+        if recovery_codes.is_some() {
+            "auth.mfa.enroll"
+        } else {
+            "auth.mfa.verify"
+        },
+        "user",
+        Some(user.id),
+        "success",
+        Some(serde_json::json!({"amr": amr})),
+    )
+    .await;
 
-        let mut response = Redirect::to(&redirect_url).into_response();
+    let secure =
+        state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+    if let Some(codes) = recovery_codes {
+        let html = templates::recovery_codes_page(&codes, &completion.redirect_url);
+        let mut response = Html(html).into_response();
+        append_completion_cookies(state.as_ref(), &mut response, &completion, secure, true);
         response
-            .headers_mut()
-            .insert(SET_COOKIE, cookie.parse().unwrap());
-        return response;
+    } else {
+        let mut response = Redirect::to(&completion.redirect_url).into_response();
+        append_completion_cookies(state.as_ref(), &mut response, &completion, secure, true);
+        response
     }
+}
 
-    Redirect::to(&redirect_url).into_response()
+async fn render_mfa_transaction_page(
+    state: &OAuth2State,
+    token: &str,
+    error: Option<&str>,
+) -> Result<String, String> {
+    let transaction = mfa::load_login_transaction(&state.db_pool, token)
+        .await
+        .map_err(|err| err.to_string())?;
+    if transaction.stage != "enroll" {
+        return Ok(templates::mfa_challenge_page(error));
+    }
+    let user = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = $1 AND tenant_id = $2 AND is_active = true AND deleted_at IS NULL",
+    )
+    .bind(transaction.user_id)
+    .bind(transaction.tenant_id)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(|err| err.to_string())?;
+    let enrollment = mfa::ensure_pending_totp(
+        &state.db_pool,
+        user.tenant_id,
+        user.id,
+        &user.email,
+        "Simple IDM",
+    )
+    .await
+    .map_err(|err| err.to_string())?;
+    let code = QrCode::new(enrollment.otpauth_url.as_bytes()).map_err(|err| err.to_string())?;
+    let qr_svg = code.render::<svg::Color>().min_dimensions(220, 220).build();
+    Ok(templates::mfa_enrollment_page(
+        &enrollment.base32_secret,
+        &qr_svg,
+        error,
+    ))
+}
+
+fn pending_from_mfa_transaction(transaction: mfa::MfaLoginTransaction) -> PendingAuthorization {
+    PendingAuthorization {
+        user_id: transaction.user_id,
+        client_id: transaction.client_id,
+        redirect_uri: transaction.redirect_uri,
+        scope: transaction.scope,
+        state: transaction.state,
+        code_challenge: transaction.code_challenge,
+        code_challenge_method: transaction.code_challenge_method,
+        nonce: transaction.nonce,
+    }
+}
+
+fn authorization_completion_response(
+    state: &OAuth2State,
+    headers: &HeaderMap,
+    completion: AuthorizationCompletion,
+) -> Response {
+    let secure = state.force_secure_cookies || request_is_https(headers, state.trust_proxy_headers);
+    let mut response = Redirect::to(&completion.redirect_url).into_response();
+    append_completion_cookies(state, &mut response, &completion, secure, false);
+    response
+}
+
+fn append_completion_cookies(
+    state: &OAuth2State,
+    response: &mut Response,
+    completion: &AuthorizationCompletion,
+    secure: bool,
+    clear_mfa: bool,
+) {
+    if let Some(session_token) = completion.session_token.as_deref() {
+        if let Ok(cookie) =
+            build_auth_session_cookie(Some(session_token), state.auth_session_expiry, secure)
+                .parse()
+        {
+            response.headers_mut().append(SET_COOKIE, cookie);
+        }
+    }
+    if clear_mfa {
+        if let Ok(cookie) = build_mfa_transaction_cookie(None, secure).parse() {
+            response.headers_mut().append(SET_COOKIE, cookie);
+        }
+    }
+}
+
+fn build_mfa_transaction_cookie(token: Option<&str>, secure: bool) -> String {
+    let (value, max_age) = token
+        .map(|value| (value, mfa::MFA_TRANSACTION_TTL_SECONDS))
+        .unwrap_or(("", 0));
+    let mut cookie = format!(
+        "mfa_transaction={value}; Path=/oauth2/mfa; HttpOnly; SameSite=Strict; Max-Age={max_age}"
+    );
+    if secure {
+        cookie.push_str("; Secure");
+    }
+    cookie
 }
 
 fn invalid_login_response(req: &LoginRequest) -> Response {
@@ -1998,6 +2491,8 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
         Some(auth_code.scope.clone()),
         filtered_group_names.clone(),
         custom_claims.clone(),
+        auth_code.amr.clone(),
+        auth_code.acr.clone(),
         state.access_token_expiry,
     ) {
         Ok(token) => token,
@@ -2018,6 +2513,8 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
         filtered_group_names,
         custom_claims,
         auth_code.nonce.clone(),
+        auth_code.amr.clone(),
+        auth_code.acr.clone(),
         state.access_token_expiry,
     ) {
         Ok(token) => token,
@@ -2036,14 +2533,16 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
 
     if sqlx::query(
         r#"
-        INSERT INTO refresh_tokens (token, client_id, user_id, scope, expires_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO refresh_tokens (token, client_id, user_id, scope, amr, acr, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(&refresh_token)
     .bind(client.id)
     .bind(user.id)
     .bind(&auth_code.scope)
+    .bind(&auth_code.amr)
+    .bind(auth_code.acr.as_deref())
     .bind(refresh_expires_at)
     .execute(&state.db_pool)
     .await
@@ -2321,6 +2820,8 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         Some(refresh_token.scope.clone()),
         filtered_group_names,
         custom_claims,
+        refresh_token.amr.clone(),
+        refresh_token.acr.clone(),
         state.access_token_expiry,
     ) {
         Ok(token) => token,
@@ -2350,14 +2851,16 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
 
     if sqlx::query(
         r#"
-        INSERT INTO refresh_tokens (token, client_id, user_id, scope, expires_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO refresh_tokens (token, client_id, user_id, scope, amr, acr, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(&new_refresh_token)
     .bind(refresh_token.client_id)
     .bind(refresh_token.user_id)
     .bind(&refresh_token.scope)
+    .bind(&refresh_token.amr)
+    .bind(refresh_token.acr.as_deref())
     .bind(new_refresh_expires_at)
     .execute(&mut *tx)
     .await
@@ -2373,14 +2876,16 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
 
     if sqlx::query(
         r#"
-        INSERT INTO used_refresh_tokens (token, client_id, user_id, scope, expires_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO used_refresh_tokens (token, client_id, user_id, scope, amr, acr, expires_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         "#,
     )
     .bind(&refresh_token.token)
     .bind(refresh_token.client_id)
     .bind(refresh_token.user_id)
     .bind(&refresh_token.scope)
+    .bind(&refresh_token.amr)
+    .bind(refresh_token.acr.as_deref())
     .bind(refresh_token.expires_at)
     .execute(&mut *tx)
     .await

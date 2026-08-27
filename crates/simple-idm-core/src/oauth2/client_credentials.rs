@@ -254,6 +254,8 @@ pub async fn handle_client_credentials(
         Some(scope.clone()),
         vec![],         // žádné skupiny
         HashMap::new(), // žádné custom claims
+        vec!["client_credentials".to_string()],
+        Some("urn:simple-idm:acr:service".to_string()),
         state.access_token_expiry,
     ) {
         Ok(token) => token,

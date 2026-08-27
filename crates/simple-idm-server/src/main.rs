@@ -494,6 +494,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/oauth2/revoke", post(oauth2::handle_revoke))
         .route("/oauth2/authorize", get(oauth2::handle_authorize))
         .route("/oauth2/login", post(oauth2::handle_login))
+        .route(
+            "/oauth2/mfa",
+            get(oauth2::show_mfa_form).post(oauth2::handle_mfa),
+        )
         .route("/oauth2/logout", get(oauth2::handle_logout))
         .route(
             "/oauth2/device/authorize",

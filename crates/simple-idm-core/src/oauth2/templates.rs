@@ -120,6 +120,93 @@ fn oidc_footer(label: &str) -> String {
     )
 }
 
+pub fn mfa_challenge_page(error: Option<&str>) -> String {
+    let error_html = error.map(|err| alert("danger", err)).unwrap_or_default();
+    let body = format!(
+        r#"{error_html}
+<form method="POST" action="/oauth2/mfa">
+  <div class="mb-3">
+    <label class="form-label" for="code">Verification or recovery code</label>
+    <input class="form-control font-monospace" type="text" inputmode="numeric" id="code" name="code" required autofocus autocomplete="one-time-code" placeholder="123456">
+    <div class="form-hint">Enter the current code from your authenticator app. A one-time recovery code also works.</div>
+  </div>
+  <button type="submit" class="btn btn-primary w-100">Verify</button>
+</form>"#,
+        error_html = error_html,
+    );
+
+    render_page(
+        "Verify your identity",
+        &brand_label(),
+        "Two-factor authentication",
+        "Complete sign-in with your second factor.",
+        &body,
+        &oidc_footer("Protected by OAuth 2.0 + OIDC"),
+        "",
+    )
+}
+
+pub fn mfa_enrollment_page(base32_secret: &str, qr_svg: &str, error: Option<&str>) -> String {
+    let error_html = error.map(|err| alert("danger", err)).unwrap_or_default();
+    let body = format!(
+        r#"{error_html}
+<div class="text-center mb-3">{qr_svg}</div>
+<div class="mb-3">
+  <label class="form-label">Manual setup key</label>
+  <div class="input-group"><input class="form-control font-monospace" value="{secret}" readonly></div>
+</div>
+<form method="POST" action="/oauth2/mfa">
+  <div class="mb-3">
+    <label class="form-label" for="code">Verification code</label>
+    <input class="form-control font-monospace" type="text" inputmode="numeric" id="code" name="code" required autofocus autocomplete="one-time-code" placeholder="123456">
+    <div class="form-hint">Scan the QR code with Microsoft Authenticator, Google Authenticator, or another TOTP application, then enter its current code.</div>
+  </div>
+  <button type="submit" class="btn btn-primary w-100">Enable two-factor authentication</button>
+</form>"#,
+        error_html = error_html,
+        qr_svg = qr_svg,
+        secret = escape_html(base32_secret),
+    );
+
+    render_page(
+        "Set up two-factor authentication",
+        &brand_label(),
+        "Protect your account",
+        "Your organization requires an authenticator app for locally managed accounts.",
+        &body,
+        &oidc_footer("TOTP authenticator enrollment"),
+        "",
+    )
+}
+
+pub fn recovery_codes_page(codes: &[String], continue_url: &str) -> String {
+    let codes = codes
+        .iter()
+        .map(|code| escape_html(code))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = format!(
+        r#"<div class="alert alert-warning" role="alert">
+  <div class="fw-semibold mb-1">Save these recovery codes now</div>
+  Each code works once. They will not be shown again. Store them outside this device.
+</div>
+<pre class="p-3 border rounded user-select-all"><code>{codes}</code></pre>
+<a class="btn btn-primary w-100" href="{continue_url}">I saved the codes — continue</a>"#,
+        codes = codes,
+        continue_url = escape_html(continue_url),
+    );
+
+    render_page(
+        "Recovery codes",
+        &brand_label(),
+        "Two-factor authentication enabled",
+        "Keep a recovery code available in case you lose access to your authenticator.",
+        &body,
+        &oidc_footer("Recovery codes are single-use credentials"),
+        "",
+    )
+}
+
 /// Generate login page HTML.
 #[allow(dead_code)]
 pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> String {
@@ -162,6 +249,11 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
   <div class="mb-3">
     <label class="form-label" for="password">Password</label>
     <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password" placeholder="********">
+  </div>
+  <div class="mb-3">
+    <label class="form-label" for="mfa_code">MFA or recovery code</label>
+    <input class="form-control font-monospace" type="text" id="mfa_code" name="mfa_code" autocomplete="one-time-code" placeholder="Only required when MFA is enabled">
+    <div class="form-hint">Local accounts with active or required MFA must provide a current authenticator code or a one-time recovery code.</div>
   </div>
   <button type="submit" class="btn btn-primary w-100">Sign in</button>
 </form>"#,

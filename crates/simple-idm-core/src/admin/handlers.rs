@@ -189,6 +189,7 @@ pub struct CreateTenantRequest {
     pub name: String,
     pub mode: Option<String>, // single|multi
     pub is_active: Option<bool>,
+    pub mfa_policy: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -197,6 +198,7 @@ pub struct UpdateTenantRequest {
     pub name: Option<String>,
     pub mode: Option<String>, // single|multi
     pub is_active: Option<bool>,
+    pub mfa_policy: Option<String>,
 }
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
@@ -206,6 +208,7 @@ pub struct TenantResponse {
     pub name: String,
     pub mode: String,
     pub is_active: bool,
+    pub mfa_policy: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -319,6 +322,19 @@ fn normalize_tenant_mode(mode: Option<&str>) -> Result<&'static str, ErrorRespon
         Some(_) => Err(ErrorResponse {
             error: "bad_request".to_string(),
             error_description: "mode must be one of: single, multi".to_string(),
+        }),
+    }
+}
+
+fn normalize_mfa_policy(policy: Option<&str>) -> Result<&'static str, ErrorResponse> {
+    match policy {
+        None | Some("disabled") => Ok("disabled"),
+        Some("optional") => Ok("optional"),
+        Some("required") => Ok("required"),
+        Some(_) => Err(ErrorResponse {
+            error: "bad_request".to_string(),
+            error_description: "mfa_policy must be one of: disabled, optional, required"
+                .to_string(),
         }),
     }
 }
@@ -3518,18 +3534,23 @@ pub async fn create_tenant(
         Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
     };
     let is_active = req.is_active.unwrap_or(true);
+    let mfa_policy = match normalize_mfa_policy(req.mfa_policy.as_deref()) {
+        Ok(policy) => policy,
+        Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
+    };
 
     let result = sqlx::query_as::<_, TenantResponse>(
         r#"
-        INSERT INTO tenants (id, slug, name, mode, is_active)
-        VALUES (gen_random_uuid(), $1, $2, $3::tenant_mode, $4)
-        RETURNING id, slug, name, mode::text AS mode, is_active
+        INSERT INTO tenants (id, slug, name, mode, is_active, mfa_policy)
+        VALUES (gen_random_uuid(), $1, $2, $3::tenant_mode, $4, $5)
+        RETURNING id, slug, name, mode::text AS mode, is_active, mfa_policy
         "#,
     )
     .bind(req.slug)
     .bind(req.name)
     .bind(mode)
     .bind(is_active)
+    .bind(mfa_policy)
     .fetch_one(&db_pool)
     .await;
 
@@ -3560,7 +3581,7 @@ pub async fn list_tenants(
 
     let result = sqlx::query_as::<_, TenantResponse>(
         r#"
-        SELECT id, slug, name, mode::text AS mode, is_active
+        SELECT id, slug, name, mode::text AS mode, is_active, mfa_policy
         FROM tenants
         WHERE deleted_at IS NULL
         ORDER BY slug
@@ -3593,7 +3614,12 @@ pub async fn update_tenant(
     Path(tenant_id): Path<Uuid>,
     Json(req): Json<UpdateTenantRequest>,
 ) -> impl IntoResponse {
-    if req.slug.is_none() && req.name.is_none() && req.mode.is_none() && req.is_active.is_none() {
+    if req.slug.is_none()
+        && req.name.is_none()
+        && req.mode.is_none()
+        && req.is_active.is_none()
+        && req.mfa_policy.is_none()
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -3620,6 +3646,14 @@ pub async fn update_tenant(
         }
     };
 
+    let mfa_policy = match req.mfa_policy.as_deref() {
+        None => None,
+        Some(value) => match normalize_mfa_policy(Some(value)) {
+            Ok(policy) => Some(policy),
+            Err(err) => return (StatusCode::BAD_REQUEST, Json(err)).into_response(),
+        },
+    };
+
     let result = sqlx::query_as::<_, TenantResponse>(
         r#"
         UPDATE tenants
@@ -3627,15 +3661,17 @@ pub async fn update_tenant(
             slug = COALESCE($1, slug),
             name = COALESCE($2, name),
             mode = COALESCE($3::tenant_mode, mode),
-            is_active = COALESCE($4, is_active)
-        WHERE id = $5 AND deleted_at IS NULL
-        RETURNING id, slug, name, mode::text AS mode, is_active
+            is_active = COALESCE($4, is_active),
+            mfa_policy = COALESCE($5, mfa_policy)
+        WHERE id = $6 AND deleted_at IS NULL
+        RETURNING id, slug, name, mode::text AS mode, is_active, mfa_policy
         "#,
     )
     .bind(req.slug)
     .bind(req.name)
     .bind(mode)
     .bind(req.is_active)
+    .bind(mfa_policy)
     .bind(tenant_id)
     .fetch_optional(&db_pool)
     .await;
