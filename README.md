@@ -35,6 +35,7 @@ The repository is a Cargo workspace with multiple binaries and shared core crate
 - OIDC discovery and JWKS endpoints
 - refresh tokens and SSO sessions
 - local password auth with Argon2 password hashes
+- tenant-level TOTP MFA, one-time recovery codes, and audited admin reset for locally managed accounts
 - federated login through upstream Google/OIDC providers
 - AD/LDAP delegated password auth through `ad_ldap` identity providers
 - AD/LDAP role sync and mapping to local groups
@@ -145,11 +146,12 @@ JWT_ISSUER=https://sso.example.com
 
 ### Secret Encryption
 
-Identity provider secrets are encrypted in the database:
+Identity and authenticator secrets are encrypted in the database:
 
 - OIDC client secrets
 - Google client secrets
 - AD/LDAP bind passwords
+- pending and active TOTP seeds
 
 Set:
 
@@ -339,6 +341,52 @@ Users can use:
 For `federated`, the user is linked by invitation and then approved by an admin. The final binding is based on upstream `issuer + subject`, not just email.
 
 For `ad`, the selected `auth_provider_id` decides which AD/LDAP provider is used for password verification, onboarding and role sync.
+
+## Managed Tenant MFA
+
+Simple IDM applies its own MFA policy only to `local` accounts. Accounts using
+`federated` or `ad` authentication continue to rely on the upstream identity
+provider or AD for MFA. This avoids stacking two unrelated second-factor
+challenges and keeps the trust boundary explicit.
+
+Each tenant has one of these policies, configurable in **Admin UI → Tenants**:
+
+| Policy | Local account without TOTP | Local account with active TOTP | Federated / AD account |
+|---|---|---|---|
+| `disabled` | password only | password only | upstream authentication |
+| `optional` | password only | password + TOTP or recovery code | upstream authentication |
+| `required` | browser enrollment is required | password + TOTP or recovery code | upstream authentication |
+
+`optional` does not force a new enrollment. It is useful for staged rollout or
+for preserving MFA on accounts that already enrolled. Set the tenant to
+`required` when every local account must enroll at its next browser sign-in.
+
+Enrollment uses standard TOTP and works with Microsoft Authenticator, Google
+Authenticator, and compatible applications. After confirming the first code,
+the user receives ten one-time recovery codes. Only Argon2 hashes of recovery
+codes are stored, and the codes cannot be displayed again.
+
+An administrator can use **Reset MFA** on a local user. The operation revokes
+the authenticator and recovery codes, removes pending MFA transactions, closes
+the user's SSO sessions, and writes an audit event. Under a `required` policy,
+the next browser login starts a fresh enrollment. TOTP seeds are never exposed
+in the Admin UI.
+
+Authorization Code Flow records the authentication method in `amr` and the
+assurance level in `acr`. Successful MFA produces `amr` containing `pwd` plus
+`otp` (or `recovery`) and `acr=urn:simple-idm:acr:mfa`; these values are retained
+across authorization codes and refresh tokens. Device Flow accepts an existing
+TOTP or recovery code, but intentionally cannot enroll a new authenticator: a
+user without one must first complete a browser login.
+
+Operational requirements:
+
+- run migration `041_add_managed_tenant_mfa.sql` before deploying the new binary;
+- configure `IDP_SECRETS_MASTER_KEY`, which also encrypts TOTP seeds;
+- keep server clocks synchronized because TOTP is time based;
+- protect database backups and the encryption key separately;
+- start with `disabled`, validate browser and recovery flows, then switch the
+  intended managed tenant to `required`.
 
 ## Authentication Throttling
 
