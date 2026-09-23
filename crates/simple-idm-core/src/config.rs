@@ -16,6 +16,14 @@ pub struct Config {
     pub onboarding: OnboardingConfig,
     pub security: SecurityConfig,
     pub auth_protection: AuthProtectionConfig,
+    pub webauthn: Option<WebauthnConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebauthnConfig {
+    pub rp_id: String,
+    pub rp_name: String,
+    pub origins: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -274,6 +282,7 @@ impl Config {
             .unwrap_or(false);
 
         validate_admin_root_token_policy(&app_env, &admin_root_token)?;
+        let webauthn = parse_webauthn_config()?;
 
         Ok(Config {
             server: ServerConfig {
@@ -343,8 +352,49 @@ impl Config {
                 lockout_seconds: auth_lockout_seconds,
                 clear_on_start: auth_throttle_clear_on_start,
             },
+            webauthn,
         })
     }
+}
+
+fn parse_webauthn_config() -> Result<Option<WebauthnConfig>, config::ConfigError> {
+    let rp_id = env::var("WEBAUTHN_RP_ID").ok();
+    let rp_name = env::var("WEBAUTHN_RP_NAME").ok();
+    let origins = env::var("WEBAUTHN_ORIGINS").ok();
+    if rp_id.is_none() && rp_name.is_none() && origins.is_none() {
+        return Ok(None);
+    }
+    let rp_id = rp_id
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            config::ConfigError::Message(
+                "WEBAUTHN_RP_ID is required when WebAuthn is configured".into(),
+            )
+        })?;
+    let origins = origins.ok_or_else(|| {
+        config::ConfigError::Message(
+            "WEBAUTHN_ORIGINS is required when WebAuthn is configured".into(),
+        )
+    })?;
+    let origins: Vec<String> = origins
+        .split(',')
+        .map(str::trim)
+        .map(str::to_string)
+        .filter(|value| !value.is_empty())
+        .collect();
+    if origins.is_empty() {
+        return Err(config::ConfigError::Message(
+            "WEBAUTHN_ORIGINS must not be empty".into(),
+        ));
+    }
+    let rp_name = rp_name
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "Simple IDM".to_string());
+    Ok(Some(WebauthnConfig {
+        rp_id,
+        rp_name,
+        origins,
+    }))
 }
 
 fn validate_admin_root_token_policy(

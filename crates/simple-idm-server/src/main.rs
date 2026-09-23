@@ -108,6 +108,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     tracing::info!("Database: {}", redact_database_url(&config.database.url));
 
+    // Validate the stable RP ID and every allowed origin before touching the DB.
+    if let Some(webauthn) = &config.webauthn {
+        let _ = simple_idm_core::passkeys::PasskeyService::new(webauthn)?;
+        tracing::info!(rp_id = %webauthn.rp_id, "WebAuthn configuration validated");
+    }
+
     // Připoj se k databázi
     let db_pool = db::create_pool(&config.database.url).await?;
     tracing::info!("Connected to database");

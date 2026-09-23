@@ -13,6 +13,7 @@ pub mod mfa;
 pub mod oauth2;
 pub mod oidc;
 pub mod onboarding_cleanup;
+pub mod passkeys;
 pub mod password_reset;
 pub mod secret_crypto;
 pub mod security_headers;

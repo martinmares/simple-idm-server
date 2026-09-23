@@ -396,7 +396,7 @@ pub async fn handle_authorize(
     response
 }
 
-fn is_redirect_uri_allowed(client: &OAuthClient, redirect_uri: &str) -> bool {
+pub(crate) fn is_redirect_uri_allowed(client: &OAuthClient, redirect_uri: &str) -> bool {
     // Exact match
     if client.redirect_uris.iter().any(|uri| uri == redirect_uri) {
         return true;

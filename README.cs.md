@@ -367,6 +367,17 @@ Provozní požadavky:
 - začni politikou `disabled`, ověř browser a recovery flow a potom u vybraného
   spravovaného tenanta přepni na `required`.
 
+### Připravovaná podpora Passkeys
+
+Základ WebAuthn je zatím interní: registrace ani přihlášení přes HTTP a UI ještě
+nejsou dostupné. Konfigurace se aktivuje jen při nastavení `WEBAUTHN_RP_ID` a
+`WEBAUTHN_ORIGINS` (volitelně `WEBAUTHN_RP_NAME`). Produkční origin musí být
+HTTPS, například `WEBAUTHN_RP_ID=idm.example.com` a
+`WEBAUTHN_ORIGINS=https://idm.example.com`. Hodnota RP ID musí zůstat stabilní;
+její změna zneplatní již registrované Passkeys. Tenant má po migraci politiku
+`passkey_policy=disabled`. Podrobnosti jsou v
+`docs/PASSKEY_IMPLEMENTATION_PLAN.cs.md`.
+
 ## OAuth2 Endpointy
 
 Discovery:

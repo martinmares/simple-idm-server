@@ -69,6 +69,7 @@ qrcode = "0.14"
 open = "5.4"
 chacha20poly1305 = "0.10"
 totp-rs = { version = "6.0", features = ["gen_secret", "otpauth", "zeroize"] }
+webauthn-rs = { version = "=0.5.5", default-features = false, features = ["danger-allow-state-serialisation"] }
 simple-idm-common = { path = "../simple-idm-common" }
 simple-idm-ad-auth = { path = "../simple-idm-ad-auth" }
 simple-idm-ldap-sync = { path = "../simple-idm-ldap-sync" }

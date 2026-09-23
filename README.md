@@ -388,7 +388,18 @@ Operational requirements:
 - start with `disabled`, validate browser and recovery flows, then switch the
   intended managed tenant to `required`.
 
+## Passkeys (in progress)
+
+The WebAuthn service is currently internal: HTTP registration, sign-in and UI
+are not available yet. Configure `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGINS`
+(optionally `WEBAUTHN_RP_NAME`) to validate the relying party at startup. For
+example, use `WEBAUTHN_RP_ID=idm.example.com` with
+`WEBAUTHN_ORIGINS=https://idm.example.com`. The RP ID must remain stable or
+previously registered passkeys will stop working. Migration 042 defaults tenant
+`passkey_policy` to `disabled`. See `docs/PASSKEY_IMPLEMENTATION_PLAN.cs.md`.
+
 ## Authentication Throttling
+
 
 Repeated authentication failures are tracked in the `auth_throttle` database table.
 The lockout survives service restarts by default, so restart loops cannot bypass
