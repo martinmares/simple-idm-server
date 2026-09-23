@@ -19,7 +19,7 @@ use simple_idm_core::{
     admin::middleware::AdminAuth,
     db::{DbPool, models::User},
     oauth2::{self, OAuth2State},
-    secret_crypto::{decrypt_secret, encrypt_secret},
+    secret_crypto::{decrypt_secret, encrypt_secret, validate_master_key},
 };
 use sqlx::{FromRow, Row};
 use std::collections::{BTreeMap, HashMap};
@@ -6318,6 +6318,37 @@ async fn tenants_update(
     let mfa_policy = form.mfa_policy.trim();
     if !matches!(mfa_policy, "disabled" | "optional" | "required") {
         return redirect_with("/admin/ui/tenants", "error", "Invalid MFA policy").into_response();
+    }
+    if mfa_policy != "disabled" {
+        let current_policy = sqlx::query_scalar::<_, String>(
+            "SELECT mfa_policy FROM tenants WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&state.db_pool)
+        .await;
+        let current_policy = match current_policy {
+            Ok(Some(value)) => value,
+            Ok(None) => {
+                return redirect_with("/admin/ui/tenants", "error", "Tenant not found")
+                    .into_response();
+            }
+            Err(_) => {
+                return redirect_with(
+                    "/admin/ui/tenants",
+                    "error",
+                    "Could not check current MFA policy",
+                )
+                .into_response();
+            }
+        };
+        if current_policy != mfa_policy && validate_master_key().is_err() {
+            return redirect_with(
+                "/admin/ui/tenants",
+                "error",
+                "Configure IDP_SECRETS_MASTER_KEY before enabling MFA",
+            )
+            .into_response();
+        }
     }
     let passkey_policy = form.passkey_policy.trim();
     if !matches!(passkey_policy, "disabled" | "allowed") {

@@ -1475,13 +1475,34 @@ pub async fn show_mfa_form(State(state): State<Arc<OAuth2State>>, headers: Heade
         ))
         .into_response();
     };
-    match render_mfa_transaction_page(state.as_ref(), &token, None).await {
-        Ok(html) => Html(html).into_response(),
+    let transaction = match mfa::load_login_transaction(&state.db_pool, &token).await {
+        Ok(value) => value,
         Err(err) => {
-            tracing::warn!("Cannot render MFA transaction: {err}");
-            Html(templates::error_page(
+            tracing::warn!("Cannot load MFA transaction: {err}");
+            return Html(templates::error_page(
                 "invalid_request",
                 "The MFA sign-in transaction is invalid or expired. Start sign-in again.",
+            ))
+            .into_response();
+        }
+    };
+    if transaction.stage == "enroll"
+        && let Err(err) = crate::secret_crypto::validate_master_key()
+    {
+        tracing::warn!("Cannot prepare MFA enrollment: {err}");
+        return Html(templates::error_page(
+            "server_error",
+            "Authenticator setup is unavailable because the server encryption key is missing or invalid. Ask your administrator to configure IDP_SECRETS_MASTER_KEY.",
+        ))
+        .into_response();
+    }
+    match render_mfa_transaction_page(state.as_ref(), &transaction, None).await {
+        Ok(html) => Html(html).into_response(),
+        Err(err) => {
+            tracing::warn!("Cannot prepare MFA enrollment: {err}");
+            Html(templates::error_page(
+                "server_error",
+                "Could not prepare authenticator setup. Contact your administrator to check the server configuration.",
             ))
             .into_response()
         }
@@ -1622,14 +1643,25 @@ pub async fn handle_mfa(
             Some(serde_json::json!({"stage": transaction.stage})),
         )
         .await;
-        return match render_mfa_transaction_page(
-            state.as_ref(),
-            &token,
-            Some("The verification code is invalid or has already been used."),
-        )
-        .await
-        {
-            Ok(html) => Html(html).into_response(),
+        let transaction = mfa::load_login_transaction(&state.db_pool, &token).await;
+        return match transaction {
+            Ok(transaction) => match render_mfa_transaction_page(
+                state.as_ref(),
+                &transaction,
+                Some("The verification code is invalid or has already been used."),
+            )
+            .await
+            {
+                Ok(html) => Html(html).into_response(),
+                Err(err) => {
+                    tracing::warn!("Cannot render MFA enrollment after invalid code: {err}");
+                    Html(templates::error_page(
+                        "server_error",
+                        "Could not prepare authenticator setup. Contact your administrator.",
+                    ))
+                    .into_response()
+                }
+            },
             Err(_) => Html(templates::error_page(
                 "access_denied",
                 "Too many invalid attempts or the MFA transaction expired. Start sign-in again.",
@@ -1697,12 +1729,9 @@ pub async fn handle_mfa(
 
 async fn render_mfa_transaction_page(
     state: &OAuth2State,
-    token: &str,
+    transaction: &mfa::MfaLoginTransaction,
     error: Option<&str>,
 ) -> Result<String, String> {
-    let transaction = mfa::load_login_transaction(&state.db_pool, token)
-        .await
-        .map_err(|err| err.to_string())?;
     if transaction.stage != "enroll" {
         return Ok(templates::mfa_challenge_page(error));
     }

@@ -8,6 +8,7 @@ use super::throttle;
 use super::utils::resolve_oauth_client;
 use crate::audit;
 use crate::db::models::{AuthenticationSession, User};
+use crate::mfa::{self, MfaPolicy};
 use crate::passkeys::{PasskeyService, PendingAuthorization as PasskeyPending};
 use axum::{
     Json,
@@ -330,6 +331,12 @@ pub async fn security_page(State(state): State<Arc<OAuth2State>>, headers: Heade
         Err(response) => return response,
     };
     let fresh = Utc::now() - session.created_at <= Duration::minutes(FRESH_SESSION_MINUTES);
+    let mfa_link = match mfa::tenant_mfa_policy(&state.db_pool, user.tenant_id).await {
+        Ok(MfaPolicy::Optional | MfaPolicy::Required) => {
+            "<a href=\"/account/mfa\" class=\"btn btn-outline-primary w-100 mb-2\">Manage authenticator app (2FA)</a>"
+        }
+        _ => "",
+    };
     let csrf: String = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
         .take(48)
@@ -345,6 +352,7 @@ pub async fn security_page(State(state): State<Arc<OAuth2State>>, headers: Heade
   <button class="btn btn-primary w-100" type="button" id="passkey-add" {disabled}>Add passkey</button>
   <div id="passkey-message" class="form-hint mt-2" role="status" aria-live="polite"></div>
   <p class="text-secondary small mt-3">Add a second passkey as a backup. Your password and authenticator app remain available.</p>
+  {mfa_link}
   <a href="/oauth2/logout" class="btn btn-outline-secondary w-100">Sign out</a>
 </div>
 <script>{script}</script>"#,
@@ -357,6 +365,7 @@ pub async fn security_page(State(state): State<Arc<OAuth2State>>, headers: Heade
             "<div class=\"alert alert-warning\">Sign out and sign in again to change passkeys. Your current session is older than five minutes.</div>"
         },
         disabled = if fresh { "" } else { "disabled" },
+        mfa_link = mfa_link,
         script = include_str!("passkey_ui.js"),
     );
     let html = tabler_standalone_page(

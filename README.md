@@ -52,7 +52,7 @@ The repository is a Cargo workspace with multiple binaries and shared core crate
 - PostgreSQL 14+
 - `sqlx-cli`
 - RSA key pair for JWT signing
-- `IDP_SECRETS_MASTER_KEY` if you store identity provider secrets
+- `IDP_SECRETS_MASTER_KEY` if you store identity provider secrets or enable TOTP MFA
 
 Install `sqlx-cli`:
 
@@ -357,9 +357,12 @@ Each tenant has one of these policies, configurable in **Admin UI → Tenants**:
 | `optional` | password only | password + TOTP or recovery code | upstream authentication |
 | `required` | browser enrollment is required | password + TOTP or recovery code | upstream authentication |
 
-`optional` does not force a new enrollment. It is useful for staged rollout or
-for preserving MFA on accounts that already enrolled. Set the tenant to
-`required` when every local account must enroll at its next browser sign-in.
+`optional` does not force a new enrollment. A locally managed user can sign in
+normally, open `/account/mfa` (also linked from `/account/security` when
+Passkeys are enabled), and enroll an authenticator app without changing the
+tenant policy for anyone else. Starting and confirming enrollment require a
+session created in the last five minutes. Set the tenant to `required` when
+every local account must enroll at its next browser sign-in.
 
 Enrollment uses standard TOTP and works with Microsoft Authenticator, Google
 Authenticator, and compatible applications. After confirming the first code,
@@ -382,6 +385,7 @@ user without one must first complete a browser login.
 Operational requirements:
 
 - run migration `041_add_managed_tenant_mfa.sql` before deploying the new binary;
+- run migration `043_add_mfa_self_enrollment.sql` for optional-policy self-service enrollment;
 - configure `IDP_SECRETS_MASTER_KEY`, which also encrypts TOTP seeds;
 - keep server clocks synchronized because TOTP is time based;
 - protect database backups and the encryption key separately;

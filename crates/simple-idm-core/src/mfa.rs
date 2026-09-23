@@ -301,7 +301,7 @@ pub async fn activate_totp_and_generate_recovery_codes(
     authenticator: &UserAuthenticator,
 ) -> Result<Vec<String>> {
     let mut tx = pool.begin().await?;
-    sqlx::query(
+    let activated = sqlx::query(
         r#"
         UPDATE user_authenticators
         SET status = 'active', verified_at = NOW(), updated_at = NOW()
@@ -311,6 +311,9 @@ pub async fn activate_totp_and_generate_recovery_codes(
     .bind(authenticator.id)
     .execute(&mut *tx)
     .await?;
+    if activated.rows_affected() != 1 {
+        return Err(anyhow!("TOTP enrollment is no longer pending"));
+    }
     sqlx::query("DELETE FROM user_recovery_codes WHERE user_id = $1")
         .bind(authenticator.user_id)
         .execute(&mut *tx)
@@ -449,5 +452,15 @@ mod tests {
         let hash = transaction_token_hash(&token);
         assert_ne!(token, hash);
         assert_eq!(hash.len(), 64);
+    }
+
+    #[test]
+    fn generated_totp_secret_can_be_used_for_enrollment() {
+        let secret = Secret::generate();
+        let decoded = Secret::try_from_base32(secret.to_base32()).unwrap();
+        let totp = build_totp(decoded.as_bytes(), "user@example.com", "Simple IDM").unwrap();
+        let url = totp.to_url().unwrap();
+        assert!(url.starts_with("otpauth://totp/"));
+        assert!(qrcode::QrCode::new(url.as_bytes()).is_ok());
     }
 }

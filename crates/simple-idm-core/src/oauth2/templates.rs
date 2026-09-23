@@ -269,12 +269,8 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
   </div>
   <div class="mb-3">
     <label class="form-label" for="password">Password</label>
-    <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password" placeholder="********">
-  </div>
-  <div class="mb-3">
-    <label class="form-label" for="mfa_code">MFA or recovery code</label>
-    <input class="form-control font-monospace" type="text" id="mfa_code" name="mfa_code" autocomplete="one-time-code" placeholder="Only required when MFA is enabled">
-    <div class="form-hint">Local accounts with active or required MFA must provide a current authenticator code or a one-time recovery code.</div>
+    <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password">
+    <div class="form-hint">If two-factor authentication is enabled, you will enter its code after your password.</div>
   </div>
   <button type="submit" class="btn btn-primary w-100">Sign in</button>
 </form>
@@ -408,7 +404,7 @@ pub fn device_verify_page(
   </div>
   <div class="mb-3">
     <label class="form-label" for="password">Password</label>
-    <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password" placeholder="********">
+    <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password">
   </div>
   <button type="submit" class="btn btn-primary w-100">Authorize device</button>
 </form>"#,
@@ -456,4 +452,18 @@ pub fn callback_page(success: bool, base_header: &str, detail: &str) -> Html<Str
         "Protected by OAuth 2.0 Device Flow",
         "",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_page_collects_mfa_on_the_following_step() {
+        let html = login_page(&HashMap::new(), None);
+        assert!(html.contains("name=\"password\" required"));
+        assert!(html.contains("you will enter its code after your password"));
+        assert!(!html.contains("name=\"mfa_code\""));
+        assert!(!html.contains("placeholder=\"********\""));
+    }
 }

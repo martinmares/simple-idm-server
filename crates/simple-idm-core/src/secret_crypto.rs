@@ -49,6 +49,11 @@ fn key() -> Result<&'static [u8; KEY_LEN]> {
         .ok_or_else(|| anyhow!("Failed to initialize master key"))
 }
 
+/// Validate that encrypted identity and TOTP secrets can be created.
+pub fn validate_master_key() -> Result<()> {
+    key().map(|_| ())
+}
+
 fn is_encrypted(val: &str) -> bool {
     static ENC_RE: OnceLock<Regex> = OnceLock::new();
     ENC_RE

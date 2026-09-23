@@ -4,6 +4,7 @@ pub mod client_credentials;
 pub mod device_flow;
 pub mod introspection;
 mod ldap_role_sync;
+pub mod mfa_account_routes;
 pub mod passkey_routes;
 pub mod revocation;
 pub mod templates;
