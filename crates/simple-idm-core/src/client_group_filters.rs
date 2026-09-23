@@ -11,7 +11,7 @@ use crate::group_patterns::pattern_matches;
 ///
 /// # Examples
 ///
-/// ```
+/// ```text
 /// // Client only needs Grafana groups
 /// patterns = [
 ///   { pattern: "grafana:*", is_include: true, priority: 1 },

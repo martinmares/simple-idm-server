@@ -70,7 +70,7 @@ fn pattern_matches(pattern: &str, group_name: &str) -> bool {
 /// - Final result: true if any group remains in match set
 ///
 /// # Example
-/// ```
+/// ```text
 /// let patterns = vec![
 ///     ClaimMapPattern { pattern: "ssh:*", is_include: true, priority: 1, ... },
 ///     ClaimMapPattern { pattern: "ssh:test*", is_include: false, priority: 2, ... },
