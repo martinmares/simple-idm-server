@@ -2,7 +2,7 @@
 
 ## Stav dokumentu
 
-- Stav: implementace zahájena; etapa 1 rozpracována
+- Stav: etapa 1 dokončena; etapa 2 implementována částečně, automatizované browser E2E chybí
 - Datum rozhodnutí: 23. 9. 2026
 - Pokračování: po upgradu Codex CLI zahájeno 23. 9. 2026
 - Rozsah: `simple-idm-server`, primárně lokálně spravované identity
@@ -340,11 +340,14 @@ review.
 - unit a integrační testy.
 
 Průběžný stav: migrace `042_add_passkeys.sql`, explicitní konfigurace RP,
-serverový `PasskeyService` s registrační a autentizační ceremony a základní
-validační testy jsou implementované. Tato etapa zatím neposkytuje HTTP endpointy
-ani uživatelské UI. Metadata `transports` se zatím nesbírají a backup flags se
-doplní při prvním úspěšném přihlášení; samotný WebAuthn credential je uchován v
-`passkey_data`.
+serverový `PasskeyService` a základní validační testy jsou implementované.
+HTTP endpointy a uživatelské UI pro registraci, přihlášení a správu Passkeys
+jsou dostupné pro lokální účty s politikou `allowed`. Admin UI nabízí počet
+aktivních klíčů a samostatný reset všech Passkeys. Metadata `transports` se
+zatím nesbírají a backup flags se doplní při prvním úspěšném přihlášení;
+samotný WebAuthn credential je uchován v `passkey_data`. Browser flow bylo
+ověřeno ručně v Chromium s virtuálními autentikátory; automatizovaný E2E test
+a testy fyzických zařízení zůstávají otevřené.
 
 ### Etapa 2: Uživatelský produkt
 

@@ -24,6 +24,16 @@ pub struct PasskeyService {
     webauthn: Webauthn,
 }
 
+#[derive(Debug, serde::Serialize, FromRow)]
+pub struct PasskeySummary {
+    pub id: Uuid,
+    pub label: String,
+    pub created_at: chrono::DateTime<Utc>,
+    pub last_used_at: Option<chrono::DateTime<Utc>>,
+    pub backup_eligible: Option<bool>,
+    pub backup_state: Option<bool>,
+}
+
 #[derive(Debug, Clone)]
 pub struct PendingAuthorization {
     pub tenant_id: Uuid,
@@ -97,6 +107,95 @@ impl PasskeyService {
         })
     }
 
+    pub fn allows_origin(&self, origin: &str) -> bool {
+        self.webauthn
+            .get_allowed_origins()
+            .iter()
+            .any(|allowed| allowed.as_str().trim_end_matches('/') == origin)
+    }
+
+    pub async fn list(
+        &self,
+        pool: &PgPool,
+        tenant_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<PasskeySummary>> {
+        ensure!(
+            local_user_allowed(pool, tenant_id, user_id).await?,
+            "Passkeys are not allowed for this account"
+        );
+        Ok(sqlx::query_as(
+            "SELECT id, label, created_at, last_used_at, backup_eligible, backup_state FROM user_passkeys WHERE tenant_id = $1 AND user_id = $2 AND revoked_at IS NULL ORDER BY created_at DESC",
+        )
+        .bind(tenant_id).bind(user_id).fetch_all(pool).await?)
+    }
+
+    pub async fn rename(
+        &self,
+        pool: &PgPool,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        id: Uuid,
+        label: &str,
+    ) -> Result<bool> {
+        let label = label.trim();
+        ensure!(
+            !label.is_empty() && label.chars().count() <= 100,
+            "Invalid Passkey label"
+        );
+        ensure!(
+            local_user_allowed(pool, tenant_id, user_id).await?,
+            "Passkeys are not allowed for this account"
+        );
+        let changed = sqlx::query(
+            "UPDATE user_passkeys SET label = $1, updated_at = NOW() WHERE id = $2 AND tenant_id = $3 AND user_id = $4 AND revoked_at IS NULL",
+        )
+        .bind(label).bind(id).bind(tenant_id).bind(user_id).execute(pool).await?.rows_affected();
+        Ok(changed == 1)
+    }
+
+    pub async fn revoke(
+        &self,
+        pool: &PgPool,
+        tenant_id: Uuid,
+        user_id: Uuid,
+        id: Uuid,
+    ) -> Result<bool> {
+        let mut tx = pool.begin().await?;
+        // Serialize concurrent removals for this user so two requests cannot
+        // both remove the last remaining method.
+        let password_available: bool = sqlx::query_scalar(
+            "SELECT (NOT u.password_disabled AND u.password_hash IS NOT NULL) FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1 AND u.tenant_id = $2 AND u.auth_mode = 'local' AND u.is_active = true AND u.deleted_at IS NULL AND t.is_active = true AND t.passkey_policy = 'allowed' FOR UPDATE OF u",
+        )
+        .bind(user_id).bind(tenant_id).fetch_optional(&mut *tx).await?
+        .ok_or_else(|| anyhow!("Passkeys are not allowed for this account"))?;
+        if !password_available {
+            let count: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM user_passkeys WHERE tenant_id = $1 AND user_id = $2 AND revoked_at IS NULL",
+            )
+            .bind(tenant_id).bind(user_id).fetch_one(&mut *tx).await?;
+            ensure!(count > 1, "Cannot remove the last sign-in method");
+        }
+        let changed = sqlx::query(
+            "UPDATE user_passkeys SET revoked_at = NOW(), updated_at = NOW() WHERE id = $1 AND tenant_id = $2 AND user_id = $3 AND revoked_at IS NULL",
+        )
+        .bind(id).bind(tenant_id).bind(user_id).execute(&mut *tx).await?.rows_affected();
+        if changed == 1 {
+            sqlx::query(
+                "DELETE FROM authentication_sessions WHERE user_id = $1 AND 'webauthn' = ANY(amr)",
+            )
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+            sqlx::query("DELETE FROM webauthn_authentication_transactions WHERE user_id = $1")
+                .bind(user_id)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(changed == 1)
+    }
+
     pub async fn start_registration(
         &self,
         pool: &PgPool,
@@ -110,7 +209,7 @@ impl PasskeyService {
             "Passkeys are not allowed for this account"
         );
         let existing: Vec<Vec<u8>> = sqlx::query_scalar(
-            "SELECT credential_id FROM user_passkeys WHERE tenant_id = $1 AND user_id = $2",
+            "SELECT credential_id FROM user_passkeys WHERE tenant_id = $1 AND user_id = $2 AND revoked_at IS NULL",
         )
         .bind(tenant_id)
         .bind(user_id)
@@ -302,6 +401,49 @@ async fn local_user_allowed(pool: &PgPool, tenant_id: Uuid, user_id: Uuid) -> Re
     Ok(allowed)
 }
 
+/// Revokes every active passkey for a local user without touching TOTP or
+/// recovery codes. A password-based sign-in path must remain available.
+pub async fn admin_reset_user_passkeys(pool: &PgPool, user_id: Uuid) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let password_available: Option<bool> = sqlx::query_scalar(
+        "SELECT (NOT password_disabled AND password_hash IS NOT NULL) FROM users WHERE id = $1 AND auth_mode = 'local' AND is_active = true AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(password_available) = password_available else {
+        return Ok(false);
+    };
+    ensure!(
+        password_available,
+        "Cannot reset passkeys without another sign-in method"
+    );
+    let changed = sqlx::query(
+        "UPDATE user_passkeys SET revoked_at = NOW(), updated_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    if changed == 0 {
+        return Ok(false);
+    }
+    sqlx::query("DELETE FROM authentication_sessions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM webauthn_authentication_transactions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM webauthn_registration_transactions WHERE user_id = $1")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,5 +477,98 @@ mod tests {
             PasskeyService::new(&config("example.com", "https://idm.example.com/login")).is_err()
         );
         assert!(PasskeyService::new(&config("example.com", "https://u@idm.example.com")).is_err());
+    }
+
+    #[test]
+    fn origin_comparison_is_exact() {
+        let service = PasskeyService::new(&config("example.com", "https://idm.example.com"))
+            .expect("valid origin");
+        assert!(service.allows_origin("https://idm.example.com"));
+        assert!(!service.allows_origin("https://idm.example.com.evil.test"));
+        assert!(!service.allows_origin("http://idm.example.com"));
+        assert!(!service.allows_origin("https://idm.example.com:8443"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a migrated PostgreSQL DATABASE_URL"]
+    async fn postgres_registration_policy_and_admin_reset() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL");
+        let pool = PgPool::connect(&database_url).await.expect("PostgreSQL");
+        let service = PasskeyService::new(&config("localhost", "http://localhost:8080"))
+            .expect("WebAuthn service");
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let suffix = Uuid::new_v4().simple().to_string();
+        let email = format!("passkey-{suffix}@example.test");
+        sqlx::query("INSERT INTO tenants (id, slug, name, passkey_policy) VALUES ($1, $2, 'Passkey test', 'allowed')")
+            .bind(tenant_id).bind(&suffix).execute(&pool).await.expect("tenant");
+        sqlx::query("INSERT INTO users (id, tenant_id, username, email, password_hash) VALUES ($1, $2, $3, $4, 'test-hash')")
+            .bind(user_id).bind(tenant_id).bind(&suffix).bind(&email)
+            .execute(&pool).await.expect("user");
+
+        let (token, options) = service
+            .start_registration(&pool, tenant_id, user_id, &email, &email)
+            .await
+            .expect("registration start");
+        assert!(!options.public_key.challenge.is_empty());
+        let stored_hash: String = sqlx::query_scalar(
+            "SELECT token_hash FROM webauthn_registration_transactions WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(&pool)
+        .await
+        .expect("transaction");
+        assert_ne!(token, stored_hash);
+        assert_eq!(stored_hash, transaction_token_hash(&token));
+
+        sqlx::query("UPDATE tenants SET passkey_policy = 'disabled' WHERE id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await
+            .expect("disable policy");
+        assert!(
+            service
+                .start_registration(&pool, tenant_id, user_id, &email, &email)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE tenants SET passkey_policy = 'allowed' WHERE id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await
+            .expect("enable policy");
+
+        let passkey_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO user_passkeys (id, tenant_id, user_id, credential_id, passkey_data, label) VALUES ($1, $2, $3, $4, '{}'::jsonb, 'Test key')")
+            .bind(passkey_id).bind(tenant_id).bind(user_id).bind(vec![1_u8, 2, 3, 4])
+            .execute(&pool).await.expect("passkey");
+        assert!(
+            admin_reset_user_passkeys(&pool, user_id)
+                .await
+                .expect("admin reset")
+        );
+        let revoked: bool =
+            sqlx::query_scalar("SELECT revoked_at IS NOT NULL FROM user_passkeys WHERE id = $1")
+                .bind(passkey_id)
+                .fetch_one(&pool)
+                .await
+                .expect("revocation status");
+        assert!(revoked);
+        assert!(
+            !admin_reset_user_passkeys(&pool, user_id)
+                .await
+                .expect("second reset")
+        );
+
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup user");
+        sqlx::query("DELETE FROM tenants WHERE id = $1")
+            .bind(tenant_id)
+            .execute(&pool)
+            .await
+            .expect("cleanup tenant");
     }
 }

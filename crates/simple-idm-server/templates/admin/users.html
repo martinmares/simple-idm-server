@@ -113,6 +113,7 @@
             <span class="badge bg-secondary-lt">not enrolled</span>
             {% endif %}
           </div>
+          <div class="small mt-1">Passkeys: <span class="badge bg-blue-lt">{{ r.passkey_count }} active</span></div>
           {% endif %}
           {% if let Some(ext_id) = r.external_user_id %}
           <div class="small text-secondary mt-1">
@@ -191,6 +192,11 @@
             {% if r.auth_mode == "local" && r.mfa_status != "not_enrolled" %}
             <form method="post" action="/admin/ui/users/{{ r.id }}/mfa-reset" data-confirm="Reset MFA for {{ r.username }}? Existing authenticator and recovery codes will be revoked, and all login sessions will be terminated." data-confirm-action="Reset MFA" data-confirm-variant="warning">
               <button class="btn btn-sm btn-outline-warning" type="submit">Reset MFA</button>
+            </form>
+            {% endif %}
+            {% if r.auth_mode == "local" && r.passkey_count > 0 %}
+            <form method="post" action="/admin/ui/users/{{ r.id }}/passkeys-reset" data-confirm="Reset all {{ r.passkey_count }} Passkeys for {{ r.username }}? Existing sign-in sessions will be terminated. Password and MFA will remain available." data-confirm-action="Reset Passkeys" data-confirm-variant="warning">
+              <button class="btn btn-sm btn-outline-warning" type="submit">Reset Passkeys</button>
             </form>
             {% endif %}
             {% if r.auth_mode == "ad" %}

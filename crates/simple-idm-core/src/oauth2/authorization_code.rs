@@ -133,20 +133,20 @@ pub struct MfaCodeRequest {
 }
 
 #[derive(Debug, Clone)]
-struct PendingAuthorization {
-    user_id: Uuid,
-    client_id: Uuid,
-    redirect_uri: String,
-    scope: String,
-    state: Option<String>,
-    code_challenge: Option<String>,
-    code_challenge_method: Option<String>,
-    nonce: Option<String>,
+pub(super) struct PendingAuthorization {
+    pub user_id: Uuid,
+    pub client_id: Uuid,
+    pub redirect_uri: String,
+    pub scope: String,
+    pub state: Option<String>,
+    pub code_challenge: Option<String>,
+    pub code_challenge_method: Option<String>,
+    pub nonce: Option<String>,
 }
 
-struct AuthorizationCompletion {
-    redirect_url: String,
-    session_token: Option<String>,
+pub(super) struct AuthorizationCompletion {
+    pub redirect_url: String,
+    pub session_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -176,7 +176,7 @@ pub struct TokenResponseWithRefresh {
 }
 
 /// Helper: Get valid auth session from cookie
-async fn get_auth_session_from_cookie(
+pub(super) async fn get_auth_session_from_cookie(
     db_pool: &sqlx::PgPool,
     headers: &HeaderMap,
 ) -> Option<AuthenticationSession> {
@@ -223,7 +223,7 @@ async fn get_auth_session_from_cookie(
         && !session
             .amr
             .iter()
-            .any(|method| method == "otp" || method == "recovery")
+            .any(|method| method == "otp" || method == "recovery" || method == "webauthn")
     {
         return None;
     }
@@ -384,6 +384,9 @@ pub async fn handle_authorize(
         .collect();
     let mut params = params;
     params.insert("csrf_token".to_string(), csrf_token.clone());
+    if state.passkeys.is_some() {
+        params.insert("passkeys_enabled".to_string(), "true".to_string());
+    }
     let html = templates::login_page(&params, None);
 
     let secure =
@@ -480,7 +483,7 @@ async fn create_auth_session(
     Ok(session_token)
 }
 
-async fn complete_user_authorization(
+pub(super) async fn complete_user_authorization(
     state: &OAuth2State,
     pending: PendingAuthorization,
     amr: Vec<String>,
@@ -1139,7 +1142,7 @@ pub async fn handle_login(
             .await
             .unwrap_or(false)
     {
-        return rate_limited_login_response(&req);
+        return rate_limited_login_response(&req, state.passkeys.is_some());
     }
 
     let req_csrf = req.csrf_token.clone().unwrap_or_default();
@@ -1165,7 +1168,7 @@ pub async fn handle_login(
             })),
         )
         .await;
-        return invalid_login_response(&req);
+        return invalid_login_response(&req, state.passkeys.is_some());
     }
 
     let tenant_id = if req.username.contains('@') {
@@ -1197,7 +1200,7 @@ pub async fn handle_login(
             })),
         )
         .await;
-        return invalid_login_response(&req);
+        return invalid_login_response(&req, state.passkeys.is_some());
     }
 
     // Ověř uživatele
@@ -1240,7 +1243,7 @@ pub async fn handle_login(
                 })),
             )
             .await;
-            return invalid_login_response(&req);
+            return invalid_login_response(&req, state.passkeys.is_some());
         }
         Err(_) => {
             let html =
@@ -1270,7 +1273,7 @@ pub async fn handle_login(
             })),
         )
         .await;
-        return invalid_login_response(&req);
+        return invalid_login_response(&req, state.passkeys.is_some());
     }
 
     // Ověř heslo (lokálně nebo delegovaně přes AD/LDAP)
@@ -1295,7 +1298,7 @@ pub async fn handle_login(
             })),
         )
         .await;
-        return invalid_login_response(&req);
+        return invalid_login_response(&req, state.passkeys.is_some());
     }
 
     // Ověř klienta
@@ -1742,7 +1745,7 @@ fn pending_from_mfa_transaction(transaction: mfa::MfaLoginTransaction) -> Pendin
     }
 }
 
-fn authorization_completion_response(
+pub(super) fn authorization_completion_response(
     state: &OAuth2State,
     headers: &HeaderMap,
     completion: AuthorizationCompletion,
@@ -1788,8 +1791,14 @@ fn build_mfa_transaction_cookie(token: Option<&str>, secure: bool) -> String {
     cookie
 }
 
-fn invalid_login_response(req: &LoginRequest) -> Response {
+fn invalid_login_response(req: &LoginRequest, passkeys_enabled: bool) -> Response {
     let mut params = HashMap::new();
+    if let Some(csrf_token) = &req.csrf_token {
+        params.insert("csrf_token".to_string(), csrf_token.clone());
+    }
+    if passkeys_enabled {
+        params.insert("passkeys_enabled".to_string(), "true".to_string());
+    }
     params.insert("client_id".to_string(), req.client_id.clone());
     if let Some(tenant) = &req.tenant {
         params.insert("tenant".to_string(), tenant.clone());
@@ -1814,8 +1823,14 @@ fn invalid_login_response(req: &LoginRequest) -> Response {
     Html(html).into_response()
 }
 
-fn rate_limited_login_response(req: &LoginRequest) -> Response {
+fn rate_limited_login_response(req: &LoginRequest, passkeys_enabled: bool) -> Response {
     let mut params = HashMap::new();
+    if let Some(csrf_token) = &req.csrf_token {
+        params.insert("csrf_token".to_string(), csrf_token.clone());
+    }
+    if passkeys_enabled {
+        params.insert("passkeys_enabled".to_string(), "true".to_string());
+    }
     params.insert("client_id".to_string(), req.client_id.clone());
     if let Some(tenant) = &req.tenant {
         params.insert("tenant".to_string(), tenant.clone());
@@ -1903,7 +1918,7 @@ fn is_email_domain_allowed(email: &str, allowed_domains: &[String]) -> bool {
     allowed_domains.iter().any(|d| d == &domain)
 }
 
-fn request_is_https(headers: &HeaderMap, trust_proxy_headers: bool) -> bool {
+pub(super) fn request_is_https(headers: &HeaderMap, trust_proxy_headers: bool) -> bool {
     if !trust_proxy_headers {
         return false;
     }
@@ -1915,7 +1930,7 @@ fn request_is_https(headers: &HeaderMap, trust_proxy_headers: bool) -> bool {
         .unwrap_or(false)
 }
 
-fn build_auth_session_cookie(token: Option<&str>, max_age: i64, secure: bool) -> String {
+pub(super) fn build_auth_session_cookie(token: Option<&str>, max_age: i64, secure: bool) -> String {
     let value = token.unwrap_or("");
     let mut cookie = format!(
         "auth_session={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}",
@@ -1927,7 +1942,7 @@ fn build_auth_session_cookie(token: Option<&str>, max_age: i64, secure: bool) ->
     cookie
 }
 
-fn build_csrf_cookie(token: &str, secure: bool) -> String {
+pub(super) fn build_csrf_cookie(token: &str, secure: bool) -> String {
     let mut cookie = format!(
         "csrf_token={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=1200",
         token
@@ -1938,7 +1953,7 @@ fn build_csrf_cookie(token: &str, secure: bool) -> String {
     cookie
 }
 
-fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+pub(super) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
     let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
     cookie_header.split(';').find_map(|cookie| {
         let parts: Vec<&str> = cookie.trim().splitn(2, '=').collect();
@@ -1993,11 +2008,11 @@ async fn verify_user_password(state: &OAuth2State, user: &User, password: &str) 
     }
 }
 
-fn default_tenant_id() -> Uuid {
+pub(super) fn default_tenant_id() -> Uuid {
     Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid default tenant uuid")
 }
 
-async fn resolve_tenant_for_email(db_pool: &sqlx::PgPool, email: &str) -> Option<Uuid> {
+pub(super) async fn resolve_tenant_for_email(db_pool: &sqlx::PgPool, email: &str) -> Option<Uuid> {
     let domain = email.rsplit_once('@')?.1.trim().to_lowercase();
     sqlx::query_scalar::<_, Uuid>(
         r#"

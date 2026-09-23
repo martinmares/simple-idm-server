@@ -50,6 +50,7 @@ pub struct OAuth2State {
     pub trust_proxy_headers: bool,
     pub force_secure_cookies: bool,
     pub auth_protection: AuthProtectionConfig,
+    pub passkeys: Option<Arc<crate::passkeys::PasskeyService>>,
 }
 
 pub async fn handle_client_credentials(

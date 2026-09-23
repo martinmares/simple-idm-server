@@ -235,6 +235,7 @@ pub struct TenantUpdateForm {
     name: String,
     mode: String,
     mfa_policy: String,
+    passkey_policy: String,
     is_active: Option<String>,
 }
 
@@ -621,6 +622,7 @@ struct UserRow {
     federated_approval_status: Option<String>,
     mfa_status: String,
     recovery_codes_remaining: i64,
+    passkey_count: i64,
 }
 
 impl UserRow {
@@ -673,6 +675,7 @@ struct TenantRow {
     mode: String,
     is_active: bool,
     mfa_policy: String,
+    passkey_policy: String,
     users_count: i64,
     groups_count: i64,
     clients_count: i64,
@@ -1261,6 +1264,10 @@ pub fn router(state: WebAdminState) -> Router {
         )
         .route("/admin/ui/users/{id}/update", post(users_update))
         .route("/admin/ui/users/{id}/mfa-reset", post(users_mfa_reset))
+        .route(
+            "/admin/ui/users/{id}/passkeys-reset",
+            post(users_passkeys_reset),
+        )
         .route(
             "/admin/ui/users/{id}/patterns/create",
             post(user_patterns_create),
@@ -4078,7 +4085,12 @@ async fn users_page(
                SELECT COUNT(*)
                FROM user_recovery_codes urc
                WHERE urc.user_id = users.id AND urc.used_at IS NULL
-             ) AS recovery_codes_remaining
+             ) AS recovery_codes_remaining,
+             (
+               SELECT COUNT(*)
+               FROM user_passkeys up
+               WHERE up.user_id = users.id AND up.revoked_at IS NULL
+             ) AS passkey_count
            FROM users
            LEFT JOIN identity_providers aip ON aip.id = users.auth_provider_id AND aip.deleted_at IS NULL
            LEFT JOIN user_external_identities uei
@@ -4221,7 +4233,12 @@ async fn users_page(
                SELECT COUNT(*)
                FROM user_recovery_codes urc
                WHERE urc.user_id = users.id AND urc.used_at IS NULL
-             ) AS recovery_codes_remaining
+             ) AS recovery_codes_remaining,
+             (
+               SELECT COUNT(*)
+               FROM user_passkeys up
+               WHERE up.user_id = users.id AND up.revoked_at IS NULL
+             ) AS passkey_count
            FROM users
            LEFT JOIN identity_providers aip ON aip.id = users.auth_provider_id AND aip.deleted_at IS NULL
            LEFT JOIN user_external_identities uei
@@ -5298,6 +5315,58 @@ async fn users_mfa_reset(
     }
 }
 
+async fn users_passkeys_reset(
+    State(state): State<WebAdminState>,
+    headers: HeaderMap,
+    Path(id): Path<Uuid>,
+) -> Response {
+    if let Err(redir) = require_admin_token(&state, &headers).await {
+        return redir.into_response();
+    }
+
+    let return_path = users_return_path_from_referer(&headers);
+    match simple_idm_core::passkeys::admin_reset_user_passkeys(&state.db_pool, id).await {
+        Ok(true) => {
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "auth.passkey.admin_reset",
+                "user",
+                Some(id),
+                "success",
+                Some(json!({ "effect": "passkeys_revoked_sessions_revoked" })),
+            )
+            .await;
+            redirect_with(
+                &return_path,
+                "message",
+                "Passkeys reset. Existing sign-in sessions were revoked; password and MFA remain available.",
+            )
+            .into_response()
+        }
+        Ok(false) => {
+            redirect_with(&return_path, "error", "No active Passkeys to reset").into_response()
+        }
+        Err(err) => {
+            tracing::warn!(user_id = %id, "Passkey admin reset failed: {err}");
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "auth.passkey.admin_reset",
+                "user",
+                Some(id),
+                "failure",
+                None,
+            )
+            .await;
+            redirect_with(
+                &return_path,
+                "error",
+                "Passkey reset failed; verify another sign-in method is available",
+            )
+            .into_response()
+        }
+    }
+}
+
 async fn users_restore(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -6157,6 +6226,7 @@ async fn tenants_page(
             t.mode::text AS mode,
             t.is_active,
             t.mfa_policy,
+            t.passkey_policy,
             (SELECT COUNT(*) FROM users u WHERE u.tenant_id = t.id AND u.deleted_at IS NULL) AS users_count,
             (SELECT COUNT(*) FROM groups g WHERE g.tenant_id = t.id AND g.deleted_at IS NULL) AS groups_count,
             (SELECT COUNT(*) FROM oauth_clients oc WHERE oc.tenant_id = t.id AND oc.deleted_at IS NULL) AS clients_count,
@@ -6249,6 +6319,11 @@ async fn tenants_update(
     if !matches!(mfa_policy, "disabled" | "optional" | "required") {
         return redirect_with("/admin/ui/tenants", "error", "Invalid MFA policy").into_response();
     }
+    let passkey_policy = form.passkey_policy.trim();
+    if !matches!(passkey_policy, "disabled" | "allowed") {
+        return redirect_with("/admin/ui/tenants", "error", "Invalid Passkey policy")
+            .into_response();
+    }
 
     let result = sqlx::query(
         r#"
@@ -6256,7 +6331,8 @@ async fn tenants_update(
         SET name = $2,
             mode = $3::tenant_mode,
             mfa_policy = $4,
-            is_active = $5,
+            passkey_policy = $5,
+            is_active = $6,
             updated_at = NOW()
         WHERE id = $1 AND deleted_at IS NULL
         "#,
@@ -6265,6 +6341,7 @@ async fn tenants_update(
     .bind(name)
     .bind(mode)
     .bind(mfa_policy)
+    .bind(passkey_policy)
     .bind(parse_checkbox(&form.is_active))
     .execute(&state.db_pool)
     .await;

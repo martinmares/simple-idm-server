@@ -29,6 +29,7 @@
               <th>Tenant</th>
               <th>Mode</th>
               <th>MFA</th>
+              <th>Passkeys</th>
               <th>Status</th>
               <th class="text-end">Objects</th>
               <th class="w-1">Actions</th>
@@ -47,6 +48,13 @@
                 <span class="badge bg-green-lt">required</span>
                 {% else if t.mfa_policy == "optional" %}
                 <span class="badge bg-yellow-lt">optional</span>
+                {% else %}
+                <span class="badge bg-secondary-lt">disabled</span>
+                {% endif %}
+              </td>
+              <td>
+                {% if t.passkey_policy == "allowed" %}
+                <span class="badge bg-green-lt">allowed</span>
                 {% else %}
                 <span class="badge bg-secondary-lt">disabled</span>
                 {% endif %}
@@ -204,6 +212,14 @@
               <option value="required" {% if t.mfa_policy == "required" %}selected{% endif %}>required</option>
             </select>
             <div class="form-text">Federated and AD identities continue to use MFA at their upstream identity provider.</div>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Passkeys for local accounts</label>
+            <select class="form-select" name="passkey_policy">
+              <option value="disabled" {% if t.passkey_policy == "disabled" %}selected{% endif %}>disabled</option>
+              <option value="allowed" {% if t.passkey_policy == "allowed" %}selected{% endif %}>allowed</option>
+            </select>
+            <div class="form-text">Passkeys require WebAuthn RP configuration. Users can manage them at <code>/account/security</code>.</div>
           </div>
           <label class="form-check form-switch">
             <input class="form-check-input" type="checkbox" name="is_active" {% if t.is_active %}checked{% endif %}>

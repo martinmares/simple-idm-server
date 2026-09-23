@@ -109,10 +109,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Database: {}", redact_database_url(&config.database.url));
 
     // Validate the stable RP ID and every allowed origin before touching the DB.
-    if let Some(webauthn) = &config.webauthn {
-        let _ = simple_idm_core::passkeys::PasskeyService::new(webauthn)?;
+    let passkeys = if let Some(webauthn) = &config.webauthn {
+        let service = Arc::new(simple_idm_core::passkeys::PasskeyService::new(webauthn)?);
         tracing::info!(rp_id = %webauthn.rp_id, "WebAuthn configuration validated");
-    }
+        Some(service)
+    } else {
+        None
+    };
 
     // Připoj se k databázi
     let db_pool = db::create_pool(&config.database.url).await?;
@@ -157,6 +160,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         trust_proxy_headers: config.security.trust_proxy_headers,
         force_secure_cookies: config.security.force_secure_cookies,
         auth_protection: config.auth_protection.clone(),
+        passkeys,
     });
 
     let cleanup_interval = config.jwt.refresh_token_cleanup_interval_seconds;
@@ -500,6 +504,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/oauth2/revoke", post(oauth2::handle_revoke))
         .route("/oauth2/authorize", get(oauth2::handle_authorize))
         .route("/oauth2/login", post(oauth2::handle_login))
+        .route(
+            "/oauth2/passkey/start",
+            post(oauth2::passkey_routes::login_start),
+        )
+        .route(
+            "/oauth2/passkey/finish",
+            post(oauth2::passkey_routes::login_finish),
+        )
+        .route(
+            "/account/security",
+            get(oauth2::passkey_routes::security_page),
+        )
+        .route("/account/passkeys", get(oauth2::passkey_routes::list))
+        .route(
+            "/account/passkeys/register/start",
+            post(oauth2::passkey_routes::registration_start),
+        )
+        .route(
+            "/account/passkeys/register/finish",
+            post(oauth2::passkey_routes::registration_finish),
+        )
+        .route(
+            "/account/passkeys/rename",
+            post(oauth2::passkey_routes::rename),
+        )
+        .route(
+            "/account/passkeys/revoke",
+            post(oauth2::passkey_routes::revoke),
+        )
         .route(
             "/oauth2/mfa",
             get(oauth2::show_mfa_form).post(oauth2::handle_mfa),

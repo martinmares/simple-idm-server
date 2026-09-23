@@ -388,15 +388,29 @@ Operational requirements:
 - start with `disabled`, validate browser and recovery flows, then switch the
   intended managed tenant to `required`.
 
-## Passkeys (in progress)
+## Passkeys (initial implementation)
 
-The WebAuthn service is currently internal: HTTP registration, sign-in and UI
-are not available yet. Configure `WEBAUTHN_RP_ID` and `WEBAUTHN_ORIGINS`
-(optionally `WEBAUTHN_RP_NAME`) to validate the relying party at startup. For
-example, use `WEBAUTHN_RP_ID=idm.example.com` with
-`WEBAUTHN_ORIGINS=https://idm.example.com`. The RP ID must remain stable or
-previously registered passkeys will stop working. Migration 042 defaults tenant
-`passkey_policy` to `disabled`. See `docs/PASSKEY_IMPLEMENTATION_PLAN.cs.md`.
+Run migration `042_add_passkeys.sql`, configure `WEBAUTHN_RP_ID` and
+`WEBAUTHN_ORIGINS` (optionally `WEBAUTHN_RP_NAME`), and set the tenant's
+`passkey_policy` to `allowed` in **Admin UI → Tenants**. The default is
+`disabled`. For example, use `WEBAUTHN_RP_ID=idm.example.com` with
+`WEBAUTHN_ORIGINS=https://idm.example.com`. Keep the RP ID stable: changing it
+will make existing credentials unusable. Production origins must use HTTPS.
+
+Locally managed users can choose **Continue with passkey** on the OAuth login
+page. After signing in, they can open `/account/security` to add, rename or
+revoke multiple Passkeys. Changes require a session created in the last five
+minutes; sign out and sign in again if it has aged. Password + TOTP remains
+available. WebAuthn requires user verification and records `amr=webauthn` with
+`acr=urn:simple-idm:acr:phishing-resistant`; a separate TOTP challenge is not
+required for that login. The Admin UI shows the active Passkey count and offers
+a separate, audited **Reset Passkeys** action that revokes sign-in sessions.
+
+Conditional UI, Passkey-only accounts, tenant policy `required`, per-key admin
+revocation and automated browser E2E tests are not yet available. A manual
+Chromium virtual-authenticator test covered two registrations, Passkey login,
+revocation, re-registration, required-MFA bypass and password + TOTP fallback.
+See `docs/PASSKEY_IMPLEMENTATION_PLAN.cs.md` for the remaining work.
 
 ## Authentication Throttling
 

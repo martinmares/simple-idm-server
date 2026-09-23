@@ -227,12 +227,27 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
         .unwrap_or("");
 
     let error_html = error.map(|err| alert("danger", err)).unwrap_or_default();
+    let passkeys_enabled = params
+        .get("passkeys_enabled")
+        .is_some_and(|value| value == "true");
+    let passkey_html = if passkeys_enabled {
+        r#"<div class="text-center text-secondary my-3">or</div>
+<button type="button" id="passkey-login" class="btn btn-outline-primary w-100">Continue with passkey</button>
+<div id="passkey-message" class="form-hint mt-2" role="status" aria-live="polite"></div>"#
+    } else {
+        ""
+    };
+    let passkey_script = if passkeys_enabled {
+        format!("<script>{}</script>", include_str!("passkey_ui.js"))
+    } else {
+        String::new()
+    };
     let body = format!(
         r#"{error_html}
 <div class="alert alert-info" role="alert">
   Signing in to <strong>{client}</strong>
 </div>
-<form method="POST" action="/oauth2/login">
+<form method="POST" action="/oauth2/login" id="login-form">
   <input type="hidden" name="client_id" value="{client_id}">
   <input type="hidden" name="redirect_uri" value="{redirect_uri}">
   <input type="hidden" name="state" value="{state}">
@@ -256,7 +271,9 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
     <div class="form-hint">Local accounts with active or required MFA must provide a current authenticator code or a one-time recovery code.</div>
   </div>
   <button type="submit" class="btn btn-primary w-100">Sign in</button>
-</form>"#,
+</form>
+{passkey_html}
+{passkey_script}"#,
         error_html = error_html,
         client = escape_html(client_id),
         client_id = escape_html(client_id),
@@ -268,6 +285,8 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
         csrf_token = escape_html(csrf_token),
         code_challenge = escape_html(code_challenge),
         code_challenge_method = escape_html(code_challenge_method),
+        passkey_html = passkey_html,
+        passkey_script = passkey_script,
         placeholder = escape_html(&user_placeholder())
     );
 
