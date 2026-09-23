@@ -237,6 +237,11 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
     } else {
         ""
     };
+    let username_passkey_error = if passkeys_enabled {
+        r#"<div id="username-passkey-error" class="invalid-feedback" role="alert"></div>"#
+    } else {
+        ""
+    };
     let passkey_script = if passkeys_enabled {
         format!("<script>{}</script>", include_str!("passkey_ui.js"))
     } else {
@@ -260,6 +265,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
   <div class="mb-3">
     <label class="form-label" for="username">Email or username</label>
     <input class="form-control" type="text" id="username" name="username" required autofocus autocomplete="username" placeholder="{placeholder}">
+    {username_passkey_error}
   </div>
   <div class="mb-3">
     <label class="form-label" for="password">Password</label>
@@ -286,6 +292,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
         code_challenge = escape_html(code_challenge),
         code_challenge_method = escape_html(code_challenge_method),
         passkey_html = passkey_html,
+        username_passkey_error = username_passkey_error,
         passkey_script = passkey_script,
         placeholder = escape_html(&user_placeholder())
     );

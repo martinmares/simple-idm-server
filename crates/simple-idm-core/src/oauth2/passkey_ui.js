@@ -59,13 +59,26 @@
   }
 
   const loginButton = document.getElementById('passkey-login');
+  const username = document.getElementById('username');
+  const usernameError = document.getElementById('username-passkey-error');
+  if (loginButton && username && usernameError) username.addEventListener('input', () => {
+    if (!username.value.trim()) return;
+    username.classList.remove('is-invalid');
+    username.removeAttribute('aria-invalid');
+    username.removeAttribute('aria-describedby');
+    usernameError.textContent = '';
+  });
   if (loginButton) loginButton.addEventListener('click', async () => {
     const message = document.getElementById('passkey-message');
     const form = document.getElementById('login-form');
     const fields = Object.fromEntries(new FormData(form));
     if (!fields.username?.trim()) {
-      message.textContent = 'Enter your email or username first.';
-      form.elements.username.focus();
+      username.classList.add('is-invalid');
+      username.setAttribute('aria-invalid', 'true');
+      username.setAttribute('aria-describedby', 'username-passkey-error');
+      usernameError.textContent = 'Enter your email or username to continue with a passkey.';
+      message.textContent = '';
+      username.focus();
       return;
     }
     loginButton.disabled = true;

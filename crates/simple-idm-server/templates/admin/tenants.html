@@ -22,65 +22,52 @@
       <div class="card-header">
         <h3 class="card-title mb-0">Tenants</h3>
       </div>
-      <div class="table-responsive">
-        <table class="table table-vcenter card-table">
-          <thead>
-            <tr>
-              <th>Tenant</th>
-              <th>Mode</th>
-              <th>MFA</th>
-              <th>Passkeys</th>
-              <th>Status</th>
-              <th class="text-end">Objects</th>
-              <th class="w-1">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {% for t in tenants %}
-            <tr>
-              <td>
-                <div class="fw-semibold">{{ t.name }}</div>
-                <div class="text-secondary small"><code>{{ t.slug }}</code></div>
-              </td>
-              <td><span class="badge bg-blue-lt">{{ t.mode }}</span></td>
-              <td>
-                {% if t.mfa_policy == "required" %}
-                <span class="badge bg-green-lt">required</span>
-                {% else if t.mfa_policy == "optional" %}
-                <span class="badge bg-yellow-lt">optional</span>
-                {% else %}
-                <span class="badge bg-secondary-lt">disabled</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if t.passkey_policy == "allowed" %}
-                <span class="badge bg-green-lt">allowed</span>
-                {% else %}
-                <span class="badge bg-secondary-lt">disabled</span>
-                {% endif %}
-              </td>
-              <td>
-                {% if t.is_active %}
-                <span class="badge bg-green-lt">active</span>
-                {% else %}
-                <span class="badge bg-red-lt">inactive</span>
-                {% endif %}
-              </td>
-              <td class="text-end text-secondary small">
-                <div>{{ t.users_count }} users</div>
-                <div>{{ t.groups_count }} groups</div>
-                <div>{{ t.clients_count }} clients</div>
-                <div>{{ t.domains_count }} domains</div>
-              </td>
-              <td>
-                <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#edit-tenant-{{ t.id }}">
-                  Edit
-                </button>
-              </td>
-            </tr>
-            {% endfor %}
-          </tbody>
-        </table>
+      <div class="list-group list-group-flush">
+        {% for t in tenants %}
+        <div class="list-group-item py-3">
+          <div class="d-flex align-items-start justify-content-between gap-3">
+            <div class="text-break">
+              <div class="fw-semibold">{{ t.name }}</div>
+              <div class="text-secondary small"><code>{{ t.slug }}</code></div>
+            </div>
+            <button type="button" class="btn btn-sm btn-outline-primary flex-shrink-0" data-bs-toggle="modal" data-bs-target="#edit-tenant-{{ t.id }}" aria-label="Edit tenant {{ t.name }}">
+              Edit
+            </button>
+          </div>
+          <div class="d-flex flex-wrap gap-2 mt-3 small">
+            <div class="text-nowrap"><span class="text-secondary me-1">Mode</span><span class="badge bg-blue-lt">{{ t.mode }}</span></div>
+            <div class="text-nowrap">
+              <span class="text-secondary me-1">MFA</span>
+              {% if t.mfa_policy == "required" %}
+              <span class="badge bg-green-lt">required</span>
+              {% else if t.mfa_policy == "optional" %}
+              <span class="badge bg-yellow-lt">optional</span>
+              {% else %}
+              <span class="badge bg-secondary-lt">disabled</span>
+              {% endif %}
+            </div>
+            <div class="text-nowrap">
+              <span class="text-secondary me-1">Passkeys</span>
+              {% if t.passkey_policy == "allowed" %}
+              <span class="badge bg-green-lt">allowed</span>
+              {% else %}
+              <span class="badge bg-secondary-lt">disabled</span>
+              {% endif %}
+            </div>
+            <div class="text-nowrap">
+              <span class="text-secondary me-1">Status</span>
+              {% if t.is_active %}
+              <span class="badge bg-green-lt">active</span>
+              {% else %}
+              <span class="badge bg-red-lt">inactive</span>
+              {% endif %}
+            </div>
+          </div>
+          <div class="text-secondary small mt-2">
+            {{ t.users_count }} users · {{ t.groups_count }} groups · {{ t.clients_count }} clients · {{ t.domains_count }} domains
+          </div>
+        </div>
+        {% endfor %}
       </div>
     </div>
   </div>
