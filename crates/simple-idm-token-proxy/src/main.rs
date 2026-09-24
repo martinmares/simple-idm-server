@@ -10,7 +10,7 @@ use axum::{
     Router,
     body::Bytes,
     extract::{OriginalUri, State},
-    http::{HeaderMap, HeaderName, Method, StatusCode, Uri},
+    http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::any,
 };
@@ -28,6 +28,7 @@ const VERSION: &str = concat!(
     env!("SIMPLE_IDM_GIT_SHA"),
     ")"
 );
+const CONFIG_RELEASE_HEADER: &str = "x-config-release-id";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -124,6 +125,7 @@ struct AppState {
     client: reqwest::Client,
     upstream: Url,
     token_file: Arc<PathBuf>,
+    customer_release_name: Option<HeaderValue>,
 }
 
 #[tokio::main]
@@ -140,11 +142,14 @@ async fn main() -> anyhow::Result<()> {
 async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     validate_token_file(&args.common.token_file)?;
     let client = build_client(&args.common)?;
+    let customer_release_name =
+        customer_release_header(std::env::var("CUSTOMER_RELEASE_NAME").ok())?;
 
     let state = AppState {
         client,
         upstream: args.common.upstream.clone(),
         token_file: Arc::new(args.common.token_file.clone()),
+        customer_release_name,
     };
 
     info!("starting simple-idm-token-proxy");
@@ -292,6 +297,9 @@ async fn proxy_inner(
         if should_forward_request_header(name) {
             request = request.header(name, value);
         }
+    }
+    if let Some(value) = &state.customer_release_name {
+        request = request.header(CONFIG_RELEASE_HEADER, value);
     }
 
     if !body.is_empty() {
@@ -541,6 +549,7 @@ fn should_forward_request_header(name: &HeaderName) -> bool {
     !matches!(
         name.as_str().to_ascii_lowercase().as_str(),
         "authorization"
+            | CONFIG_RELEASE_HEADER
             | "connection"
             | "host"
             | "keep-alive"
@@ -551,6 +560,18 @@ fn should_forward_request_header(name: &HeaderName) -> bool {
             | "transfer-encoding"
             | "upgrade"
     )
+}
+
+fn customer_release_header(value: Option<String>) -> anyhow::Result<Option<HeaderValue>> {
+    let Some(value) = value else { return Ok(None) };
+    if value.trim() != value || value.is_empty() || value.len() > 128 {
+        anyhow::bail!(
+            "CUSTOMER_RELEASE_NAME must be a non-empty release name of at most 128 bytes without surrounding whitespace"
+        );
+    }
+    Ok(Some(HeaderValue::from_str(&value).context(
+        "invalid CUSTOMER_RELEASE_NAME HTTP header value",
+    )?))
 }
 
 fn should_forward_response_header(name: &HeaderName) -> bool {
@@ -684,7 +705,68 @@ YyRIHN8wfdVoOw==
     fn strips_sensitive_request_headers() {
         assert!(!should_forward_request_header(&header::AUTHORIZATION));
         assert!(!should_forward_request_header(&header::HOST));
+        assert!(!should_forward_request_header(&HeaderName::from_static(
+            CONFIG_RELEASE_HEADER
+        )));
         assert!(should_forward_request_header(&header::ACCEPT));
+    }
+
+    #[test]
+    fn validates_customer_release_header() {
+        assert!(customer_release_header(None).unwrap().is_none());
+        assert_eq!(
+            customer_release_header(Some("TSM-Core_RE61_SP_04.01".to_string())).unwrap(),
+            Some(HeaderValue::from_static("TSM-Core_RE61_SP_04.01"))
+        );
+        for invalid in ["", " release", "release ", "release\nother"] {
+            assert!(customer_release_header(Some(invalid.to_string())).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_overrides_client_release_header() {
+        let app = Router::new().route(
+            "/config/api/v1/config",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(
+                    headers.get(CONFIG_RELEASE_HEADER),
+                    Some(&HeaderValue::from_static("TSM-Core_RE61_SP_04.01"))
+                );
+                assert_eq!(
+                    headers.get(header::AUTHORIZATION),
+                    Some(&HeaderValue::from_static("Bearer projected-token"))
+                );
+                "ok"
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempdir().unwrap();
+        let token_file = root.path().join("token");
+        fs::write(&token_file, "projected-token\n").await.unwrap();
+        let state = AppState {
+            client: reqwest::Client::new(),
+            upstream: Url::parse(&format!("http://{address}/config")).unwrap(),
+            token_file: Arc::new(token_file),
+            customer_release_name: customer_release_header(Some(
+                "TSM-Core_RE61_SP_04.01".to_string(),
+            ))
+            .unwrap(),
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(CONFIG_RELEASE_HEADER, HeaderValue::from_static("spoofed"));
+        let response = proxy_inner(
+            state,
+            Method::GET,
+            "/api/v1/config".parse().unwrap(),
+            headers,
+            Bytes::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        server.abort();
     }
 
     #[test]

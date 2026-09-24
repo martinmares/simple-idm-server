@@ -40,6 +40,25 @@ SIMPLE_IDM_TOKEN_PROXY_TOKEN_FILE=/var/run/secrets/workload-identity/simple-conf
 SIMPLE_IDM_TOKEN_PROXY_CA_FILE=/var/run/certs/internal-ca.pem
 ```
 
+For configuration requests, set `CUSTOMER_RELEASE_NAME` on the proxy container
+from the Pod annotation `cloud-app.cz/customer-release-name` via the Kubernetes
+Downward API. The proxy sends that value as `X-Config-Release-ID` on upstream
+requests. It discards any `X-Config-Release-ID` supplied by the caller, so the
+caller cannot choose a different release. If the environment variable is
+absent, the proxy sends no release header. Example container environment:
+
+```yaml
+env:
+  - name: CUSTOMER_RELEASE_NAME
+    valueFrom:
+      fieldRef:
+        fieldPath: "metadata.annotations['cloud-app.cz/customer-release-name']"
+```
+
+Only configure this on Pods whose template carries the annotation. The
+upstream config server must still validate that the requested release is
+authorized for the workload; the header alone is not an authorization grant.
+
 If the upstream URL includes a path prefix, the proxy accepts both a request
 with that prefix and a request without it. This lets an application call the
 localhost proxy using its normal upstream-relative paths.
