@@ -19,7 +19,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio::{fs, io::AsyncWriteExt, net::TcpListener};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use tracing_subscriber::{EnvFilter, fmt};
 
 const VERSION: &str = concat!(
@@ -29,6 +29,7 @@ const VERSION: &str = concat!(
     ")"
 );
 const CONFIG_RELEASE_HEADER: &str = "x-config-release-id";
+const CONFIG_CUSTOMER_RELEASE_HEADER: &str = "x-config-customer-release-id";
 
 #[derive(Parser, Debug)]
 #[command(
@@ -91,6 +92,22 @@ struct ServeArgs {
     )]
     listen: SocketAddr,
 
+    /// Environment variable containing the image release ID.
+    #[arg(
+        long,
+        env = "SIMPLE_IDM_TOKEN_PROXY_RELEASE_ID_ENV_NAME",
+        default_value = "RELEASE_ID"
+    )]
+    release_id_env_name: String,
+
+    /// Environment variable containing the optional customer release ID.
+    #[arg(
+        long,
+        env = "SIMPLE_IDM_TOKEN_PROXY_CUSTOMER_RELEASE_ID_ENV_NAME",
+        default_value = "CUSTOMER_RELEASE_ID"
+    )]
+    customer_release_id_env_name: String,
+
     #[command(flatten)]
     common: CommonArgs,
 }
@@ -125,7 +142,8 @@ struct AppState {
     client: reqwest::Client,
     upstream: Url,
     token_file: Arc<PathBuf>,
-    customer_release_name: Option<HeaderValue>,
+    release_id: Option<HeaderValue>,
+    customer_release_id: Option<HeaderValue>,
 }
 
 #[tokio::main]
@@ -142,14 +160,32 @@ async fn main() -> anyhow::Result<()> {
 async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     validate_token_file(&args.common.token_file)?;
     let client = build_client(&args.common)?;
-    let customer_release_name =
-        customer_release_header(std::env::var("CUSTOMER_RELEASE_NAME").ok())?;
+    if args.release_id_env_name.is_empty()
+        || args.customer_release_id_env_name.is_empty()
+        || args.release_id_env_name == args.customer_release_id_env_name
+    {
+        anyhow::bail!("release ID environment variable names must be nonempty and distinct");
+    }
+    let release_id = release_header(
+        std::env::var(&args.release_id_env_name).ok(),
+        &args.release_id_env_name,
+    )?;
+    let customer_release_id = release_header(
+        std::env::var(&args.customer_release_id_env_name)
+            .ok()
+            .filter(|value| !value.is_empty()),
+        &args.customer_release_id_env_name,
+    )?;
+    if customer_release_id.is_some() && release_id.is_none() {
+        anyhow::bail!("CUSTOMER_RELEASE_ID requires RELEASE_ID");
+    }
 
     let state = AppState {
         client,
         upstream: args.common.upstream.clone(),
         token_file: Arc::new(args.common.token_file.clone()),
-        customer_release_name,
+        release_id,
+        customer_release_id,
     };
 
     info!("starting simple-idm-token-proxy");
@@ -298,8 +334,11 @@ async fn proxy_inner(
             request = request.header(name, value);
         }
     }
-    if let Some(value) = &state.customer_release_name {
+    if let Some(value) = &state.release_id {
         request = request.header(CONFIG_RELEASE_HEADER, value);
+    }
+    if let Some(value) = &state.customer_release_id {
+        request = request.header(CONFIG_CUSTOMER_RELEASE_HEADER, value);
     }
 
     if !body.is_empty() {
@@ -308,6 +347,11 @@ async fn proxy_inner(
 
     let upstream_response = request.send().await?;
     let status = upstream_response.status();
+    debug!(
+        release_id = ?state.release_id.as_ref().and_then(|value| value.to_str().ok()),
+        customer_release_id = ?state.customer_release_id.as_ref().and_then(|value| value.to_str().ok()),
+        "forwarded release context headers"
+    );
     info!(
         "proxy {} {} -> {}",
         method,
@@ -550,6 +594,7 @@ fn should_forward_request_header(name: &HeaderName) -> bool {
         name.as_str().to_ascii_lowercase().as_str(),
         "authorization"
             | CONFIG_RELEASE_HEADER
+            | CONFIG_CUSTOMER_RELEASE_HEADER
             | "connection"
             | "host"
             | "keep-alive"
@@ -562,16 +607,23 @@ fn should_forward_request_header(name: &HeaderName) -> bool {
     )
 }
 
-fn customer_release_header(value: Option<String>) -> anyhow::Result<Option<HeaderValue>> {
+fn release_header(value: Option<String>, name: &str) -> anyhow::Result<Option<HeaderValue>> {
     let Some(value) = value else { return Ok(None) };
-    if value.trim() != value || value.is_empty() || value.len() > 128 {
-        anyhow::bail!(
-            "CUSTOMER_RELEASE_NAME must be a non-empty release name of at most 128 bytes without surrounding whitespace"
-        );
+    let bytes = value.as_bytes();
+    let is_alphanumeric = |byte: u8| byte.is_ascii_alphanumeric();
+    if bytes.is_empty()
+        || bytes.len() > 63
+        || !is_alphanumeric(bytes[0])
+        || !is_alphanumeric(bytes[bytes.len() - 1])
+        || !bytes
+            .iter()
+            .all(|byte| is_alphanumeric(*byte) || matches!(*byte, b'.' | b'_' | b'-'))
+    {
+        anyhow::bail!("{name} must be a Kubernetes label value of at most 63 characters");
     }
-    Ok(Some(HeaderValue::from_str(&value).context(
-        "invalid CUSTOMER_RELEASE_NAME HTTP header value",
-    )?))
+    Ok(Some(
+        HeaderValue::from_str(&value).context(format!("invalid {name} HTTP header value"))?,
+    ))
 }
 
 fn should_forward_response_header(name: &HeaderName) -> bool {
@@ -708,37 +760,90 @@ YyRIHN8wfdVoOw==
         assert!(!should_forward_request_header(&HeaderName::from_static(
             CONFIG_RELEASE_HEADER
         )));
+        assert!(!should_forward_request_header(&HeaderName::from_static(
+            CONFIG_CUSTOMER_RELEASE_HEADER
+        )));
         assert!(should_forward_request_header(&header::ACCEPT));
     }
 
     #[test]
-    fn validates_customer_release_header() {
-        assert!(customer_release_header(None).unwrap().is_none());
+    fn validates_release_headers() {
+        assert!(release_header(None, "RELEASE_ID").unwrap().is_none());
         assert_eq!(
-            customer_release_header(Some("TSM-Core_RE61_SP_04.01".to_string())).unwrap(),
+            release_header(
+                Some("TSM-Core_RE61_SP_04.01".to_string()),
+                "CUSTOMER_RELEASE_ID"
+            )
+            .unwrap(),
             Some(HeaderValue::from_static("TSM-Core_RE61_SP_04.01"))
         );
-        for invalid in ["", " release", "release ", "release\nother"] {
-            assert!(customer_release_header(Some(invalid.to_string())).is_err());
+        for invalid in [
+            "",
+            " release",
+            "release ",
+            "release\nother",
+            "release/other",
+            "release_",
+        ] {
+            assert!(release_header(Some(invalid.to_string()), "RELEASE_ID").is_err());
         }
+        assert!(release_header(Some("a".repeat(64)), "RELEASE_ID").is_err());
+    }
+
+    #[test]
+    fn serve_accepts_custom_release_environment_names() {
+        let cli = Cli::try_parse_from([
+            "simple-idm-token-proxy",
+            "serve",
+            "--upstream",
+            "https://config.example.com",
+            "--token-file",
+            "/tmp/token",
+            "--release-id-env-name",
+            "APP_RELEASE_ID",
+            "--customer-release-id-env-name",
+            "APP_CUSTOMER_RELEASE_ID",
+        ])
+        .unwrap();
+        let Command::Serve(args) = cli.command else {
+            panic!("expected serve command")
+        };
+        assert_eq!(args.release_id_env_name, "APP_RELEASE_ID");
+        assert_eq!(args.customer_release_id_env_name, "APP_CUSTOMER_RELEASE_ID");
     }
 
     #[tokio::test]
     async fn proxy_overrides_client_release_header() {
-        let app = Router::new().route(
-            "/config/api/v1/config",
-            get(|headers: HeaderMap| async move {
-                assert_eq!(
-                    headers.get(CONFIG_RELEASE_HEADER),
-                    Some(&HeaderValue::from_static("TSM-Core_RE61_SP_04.01"))
-                );
-                assert_eq!(
-                    headers.get(header::AUTHORIZATION),
-                    Some(&HeaderValue::from_static("Bearer projected-token"))
-                );
-                "ok"
-            }),
-        );
+        let app = Router::new()
+            .route(
+                "/config/api/v1/config",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(
+                        headers.get(CONFIG_RELEASE_HEADER),
+                        Some(&HeaderValue::from_static("2026.09.10.02"))
+                    );
+                    assert_eq!(
+                        headers.get(CONFIG_CUSTOMER_RELEASE_HEADER),
+                        Some(&HeaderValue::from_static("TSM-Core_RE61_SP_04.01"))
+                    );
+                    assert_eq!(
+                        headers.get(header::AUTHORIZATION),
+                        Some(&HeaderValue::from_static("Bearer projected-token"))
+                    );
+                    "ok"
+                }),
+            )
+            .route(
+                "/config/api/v1/dev",
+                get(|headers: HeaderMap| async move {
+                    assert_eq!(
+                        headers.get(CONFIG_RELEASE_HEADER),
+                        Some(&HeaderValue::from_static("2026.09.10.02"))
+                    );
+                    assert!(headers.get(CONFIG_CUSTOMER_RELEASE_HEADER).is_none());
+                    "ok"
+                }),
+            );
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
@@ -749,18 +854,41 @@ YyRIHN8wfdVoOw==
             client: reqwest::Client::new(),
             upstream: Url::parse(&format!("http://{address}/config")).unwrap(),
             token_file: Arc::new(token_file),
-            customer_release_name: customer_release_header(Some(
-                "TSM-Core_RE61_SP_04.01".to_string(),
-            ))
+            release_id: release_header(Some("2026.09.10.02".to_string()), "RELEASE_ID").unwrap(),
+            customer_release_id: release_header(
+                Some("TSM-Core_RE61_SP_04.01".to_string()),
+                "CUSTOMER_RELEASE_ID",
+            )
             .unwrap(),
         };
         let mut headers = HeaderMap::new();
         headers.insert(CONFIG_RELEASE_HEADER, HeaderValue::from_static("spoofed"));
+        headers.insert(
+            CONFIG_CUSTOMER_RELEASE_HEADER,
+            HeaderValue::from_static("spoofed"),
+        );
         let response = proxy_inner(
-            state,
+            state.clone(),
             Method::GET,
             "/api/v1/config".parse().unwrap(),
             headers,
+            Bytes::new(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let mut dev_state = state;
+        dev_state.customer_release_id = None;
+        let mut dev_headers = HeaderMap::new();
+        dev_headers.insert(
+            CONFIG_CUSTOMER_RELEASE_HEADER,
+            HeaderValue::from_static("spoofed"),
+        );
+        let response = proxy_inner(
+            dev_state,
+            Method::GET,
+            "/api/v1/dev".parse().unwrap(),
+            dev_headers,
             Bytes::new(),
         )
         .await

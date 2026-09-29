@@ -40,24 +40,51 @@ SIMPLE_IDM_TOKEN_PROXY_TOKEN_FILE=/var/run/secrets/workload-identity/simple-conf
 SIMPLE_IDM_TOKEN_PROXY_CA_FILE=/var/run/certs/internal-ca.pem
 ```
 
-For configuration requests, set `CUSTOMER_RELEASE_NAME` on the proxy container
-from the Pod annotation `cloud-app.cz/customer-release-name` via the Kubernetes
-Downward API. The proxy sends that value as `X-Config-Release-ID` on upstream
-requests. It discards any `X-Config-Release-ID` supplied by the caller, so the
-caller cannot choose a different release. If the environment variable is
-absent, the proxy sends no release header. Example container environment:
+For configuration requests, `kube-build-app` injects `RELEASE_ID` and optional
+`CUSTOMER_RELEASE_ID` into the proxy container using stable ConfigMap references.
+The proxy sends these as
+`X-Config-Release-ID` and `X-Config-Customer-Release-ID`, respectively. It
+discards both headers supplied by the caller. `CUSTOMER_RELEASE_ID` requires
+`RELEASE_ID`. Example container environment for a customer release:
 
 ```yaml
 env:
-  - name: CUSTOMER_RELEASE_NAME
+  - name: RELEASE_ID
     valueFrom:
-      fieldRef:
-        fieldPath: "metadata.annotations['cloud-app.cz/customer-release-name']"
+      configMapKeyRef:
+        name: release-context-dev
+        key: RELEASE_ID
+  - name: CUSTOMER_RELEASE_ID
+    valueFrom:
+      configMapKeyRef:
+        name: release-context-dev
+        key: CUSTOMER_RELEASE_ID
+        optional: true
 ```
 
-Only configure this on Pods whose template carries the annotation. The
-upstream config server must still validate that the requested release is
+The customer reference remains in the Pod template on development builds;
+when the ConfigMap has no customer key, the variable is absent and the proxy
+omits the customer release header. The proxy reads these values once at startup.
+To use custom variable names, set
+`SIMPLE_IDM_TOKEN_PROXY_RELEASE_ID_ENV_NAME` and
+`SIMPLE_IDM_TOKEN_PROXY_CUSTOMER_RELEASE_ID_ENV_NAME` on the proxy or pass the
+corresponding `serve` flags. The HTTP header names do not change.
+`X-Config-Release-ID` previously carried the customer release name; it now
+carries the image release ID from the release manifest. This is a deliberate
+breaking change while the integration is in development. Existing sidecar
+definitions must replace `CUSTOMER_RELEASE_NAME` sourced from the old
+`cloud-app.cz/customer-release-name` annotation with the ConfigMap mapping above.
+The upstream config server must still validate that the requested release is
 authorized for the workload; the header alone is not an authorization grant.
+
+To verify a deployed proxy without changing the config server, temporarily set
+`RUST_LOG=simple_idm_token_proxy=debug` on one proxy sidecar. After that Pod starts
+and a client makes a configuration request, its logs include `forwarded release
+context headers` with the image and customer release IDs actually attached to
+the outgoing request. The log is emitted after the upstream responds and does
+not include the bearer token. Disable debug logging after the check. The
+`proxy_overrides_client_release_header` test also verifies both headers against
+a local upstream and checks that caller-supplied values are discarded.
 
 If the upstream URL includes a path prefix, the proxy accepts both a request
 with that prefix and a request without it. This lets an application call the
