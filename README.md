@@ -1,5 +1,8 @@
 # Simple IDM
 
+For Linux installation with a dedicated service user, linger, and a systemd
+user unit, see the [step-by-step Linux bootstrap guide (Czech)](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md).
+
 Simple IDM is a Rust-based OAuth2/OIDC identity stack for small and medium environments that need:
 
 - OAuth2/OIDC SSO

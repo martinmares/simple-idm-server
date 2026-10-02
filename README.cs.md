@@ -46,6 +46,31 @@ Instalace `sqlx-cli`:
 cargo install sqlx-cli --no-default-features --features postgres
 ```
 
+## Bootstrap for dummies
+
+První instalaci na Linux proveď v tomto pořadí. Podrobný
+[Linux bootstrap návod](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md) obsahuje příkazy,
+ukázkový `.env` i systemd unit; začni u něj, pokud ještě nemáš server připravený.
+
+1. **Připrav PostgreSQL**: vytvoř databázovou roli, její heslo a databázi.
+   [Postup a přehled tajemství](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#čím-nahradit-původní-redacted-hodnoty).
+2. **Připrav Linux**: založ účet `simple-idm`, nainstaluj binárku a vytvoř adresáře.
+   [Účet služby](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#1-vytvoř-linuxového-uživatele)
+   a [instalace binárky](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#2-nainstaluj-binárku-a-připrav-adresáře).
+3. **Vygeneruj klíče**: vytvoř JWT RSA pár a master key pro šifrování secrets.
+   [Generování klíčů](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#3-vygeneruj-jwt-klíče).
+4. **Vyplň konfiguraci**: nastav DB připojení, veřejný issuer a cesty ke klíčům.
+   [Ukázka `.env`](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#4-připrav-env).
+5. **Spusť službu**: vytvoř unit, povol linger a zapni automatický start.
+   [Systemd unit](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#5-vytvoř-systemd-user-unit),
+   [linger](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#6-povol-linger-a-spusť-user-manager)
+   a [start služby](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#7-povol-a-spusť-službu).
+6. **Nastav admin přístup**: přes dočasný bootstrap token vytvoř administrátora
+   a ověř jeho oprávnění před odstraněním tokenu.
+   [První administrátor](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#první-admin-přístup).
+7. **Ověř provoz**: zkontroluj health, veřejné HTTPS, discovery a login.
+   [Kontrola instalace](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md#ověření-veřejné-instalace).
+
 ## Rychlý Start
 
 Vytvoření databáze:
