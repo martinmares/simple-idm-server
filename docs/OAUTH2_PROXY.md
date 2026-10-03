@@ -243,8 +243,8 @@ Headers emitted by the proxy:
 
 ```http
 X-Auth-Subject: 97173b5f-6277-4aa7-b15e-a6c0b03cf0fd
-X-Auth-User: mares
-X-Auth-Email: mares@example.com
+X-Auth-User: user
+X-Auth-Email: user@example.com
 X-Auth-Groups: app:role:admin,app:tenant:o2
 ```
 

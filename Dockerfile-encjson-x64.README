@@ -2,5 +2,5 @@ cargo zigbuild \
   --release \
   --target x86_64-unknown-linux-musl \
   --package simple-idm-token-proxy
-docker build -t harbor.cetin/zis/release/encjson -f Dockerfile-encjson-x64 .
-docker push harbor.cetin/zis/release/encjson
+docker build -t registry.example.com/simple-idm/token-proxy -f Dockerfile-encjson-x64 .
+docker push registry.example.com/simple-idm/token-proxy

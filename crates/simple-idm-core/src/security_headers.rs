@@ -45,7 +45,7 @@ pub async fn security_headers_middleware(
     let csp = if matches!(path.as_str(), "/oauth2/authorize" | "/oauth2/login") {
         // OAuth browser login ends with a 303 to a registered client redirect_uri.
         // Chrome applies form-action to that navigation chain, so strict 'self'
-        // breaks valid cross-origin callbacks such as registry.cloud-app.cz/callback.
+        // breaks valid cross-origin callbacks such as registry.example.com/callback.
         "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self' https: http://localhost:* http://127.0.0.1:*"
     } else {
         "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"

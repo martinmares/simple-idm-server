@@ -375,8 +375,8 @@ a pouze aktivní, nesmazaná doména ve stejném tenantu. Neregistrované domén
 politiku tenantu. Federované a AD účty nadále používají upstream autentizaci;
 tato nastavení sama nevynucují lokální typ účtu pro danou doménu.
 
-Pro smíšené prostředí ponech MFA a passkeys tenantu vypnuté, u `datalite.cloud`
-nastav MFA `required` a passkeys `allowed`; `datalite.cz` ponech na `inherit`.
+Pro smíšené prostředí ponech MFA a passkeys tenantu vypnuté, u `example.org`
+nastav MFA `required` a passkeys `allowed`; `example.com` ponech na `inherit`.
 Nastavení je nezávislé na veřejné adrese SSO i WebAuthn RP ID. MFA vyžaduje
 `IDP_SECRETS_MASTER_KEY`, passkeys navíc konfiguraci WebAuthn.
 Starší browser session a refresh token pouze s heslem neobejdou nově povinné MFA.
@@ -389,8 +389,8 @@ a `--passkey-policy`; hodnotou `inherit` přepsání odstraníš.
 Migrace `045_add_domain_authentication_rules.sql` přidává samostatnou
 **Authentication policy**: `Unrestricted` (výchozí), `Local only`, `Federated only`
 nebo `AD/LDAP only`. Poslední dvě možnosti vyžadují aktivního providera odpovídajícího
-typu ve stejném tenantu. Pro tvoje prostředí nastav `datalite.cz` na `Federated only`
-s Googlem a `datalite.cloud` na `Local only`.
+typu ve stejném tenantu. Například nastav `example.com` na `Federated only`
+s Googlem a `example.org` na `Local only`.
 Jde o vynucované pravidlo, ne automatickou konverzi nebo propojení účtů.
 Platí při zakládání/importu, změně e-mailu, typu či providera a obnově smazaného
 uživatele. Přísnější doménové pravidlo nelze uložit, pokud mu odporují existující
@@ -540,7 +540,7 @@ simple-idm-ctl login --url https://sso.example.com
 Nepovinná nápověda pro browser přihlášení:
 
 ```bash
-simple-idm-ctl login --url https://sso.example.com --user mares@example.com
+simple-idm-ctl login --url https://sso.example.com --user user@example.com
 ```
 
 `--user` posílá OIDC `login_hint`, nikoliv přihlašovací údaj. Aktivní federovaný
@@ -621,7 +621,7 @@ AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
 Příklady groups/principals:
 
 ```text
-ssh:principal:mares
+ssh:principal:user
 ssh:role:linux-admin
 ```
 

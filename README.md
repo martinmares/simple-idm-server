@@ -372,8 +372,8 @@ user's own tenant participate, using the domain of the user's current email.
 Unmanaged domains inherit the tenant policy. Federated/AD users still use their
 upstream authentication; these settings do not restrict a domain to local accounts.
 
-For a mixed deployment, keep tenant MFA/passkeys disabled, set `datalite.cloud`
-to MFA `required` and passkeys `allowed`, and leave `datalite.cz` on `inherit`.
+For a mixed deployment, keep tenant MFA/passkeys disabled, set `example.org`
+to MFA `required` and passkeys `allowed`, and leave `example.com` on `inherit`.
 This is independent of the public SSO hostname and WebAuthn RP ID. Enabling MFA
 requires `IDP_SECRETS_MASTER_KEY`; passkeys also require the WebAuthn configuration.
 Password-only browser sessions and refresh tokens cannot bypass newly required
@@ -386,8 +386,8 @@ The CLI supports domain policies with `tenants domains create/update` using
 Migration `045_add_domain_authentication_rules.sql` adds a separate
 **Authentication policy** to each managed domain: `Unrestricted` (default),
 `Local only`, `Federated only`, or `AD/LDAP only`. The last two require an active
-provider of the matching type in the same tenant. For example, set `datalite.cz`
-to `Federated only` with Google, and `datalite.cloud` to `Local only`.
+provider of the matching type in the same tenant. For example, set `example.com`
+to `Federated only` with Google, and `example.org` to `Local only`.
 This is an enforced restriction, not automatic account conversion or linking.
 Creating/importing users, changing their email/type/provider, and restoring
 deleted users must satisfy the active domain rule. A stricter domain rule is
@@ -582,7 +582,7 @@ simple-idm-ctl login --url https://sso.example.com
 Optional browser login hint:
 
 ```bash
-simple-idm-ctl login --url https://sso.example.com --user mares@example.com
+simple-idm-ctl login --url https://sso.example.com --user user@example.com
 ```
 
 `--user` sends the OIDC `login_hint`, not a credential. An active federated
@@ -683,7 +683,7 @@ AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
 Local Linux account access is controlled by OpenSSH principals. Simple IDM groups can produce SSH principals such as:
 
 ```text
-ssh:principal:mares
+ssh:principal:user
 ssh:role:linux-admin
 ```
 

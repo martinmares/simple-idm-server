@@ -541,7 +541,7 @@ mod tests {
             ("csrf_token".to_string(), "local-csrf".to_string()),
             (
                 "login_hint".to_string(),
-                "mares+test@example.com".to_string(),
+                "user+test@example.com".to_string(),
             ),
         ]);
         let html = login_page_with_providers(

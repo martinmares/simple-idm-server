@@ -2456,16 +2456,15 @@ mod login_hint_tests {
             Commands::Login { user: None, .. }
         ));
         let cli =
-            Cli::try_parse_from(base.into_iter().chain(["--user", "mares@example.com"])).unwrap();
+            Cli::try_parse_from(base.into_iter().chain(["--user", "user@example.com"])).unwrap();
         assert!(
-            matches!(cli.command, Commands::Login { user: Some(user), .. } if user == "mares@example.com")
+            matches!(cli.command, Commands::Login { user: Some(user), .. } if user == "user@example.com")
         );
         assert!(
-            Cli::try_parse_from(base.into_iter().chain([
-                "--user",
-                "mares@example.com",
-                "--device"
-            ]))
+            Cli::try_parse_from(
+                base.into_iter()
+                    .chain(["--user", "user@example.com", "--device"])
+            )
             .is_err()
         );
     }
@@ -2476,9 +2475,9 @@ mod login_hint_tests {
             "https://sso.example.com/oauth2/authorize?state=abc&code_challenge=xyz",
         )
         .unwrap();
-        append_login_hints(&mut url, Some("default"), Some(" mares+test@example.com "));
+        append_login_hints(&mut url, Some("default"), Some(" user+test@example.com "));
         let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
-        assert_eq!(params["login_hint"], "mares+test@example.com");
+        assert_eq!(params["login_hint"], "user+test@example.com");
         assert_eq!(params["tenant"], "default");
         assert_eq!(params["state"], "abc");
         assert_eq!(params["code_challenge"], "xyz");

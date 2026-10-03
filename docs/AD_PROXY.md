@@ -69,14 +69,14 @@ When no technical account is available, use direct user bind:
 ```toml
 [ldap]
 mode = "bind_as_user"
-user_bind_format = "{login}@AD.CETIN"
+user_bind_format = "{login}@AD.EXAMPLE"
 ```
 
 In `bind_as_user` mode the proxy binds directly with the submitted username and
 password, then reads the same user's profile attributes and `memberOf` through
 that LDAP connection. This requires AD/LDAP to allow users to read their own
 group membership. For AD, useful `user_bind_format` values are usually
-`{login}@AD.CETIN` or `AD\\{login}`.
+`{login}@AD.EXAMPLE` or `AD\\{login}`.
 
 The proxy supports mapping either full AD group DNs or only their CN:
 
@@ -87,7 +87,7 @@ emit_group = "grafana_viewer"
 emit_header_role = "Viewer"
 
 [[role_mappings]]
-ad_group_dn = "CN=OCP_PROD_TSM_ADMIN,OU=OCP,OU=Resources,OU=grp,DC=ad,DC=cetin"
+ad_group_dn = "CN=OCP_PROD_TSM_ADMIN,OU=OCP,OU=Resources,OU=grp,DC=ad,DC=example"
 emit_group = "ocp_tsm_admin"
 ```
 

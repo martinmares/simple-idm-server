@@ -148,7 +148,7 @@ SERVER_HOST=127.0.0.1
 SERVER_PORT=3003
 DATABASE_URL=postgres://simple_idm_admin:REPLACE_ME@pg.cluster/simple_idm
 
-JWT_ISSUER=https://sso.cloud-app.cz
+JWT_ISSUER=https://sso.example.com
 JWT_KEY_ID=sso-key-1
 JWT_PRIVATE_KEY_PATH=./keys/private.pem
 JWT_PUBLIC_KEY_PATH=./keys/public.pem
@@ -164,11 +164,11 @@ AUTH_FAILURE_WINDOW_SECONDS=900
 AUTH_LOCKOUT_SECONDS=900
 
 IDP_SECRETS_MASTER_KEY=REPLACE_ME
-WEBAUTHN_RP_ID=sso.cloud-app.cz
-WEBAUTHN_ORIGINS=https://sso.cloud-app.cz
+WEBAUTHN_RP_ID=sso.example.com
+WEBAUTHN_ORIGINS=https://sso.example.com
 
 UI_BRAND_NAME=Cloud App
-UI_BRAND_DOMAIN=sso.cloud-app.cz
+UI_BRAND_DOMAIN=sso.example.com
 UI_PAGE_TITLE=Simple IDM
 FORCE_SECURE_COOKIES=true
 TRUST_PROXY_HEADERS=false
@@ -291,7 +291,7 @@ Pokud už máš administrátora v IDM, použij jeho přístup. Pro prázdnou ins
 1. V `.env` dočasně nastav `APP_ENV=development` a přidej
    `ADMIN_ROOT_TOKEN` vygenerovaný přes `openssl rand -hex 32`. Restartuj službu.
    Po dobu bootstrapu omez dostupnost serveru na důvěryhodné správce.
-2. Otevři `https://sso.cloud-app.cz/admin/ui` a do přihlašovacího formuláře
+2. Otevři `https://sso.example.com/admin/ui` a do přihlašovacího formuláře
    vlož tento token. HTTPS proxy musí být v provozu; ukázková konfigurace
    vynucuje Secure cookies.
 3. V **Users** vytvoř svého lokálního administrátora se silným heslem.
@@ -305,7 +305,7 @@ Pokud už máš administrátora v IDM, použij jeho přístup. Pro prázdnou ins
 5. Ze svého počítače ověř přihlášení administrátora:
 
    ```bash
-   simple-idm-ctl login --url https://sso.cloud-app.cz
+   simple-idm-ctl login --url https://sso.example.com
    ```
 
    CLI vypíše cestu k `sessions.json`. S nainstalovaným `jq` získáš access
@@ -337,9 +337,9 @@ Pokud už máš administrátora v IDM, použij jeho přístup. Pro prázdnou ins
 Ze svého počítače:
 
 ```bash
-curl --fail https://sso.cloud-app.cz/health
-curl --fail https://sso.cloud-app.cz/.well-known/openid-configuration
-curl --fail https://sso.cloud-app.cz/.well-known/jwks.json
+curl --fail https://sso.example.com/health
+curl --fail https://sso.example.com/.well-known/openid-configuration
+curl --fail https://sso.example.com/.well-known/jwks.json
 ```
 
 Health má vrátit `OK`, discovery má obsahovat nastavený veřejný issuer a JWKS

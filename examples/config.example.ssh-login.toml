@@ -2,14 +2,14 @@
 # Copy to ~/.config/simple-idm-ssh-login/config.toml
 
 # OIDC Provider (Simple IDM Server)
-oidc_issuer = "https://sso.cloud-app.cz"
+oidc_issuer = "https://sso.example.com"
 client_id = "simple-idm-ssh-login"
 # Optional tenant hint (slug). Keep commented for backward-compatible/default behavior.
 # tenant = "default"
 scopes = ["openid", "profile", "email", "groups"]
 
 # SSH Certificate Signer
-signer_url = "https://ssh-signer.cloud-app.cz"
+signer_url = "https://ssh-signer.example.com"
 
 # Certificate TTL (in seconds)
 ttl_seconds = 3600  # 1 hour

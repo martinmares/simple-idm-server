@@ -771,7 +771,7 @@ mod tests {
         .unwrap();
         sqlx::query(
             "INSERT INTO users (tenant_id, username, email, auth_mode, auth_provider_id)
-            VALUES ($1, 'mares', 'mares@example.com', 'federated', $2)",
+            VALUES ($1, 'user', 'user@example.com', 'federated', $2)",
         )
         .bind(tenant)
         .bind(provider_id)
@@ -874,7 +874,7 @@ mod tests {
         assert_eq!(membership, 1);
         let names: Vec<String> = sqlx::query_scalar("SELECT username FROM users WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY username")
             .bind(tenant).fetch_all(&db).await.unwrap();
-        assert_eq!(names, ["a", "b", "c", "mares"]);
+        assert_eq!(names, ["a", "b", "c", "user"]);
         let repeat = run_normalize(&db, normalize_request(tenant, true))
             .await
             .unwrap();
@@ -934,15 +934,15 @@ mod tests {
     fn rename_plan_preserves_custom_names_and_rejects_collisions() {
         let req = normalize_request(Uuid::nil(), false);
         let candidates = [
-            existing("pavel.rosecky@example.com", "pavel.rosecky@example.com"),
-            existing("mares@example.com", "mares"),
+            existing("user.one@example.com", "user.one@example.com"),
+            existing("user@example.com", "user"),
         ];
         let plan = rename_plan(&req, &candidates, &[]);
         assert_eq!(plan.rename, 1);
         assert_eq!(plan.skip, 1);
-        assert_eq!(plan.rows[0].new_username, "pavel.rosecky");
-        assert_eq!(plan.rows[1].new_username, "mares");
-        let mut reserved = existing("other@example.com", "PAVEL.ROSECKY");
+        assert_eq!(plan.rows[0].new_username, "user.one");
+        assert_eq!(plan.rows[1].new_username, "user");
+        let mut reserved = existing("other@example.com", "USER.ONE");
         reserved.deleted = true;
         assert_eq!(rename_plan(&req, &candidates, &[reserved]).conflicts, 1);
         let duplicates = [
@@ -951,7 +951,7 @@ mod tests {
         ];
         assert_eq!(rename_plan(&req, &duplicates, &[]).conflicts, 2);
         let mut req = normalize_request(Uuid::nil(), false);
-        req.emails.push("mares@example.com".into());
+        req.emails.push("user@example.com".into());
         assert_eq!(rename_plan(&req, &candidates, &[]).rename, 0);
     }
 

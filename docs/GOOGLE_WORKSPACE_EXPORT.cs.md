@@ -7,13 +7,13 @@ Skript nezna heslo, nemeni Google ucty ani Simple IDM a neuklada OAuth tokeny.
 
 ## 1. Priprav Google projekt a Desktop klienta
 
-Muzes pouzit existujici projekt `OAuth for DataLite`. Web klient pro SSO zustava
+Muzes pouzit existujici Google Cloud projekt pro SSO. Web klient pro SSO zustava
 beze zmeny; pro export vytvor druhy klient typu Desktop app. Audience ponech
 External, pokud SSO pouzivaji i osobni Gmail ucty. Pridani scope do consent
 screen samo nemeni scopes, ktere SSO server pozaduje pri prihlaseni.
 Samostatny projekt je volitelny pro oddeleni administrativniho exportu.
 
-1. V Google Cloud Console vyber projekt `OAuth for DataLite`.
+1. V Google Cloud Console vyber svuj projekt pro SSO.
 2. V **APIs & Services -> Library** vyhledej **Admin SDK API** a povol ji.
 3. V **Google Auth Platform** ponech existujici Branding a Audience.
 4. V **Data Access** pridej scope
@@ -51,11 +51,11 @@ Hodnotu `--expected-sub` prevezmi z detailu sveho schvaleneho uzivatele v IDM.
 ```bash
 .tmp/google-directory-venv/bin/python scripts/export_google_workspace_users.py \
   --credentials .tmp/google-directory-desktop.json \
-  --admin mares@datalite.cz \
-  --domain datalite.cz \
-  --output .tmp/datalite-users.json \
+  --admin admin@example.com \
+  --domain example.com \
+  --output .tmp/workspace-users.json \
   --format json \
-  --check-email mares@datalite.cz \
+  --check-email admin@example.com \
   --expected-sub '<SUB_Z_DETAILU_UZIVATELE_V_IDM>'
 ```
 
@@ -67,7 +67,7 @@ skript skonci chybou pred vytvorenim exportu. Bez obou kontrolnich parametru
 se provede jen export. Strankovani a filtr domeny popisuje
 [users.list](https://developers.google.com/workspace/admin/directory/reference/rest/v1/users/list).
 
-Pro CSV pouzij `--format csv --output .tmp/datalite-users.csv`. Export obsahuje:
+Pro CSV pouzij `--format csv --output .tmp/workspace-users.csv`. Export obsahuje:
 
 - `google_id` (text, nikoliv cislo nebo UUID)
 - `email` (primarni email)
@@ -95,9 +95,9 @@ Nejprve pouze nahled (zadne zmeny):
 
 ```bash
 simple-idm-ctl users import-google \
-  --file .tmp/datalite-users.json \
+  --file .tmp/workspace-users.json \
   --provider google \
-  --domain datalite.cz \
+  --domain example.com \
   --approve
 ```
 
@@ -106,29 +106,29 @@ povoluje zapis. Po kontrole nahledu a duveryhodnosti exportu:
 
 ```bash
 simple-idm-ctl users import-google \
-  --file .tmp/datalite-users.json \
+  --file .tmp/workspace-users.json \
   --provider google \
-  --domain datalite.cz \
+  --domain example.com \
   --approve --apply
 ```
 
 - Bez `--approve` se nove identity vytvori jako `pending`; login bude mozny
   az po schvaleni v Admin UI. S `--approve` jde o explicitni administrativni
   schvaleni duveryhodneho Directory exportu misto invitation flow.
-- Username noveho uzivatele je cast emailu pred `@`, napr. `pavel.rosecky`.
+- Username noveho uzivatele je cast emailu pred `@`, napr. `user.one`.
   Kolize bez rozliseni velikosti pismen zabrani zapisu; nepridavaji se automaticke
   pripony. Google ID zustava textovy subject.
   Profilova jmena se prevezmou z exportu. Heslo je NULL, lokalni heslo disabled.
 - Pozastavene a archivovane ucty se preskoci; nikdo nedostane zadne skupiny,
   admin prava ani passkey. Ty spravuj oddelene.
-- `--email uzivatel@datalite.cz` lze opakovat pro vyber konkretnich uctu.
+- `--email uzivatel@example.com` lze opakovat pro vyber konkretnich uctu.
   Alternativne priprav JSON pole jen s pozadovanymi zaznamy. Vynechani zaznamu
   neodebira ani nedeaktivuje uz existujici IDM uzivatele.
 - `--tenant-id <UUID>` vybira tenant. Vychozi UUID je
   `11111111-1111-1111-1111-111111111111`; provider slug se hleda jen v tomto tenantu.
 - Import podporuje jen aktivni provider typu `google` s issuerem
   `https://accounts.google.com`. Hosted domain, pokud je nastavena, musi odpovidat.
-- Exactni existujici vazba se preskoci, vcetne jiz existujiciho uzivatele `mares`.
+- Exactni existujici vazba se preskoci, vcetne jiz existujiciho uzivatele `custom-user`.
   Jeji approval stav se nemeni ani s `--approve`; pending vazbu schval v UI.
 - Konflikt emailu, username nebo identity nelze automaticky prepsat. Lokalni/AD
   ucet se neprevadi a smazany ci neaktivni ucet se neobnovuje.
@@ -143,7 +143,7 @@ simple-idm-ctl users import-google \
 Import duveruje administratorovi a souboru: nevola znovu Google a neoveruje
 puvod exportu. Neoznacuje `email_verified=true`, protoze export neni overeny
 OIDC claim. Pouzij vlastni overeny export a pred prvnim predparovanim porovnej
-Directory ID se skutecnym OIDC sub dle kroku 3. Osobni ucet `mares.uo@gmail.com`
+Directory ID se skutecnym OIDC sub dle kroku 3. Osobni Gmail ucet
 neni soucast firemniho adresare; pro nej zustava invitation flow.
 
 Pri chybe HTTP 403 zkontroluj zapnuti Admin SDK API, roli prihlaseneho admina
@@ -160,7 +160,7 @@ znovu importovat. S novym serverem a CLI nejprve zobraz nahled:
 ```bash
 simple-idm-ctl users normalize-google-usernames \
   --provider google \
-  --domain datalite.cz
+  --domain example.com
 ```
 
 Zkontroluj sloupce `old_username`, `new_username` a `action`. Zapis povol
@@ -168,7 +168,7 @@ opakovanim stejneho prikazu s `--apply`. Exportni JSON zde neni potreba.
 
 - Meni pouze aktivni, nesmazane federovane ucty vybraneho Google providera
   a domeny, kde `username=email` (bez rozliseni velikosti pismen).
-- Vlastni username, napr. `mares`, nemeni. Nemenene zaznamy maji akci `skip`.
+- Vlastni username, napr. `custom-user`, nemeni. Nemenene zaznamy maji akci `skip`.
 - `--tenant-id <UUID>` a opakovane `--email <email>` omezuji rozsah stejne jako
   u importu. Vychozi tenant UUID je `11111111-1111-1111-1111-111111111111`.
 - Kazda kolize navrzeneho username, i se smazanym uctem nebo jinym navrhem

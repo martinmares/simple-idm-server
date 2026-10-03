@@ -49,15 +49,15 @@ class ExportTests(unittest.TestCase):
 
     def test_profile_and_inactive_accounts(self):
         users = [
-            {"id": "111521075025250201000", "primaryEmail": "MARES@example.com",
-             "name": {"givenName": "Martin", "familyName": "Mares"}},
+            {"id": "123456789012345678901", "primaryEmail": "USER@example.com",
+             "name": {"givenName": "Example", "familyName": "User"}},
             {"id": "2", "primaryEmail": "suspended@example.com", "suspended": True},
             {"id": "3", "primaryEmail": "archived@example.com", "archived": True},
         ]
         rows = normalize_users(users, "EXAMPLE.com", active_only=True)
         self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0]["google_id"], "111521075025250201000")
-        self.assertEqual(rows[0]["first_name"], "Martin")
+        self.assertEqual(rows[0]["google_id"], "123456789012345678901")
+        self.assertEqual(rows[0]["first_name"], "Example")
         self.assertEqual(sum(row["is_active"] for row in normalize_users(users, "example.com")), 1)
 
     def test_rejects_invalid_or_duplicate_records(self):
@@ -71,22 +71,22 @@ class ExportTests(unittest.TestCase):
                 normalize_users(records, "example.com")
 
     def test_comparison_and_safe_output(self):
-        rows = normalize_users([{"id": "111521075025250201000", "primaryEmail": "a@example.com"}], "example.com")
-        check_subject(rows, "A@example.com", "111521075025250201000")
+        rows = normalize_users([{"id": "123456789012345678901", "primaryEmail": "a@example.com"}], "example.com")
+        check_subject(rows, "A@example.com", "123456789012345678901")
         with self.assertRaises(ValueError):
             check_subject(rows, "a@example.com", "wrong")
         with self.assertRaises(ValueError):
-            check_subject(rows, "missing@example.com", "111521075025250201000")
+            check_subject(rows, "missing@example.com", "123456789012345678901")
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "users.json"
             write_export(output, rows, "json")
-            self.assertEqual(json.loads(output.read_text())[0]["google_id"], "111521075025250201000")
+            self.assertEqual(json.loads(output.read_text())[0]["google_id"], "123456789012345678901")
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o600)
             with self.assertRaises(FileExistsError):
                 write_export(output, [], "json")
             csv_output = Path(directory) / "users.csv"
             write_export(csv_output, rows, "csv")
-            self.assertIn("111521075025250201000,a@example.com,,,true,false,false", csv_output.read_text())
+            self.assertIn("123456789012345678901,a@example.com,,,true,false,false", csv_output.read_text())
 
 
 if __name__ == "__main__":

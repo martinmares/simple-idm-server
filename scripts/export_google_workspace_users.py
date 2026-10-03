@@ -132,7 +132,7 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--credentials", type=Path, required=True,
                         help="Google OAuth Desktop app credentials JSON (not the SSO Web client)")
-    parser.add_argument("--domain", required=True, help="Primary email domain, e.g. datalite.cz")
+    parser.add_argument("--domain", required=True, help="Primary email domain, e.g. example.com")
     parser.add_argument("--output", type=Path, required=True, help="New CSV/JSON file; parent must exist")
     parser.add_argument("--format", choices=["csv", "json"], default="csv")
     parser.add_argument("--admin", help="Optional Google admin account login hint")

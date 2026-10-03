@@ -28,9 +28,9 @@ steps:
     mode: "0755"
 
   - action: set-label
-    key: "org.datalite.patched-by"
+    key: "org.simple-idm.patched-by"
     value: "oci-patch"
 
   - action: set-label
-    key: "org.datalite.patch-recipe"
+    key: "org.simple-idm.patch-recipe"
     value: "create-image"

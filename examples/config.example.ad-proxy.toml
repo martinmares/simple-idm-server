@@ -34,7 +34,7 @@ bind_password = "CHANGE_ME"
 # bind_password_file = "shared/bind-password"
 # Used only when mode = "bind_as_user".
 # Common AD examples:
-#   user_bind_format = "{login}@AD.CETIN"
+#   user_bind_format = "{login}@AD.EXAMPLE"
 #   user_bind_format = "AD\\{login}"
 user_bind_format = "{login}"
 user_filter = "(|(sAMAccountName={login})(userPrincipalName={login})(mail={login}))"
@@ -71,5 +71,5 @@ emit_group = "grafana_admin"
 emit_header_role = "Admin"
 
 [[role_mappings]]
-ad_group_dn = "CN=OCP_PROD_TSM_ADMIN,OU=OCP,OU=Resources,OU=grp,DC=ad,DC=cetin"
+ad_group_dn = "CN=OCP_PROD_TSM_ADMIN,OU=OCP,OU=Resources,OU=grp,DC=ad,DC=example"
 emit_group = "ocp_tsm_admin"

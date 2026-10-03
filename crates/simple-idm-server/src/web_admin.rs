@@ -2427,7 +2427,7 @@ fn normalize_domain(input: &str) -> Result<String, String> {
         return Err("Domain is required".to_string());
     }
     if domain.contains("://") || domain.contains('/') || domain.contains('\\') {
-        return Err("Domain must be a bare DNS name, for example datalite.cz".to_string());
+        return Err("Domain must be a bare DNS name, for example example.com".to_string());
     }
     if !domain.contains('.') {
         return Err("Domain must contain at least one dot".to_string());

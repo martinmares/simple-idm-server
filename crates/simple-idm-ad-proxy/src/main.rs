@@ -1151,7 +1151,7 @@ mod tests {
     #[test]
     fn extracts_cn_from_dn() {
         assert_eq!(
-            extract_cn("CN=Icinga_Grafana_Viewer,OU=ICINGA,DC=ad,DC=cetin"),
+            extract_cn("CN=Icinga_Grafana_Viewer,OU=ICINGA,DC=ad,DC=example"),
             Some("Icinga_Grafana_Viewer")
         );
     }
@@ -1199,7 +1199,7 @@ mod tests {
 
         let mapped = map_roles(
             &config,
-            &["CN=Icinga_Grafana_Viewer,OU=ICINGA,DC=ad,DC=cetin".to_string()],
+            &["CN=Icinga_Grafana_Viewer,OU=ICINGA,DC=ad,DC=example".to_string()],
         );
         assert_eq!(mapped.groups, vec!["grafana_viewer"]);
         assert_eq!(mapped.role.as_deref(), Some("Viewer"));
@@ -1300,14 +1300,14 @@ mod tests {
             bind_dn_file: None,
             bind_password: None,
             bind_password_file: None,
-            user_bind_format: Some("{login}@AD.CETIN".to_string()),
+            user_bind_format: Some("{login}@AD.EXAMPLE".to_string()),
             user_filter: default_user_filter(),
             tls_mode: LdapTlsModeConfig::Ldaps,
             timeout_seconds: 5,
             allow_insecure: false,
         };
 
-        assert_eq!(ldap.bind_login("x0549983"), "x0549983@AD.CETIN");
+        assert_eq!(ldap.bind_login("user001"), "user001@AD.EXAMPLE");
         assert!(ldap.validate_mode().is_ok());
     }
 
@@ -1346,7 +1346,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(directory.join("shared")).expect("create temporary config dir");
-        std::fs::write(directory.join("shared/base-dn"), "DC=AD,DC=CETIN\n")
+        std::fs::write(directory.join("shared/base-dn"), "DC=AD,DC=EXAMPLE\n")
             .expect("write base DN");
         std::fs::write(directory.join("shared/bind-dn"), "su_technical_user\r\n")
             .expect("write bind DN");
@@ -1385,7 +1385,7 @@ mod tests {
 
         ldap.resolve_file_values(&directory)
             .expect("resolve shared LDAP files");
-        assert_eq!(ldap.base_dn, "DC=AD,DC=CETIN");
+        assert_eq!(ldap.base_dn, "DC=AD,DC=EXAMPLE");
         assert_eq!(ldap.bind_dn.as_deref(), Some("su_technical_user"));
         assert_eq!(ldap.bind_password.as_deref(), Some(" secret with spaces "));
         assert!(ldap.validate_mode().is_ok());
