@@ -28,11 +28,47 @@ Příklad předpokládá rozbalenou release binárku v aktuálním adresáři:
 ```bash
 sudo install -o root -g root -m 0755 ./simple-idm-server /usr/local/bin/simple-idm-server
 sudo install -d -o simple-idm -g simple-idm -m 0700 \
+  /home/simple-idm/.config \
+  /home/simple-idm/.config/simple-idm-server \
   /home/simple-idm/.config/simple-idm-server/keys \
+  /home/simple-idm/.config/systemd \
   /home/simple-idm/.config/systemd/user
 ```
 
 Binárku spravuje root. Konfiguraci a klíče vlastní `simple-idm`.
+
+Každý adresář uvádíme výslovně: rodiče vytvořené automaticky pomocí
+`install -d` nemusí získat stejného vlastníka a práva jako cílový adresář.
+Pokud jsi postupoval podle starší verze návodu a adresáře vlastní `root`,
+oprav existující konfiguraci ze svého administrátorského účtu:
+
+```bash
+sudo chown simple-idm:simple-idm /home/simple-idm/.config
+sudo chown -R simple-idm:simple-idm \
+  /home/simple-idm/.config/simple-idm-server \
+  /home/simple-idm/.config/systemd
+sudo find /home/simple-idm/.config/simple-idm-server /home/simple-idm/.config/systemd \
+  -type d -exec chmod 0700 {} +
+sudo chmod 0700 /home/simple-idm/.config
+sudo find /home/simple-idm/.config/simple-idm-server /home/simple-idm/.config/systemd \
+  -type f -exec chmod 0600 {} +
+```
+
+Poslední příkaz předpokládá, že tyto dva stromy obsahují pouze konfiguraci,
+klíče a systemd unit soubory, nikoliv spustitelné skripty. Klíče ani master
+key kvůli opravě práv negeneruj znovu.
+
+Ověř vlastníka a režim všech adresářů:
+
+```bash
+ls -ld /home/simple-idm/.config \
+  /home/simple-idm/.config/simple-idm-server \
+  /home/simple-idm/.config/simple-idm-server/keys \
+  /home/simple-idm/.config/systemd \
+  /home/simple-idm/.config/systemd/user
+```
+
+Očekávaný vlastník je `simple-idm simple-idm` a režim `drwx------`.
 
 ## 3. Vygeneruj JWT klíče
 
@@ -101,7 +137,7 @@ povolovat připojení z IDM serveru přes svou konfiguraci a firewall.
 ```bash
 sudo -u simple-idm touch /home/simple-idm/.config/simple-idm-server/.env
 sudo chmod 0600 /home/simple-idm/.config/simple-idm-server/.env
-sudo -u simple-idm nano /home/simple-idm/.config/simple-idm-server/.env
+sudo -u simple-idm vim /home/simple-idm/.config/simple-idm-server/.env
 ```
 
 Vlož a uprav následující konfiguraci. Nahraď obě hodnoty `REPLACE_ME`:
@@ -160,7 +196,7 @@ nevytváří. Viz [Admin Web UI](../README.cs.md#admin-web-ui).
 ## 5. Vytvoř systemd user unit
 
 ```bash
-sudo -u simple-idm nano /home/simple-idm/.config/systemd/user/simple-idm-server.service
+sudo -u simple-idm vim /home/simple-idm/.config/systemd/user/simple-idm-server.service
 ```
 
 Obsah:

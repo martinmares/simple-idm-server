@@ -81,7 +81,7 @@ async fn local_session(
         )));
     }
     let user = sqlx::query_as::<_, User>(
-        "SELECT u.* FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1 AND u.is_active = true AND u.deleted_at IS NULL AND u.auth_mode = 'local' AND t.is_active = true AND t.mfa_policy IN ('optional', 'required')",
+        "SELECT u.* FROM users u JOIN tenants t ON t.id = u.tenant_id JOIN effective_user_auth_policies p ON p.user_id = u.id WHERE u.id = $1 AND u.is_active = true AND u.deleted_at IS NULL AND u.auth_mode = 'local' AND t.is_active = true AND p.mfa_policy IN ('optional', 'required')",
     )
     .bind(session.user_id)
     .fetch_optional(&state.db_pool)
@@ -174,7 +174,11 @@ pub async fn settings(State(state): State<Arc<OAuth2State>>, headers: HeaderMap)
             escape_html(&csrf)
         )
     };
-    let back_link = if state.passkeys.is_some() {
+    let passkeys_allowed = state.passkeys.is_some()
+        && crate::auth_policy::for_user(&state.db_pool, user.id)
+            .await
+            .is_ok_and(|policy| policy.passkey_policy == "allowed");
+    let back_link = if passkeys_allowed {
         "<a class=\"btn btn-outline-secondary w-100 mt-3\" href=\"/account/security\">Back to account security</a>"
     } else {
         "<a class=\"btn btn-outline-secondary w-100 mt-3\" href=\"/oauth2/logout\">Sign out</a>"

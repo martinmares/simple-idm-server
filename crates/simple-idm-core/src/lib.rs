@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod audit;
 pub mod auth;
+pub mod auth_policy;
 pub mod claim_map_patterns;
 pub mod client_group_filters;
 pub mod config;

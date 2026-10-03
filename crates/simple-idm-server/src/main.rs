@@ -315,6 +315,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             delete(admin::handlers::delete_tenant_domain),
         )
         // User management
+        .route(
+            "/admin/users/normalize-google-usernames",
+            post(admin::google_import::normalize_google_usernames),
+        )
+        .route(
+            "/admin/users/import-google",
+            post(admin::google_import::import_google),
+        )
         .route("/admin/users", post(admin::handlers::create_user))
         .route("/admin/users", get(admin::handlers::list_users))
         .route("/admin/users/{id}", put(admin::handlers::update_user))
@@ -504,6 +512,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/oauth2/revoke", post(oauth2::handle_revoke))
         .route("/oauth2/authorize", get(oauth2::handle_authorize))
         .route("/oauth2/login", post(oauth2::handle_login))
+        .route(
+            "/oauth2/federated/{provider}/start",
+            get(oauth2::handle_federated_start),
+        )
+        .route(
+            "/oauth2/federated/{provider}/callback",
+            get(oauth2::handle_federated_callback),
+        )
         .route(
             "/oauth2/passkey/start",
             post(oauth2::passkey_routes::login_start),

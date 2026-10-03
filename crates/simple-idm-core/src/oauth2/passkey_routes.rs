@@ -116,7 +116,7 @@ async fn local_session(
         ));
     }
     let user = sqlx::query_as::<_, User>(
-        "SELECT u.* FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1 AND u.is_active = true AND u.deleted_at IS NULL AND u.auth_mode = 'local' AND t.is_active = true AND t.passkey_policy = 'allowed'",
+        "SELECT u.* FROM users u JOIN tenants t ON t.id = u.tenant_id JOIN effective_user_auth_policies p ON p.user_id = u.id WHERE u.id = $1 AND u.is_active = true AND u.deleted_at IS NULL AND u.auth_mode = 'local' AND t.is_active = true AND p.passkey_policy = 'allowed'",
     )
     .bind(session.user_id).fetch_optional(&state.db_pool).await
     .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "Could not load account"))?
@@ -331,7 +331,7 @@ pub async fn security_page(State(state): State<Arc<OAuth2State>>, headers: Heade
         Err(response) => return response,
     };
     let fresh = Utc::now() - session.created_at <= Duration::minutes(FRESH_SESSION_MINUTES);
-    let mfa_link = match mfa::tenant_mfa_policy(&state.db_pool, user.tenant_id).await {
+    let mfa_link = match mfa::user_mfa_policy(&state.db_pool, user.id).await {
         Ok(MfaPolicy::Optional | MfaPolicy::Required) => {
             "<a href=\"/account/mfa\" class=\"btn btn-outline-primary w-100 mb-2\">Manage authenticator app (2FA)</a>"
         }

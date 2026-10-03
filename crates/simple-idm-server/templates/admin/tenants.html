@@ -17,7 +17,7 @@
     </div>
   </div>
 
-  <div class="col-lg-5">
+  <div class="col-12">
     <div class="card h-100">
       <div class="card-header">
         <h3 class="card-title mb-0">Tenants</h3>
@@ -72,7 +72,7 @@
     </div>
   </div>
 
-  <div class="col-lg-7">
+  <div class="col-12">
     <div class="card">
       <div class="card-header">
         <h3 class="card-title mb-0">Managed domains</h3>
@@ -84,6 +84,8 @@
               <th>Domain</th>
               <th>Tenant</th>
               <th>Status</th>
+              <th>Authentication</th>
+              <th>Local Account Security</th>
               <th class="w-1">Actions</th>
             </tr>
           </thead>
@@ -91,10 +93,10 @@
             {% for d in domains %}
             <tr>
               <td>
-                <div class="d-flex align-items-center gap-2">
-                  <code>{{ d.domain }}</code>
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <code class="text-nowrap flex-shrink-0">{{ d.domain }}</code>
                   {% if d.is_primary %}
-                  <span class="badge bg-azure-lt">primary</span>
+                  <span class="badge bg-azure-lt flex-shrink-0">primary</span>
                   {% endif %}
                 </div>
               </td>
@@ -110,6 +112,14 @@
                 {% endif %}
               </td>
               <td>
+                <div class="text-nowrap">{% if d.authentication_policy == "unrestricted" %}Unrestricted{% else if d.authentication_policy == "local" %}Local only{% else if d.authentication_policy == "federated" %}Federated only{% else %}AD/LDAP only{% endif %}</div>
+                {% if let Some(slug) = d.provider_slug %}<code>{{ slug }}</code>{% endif %}
+              </td>
+              <td>
+                <div>MFA <strong>{{ d.effective_mfa_policy }}</strong>{% if d.mfa_policy == "inherit" %} <span class="text-secondary small">(tenant)</span>{% endif %}</div>
+                <div>Passkeys <strong>{{ d.effective_passkey_policy }}</strong>{% if d.passkey_policy == "inherit" %} <span class="text-secondary small">(tenant)</span>{% endif %}</div>
+              </td>
+              <td>
                 <div class="btn-list flex-nowrap">
                   <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#edit-domain-{{ d.id }}">
                     Edit
@@ -122,7 +132,7 @@
             </tr>
             {% else %}
             <tr>
-              <td colspan="4" class="text-secondary">No managed domain configured.</td>
+              <td colspan="6" class="text-secondary">No managed domain configured.</td>
             </tr>
             {% endfor %}
           </tbody>
@@ -246,6 +256,43 @@
             <input class="form-control" name="domain" placeholder="datalite.cz" required>
             <div class="form-text">Use a bare domain. Do not include protocol, slash, or email address.</div>
           </div>
+          <div class="mb-3">
+            <label class="form-label" for="create-domain-auth">Authentication policy</label>
+            <select class="form-select" name="authentication_policy" id="create-domain-auth">
+              <option value="unrestricted">Unrestricted</option>
+              <option value="local">Local only</option>
+              <option value="federated">Federated only</option>
+              <option value="ad">AD/LDAP only</option>
+            </select>
+          </div>
+          <div class="mb-3" data-domain-provider-field>
+            <label class="form-label" for="create-domain-provider">Identity provider</label>
+            <select class="form-select" name="auth_provider_id" id="create-domain-provider">
+              <option value="">Select provider</option>
+              {% for p in domain_providers %}
+
+              <option value="{{ p.id }}" data-provider-type="{{ p.provider_type }}" data-provider-tenant="{{ p.tenant_id }}">{{ p.slug }} ({{ p.provider_type }})</option>
+
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label" for="create-domain-mfa">Local account MFA</label>
+            <select class="form-select" name="mfa_policy" id="create-domain-mfa">
+              <option value="inherit">Inherit from tenant</option>
+              <option value="disabled">Disabled</option>
+              <option value="optional">Optional</option>
+              <option value="required">Required</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label" for="create-domain-passkeys">Local account passkeys</label>
+            <select class="form-select" name="passkey_policy" id="create-domain-passkeys">
+              <option value="inherit">Inherit from tenant</option>
+              <option value="disabled">Disabled</option>
+              <option value="allowed">Allowed</option>
+            </select>
+          </div>
           <div class="d-flex gap-4">
             <label class="form-check form-switch">
               <input class="form-check-input" type="checkbox" name="is_primary">
@@ -285,6 +332,43 @@
             <label class="form-label">Tenant</label>
             <input class="form-control" value="{{ d.tenant_name }} ({{ d.tenant_slug }})" disabled>
           </div>
+          <div class="mb-3">
+            <label class="form-label" for="domain-auth-{{ d.id }}">Authentication policy</label>
+            <select class="form-select" name="authentication_policy" id="domain-auth-{{ d.id }}">
+              <option value="unrestricted" {% if d.authentication_policy == "unrestricted" %}selected{% endif %}>Unrestricted</option>
+              <option value="local" {% if d.authentication_policy == "local" %}selected{% endif %}>Local only</option>
+              <option value="federated" {% if d.authentication_policy == "federated" %}selected{% endif %}>Federated only</option>
+              <option value="ad" {% if d.authentication_policy == "ad" %}selected{% endif %}>AD/LDAP only</option>
+            </select>
+          </div>
+          <div class="mb-3" data-domain-provider-field>
+            <label class="form-label" for="domain-provider-{{ d.id }}">Identity provider</label>
+            <select class="form-select" name="auth_provider_id" id="domain-provider-{{ d.id }}">
+              <option value="">Select provider</option>
+              {% for p in domain_providers %}
+              {% if p.tenant_id == d.tenant_id %}
+              <option value="{{ p.id }}" data-provider-type="{{ p.provider_type }}" data-provider-tenant="{{ p.tenant_id }}" {% if d.uses_provider(p.id) %}selected{% endif %}>{{ p.slug }} ({{ p.provider_type }})</option>
+              {% endif %}
+              {% endfor %}
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label" for="edit-mfa-{{ d.id }}">Local account MFA</label>
+            <select class="form-select" name="mfa_policy" id="edit-mfa-{{ d.id }}">
+              <option value="inherit" {% if d.mfa_policy == "inherit" %}selected{% endif %}>Inherit from tenant</option>
+              <option value="disabled" {% if d.mfa_policy == "disabled" %}selected{% endif %}>Disabled</option>
+              <option value="optional" {% if d.mfa_policy == "optional" %}selected{% endif %}>Optional</option>
+              <option value="required" {% if d.mfa_policy == "required" %}selected{% endif %}>Required</option>
+            </select>
+          </div>
+          <div class="mb-3">
+            <label class="form-label" for="edit-passkeys-{{ d.id }}">Local account passkeys</label>
+            <select class="form-select" name="passkey_policy" id="edit-passkeys-{{ d.id }}">
+              <option value="inherit" {% if d.passkey_policy == "inherit" %}selected{% endif %}>Inherit from tenant</option>
+              <option value="disabled" {% if d.passkey_policy == "disabled" %}selected{% endif %}>Disabled</option>
+              <option value="allowed" {% if d.passkey_policy == "allowed" %}selected{% endif %}>Allowed</option>
+            </select>
+          </div>
           <div class="d-flex gap-4">
             <label class="form-check form-switch">
               <input class="form-check-input" type="checkbox" name="is_primary" {% if d.is_primary %}checked{% endif %}>
@@ -305,4 +389,30 @@
   </div>
 </div>
 {% endfor %}
+<script>
+document.querySelectorAll('form select[name="authentication_policy"]').forEach(function (policy) {
+  const form = policy.form;
+  const field = form.querySelector('[data-domain-provider-field]');
+  const provider = field.querySelector('select');
+  const tenant = form.querySelector('select[name="tenant_id"]');
+  function sync() {
+    const required = policy.value === 'federated' || policy.value === 'ad';
+    field.hidden = !required;
+    provider.disabled = !required;
+    provider.required = required;
+    Array.from(provider.options).forEach(function (option) {
+      if (!option.value) return;
+      const type = option.dataset.providerType;
+      const matching = (policy.value === 'ad' ? type === 'ad_ldap' : type === 'google' || type === 'oidc')
+        && (!tenant || option.dataset.providerTenant === tenant.value);
+      option.disabled = !matching;
+      option.hidden = !matching;
+    });
+    if (!required || (provider.selectedOptions[0] && provider.selectedOptions[0].disabled)) provider.value = '';
+  }
+  policy.addEventListener('change', sync);
+  if (tenant) tenant.addEventListener('change', sync);
+  sync();
+});
+</script>
 {% endblock %}

@@ -3,6 +3,9 @@
 For Linux installation with a dedicated service user, linger, and a systemd
 user unit, see the [step-by-step Linux bootstrap guide (Czech)](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md).
 
+For a read-only Google Workspace user export and a preview-first CLI import,
+see the [Directory export/import guide (Czech)](docs/GOOGLE_WORKSPACE_EXPORT.cs.md).
+
 Simple IDM is a Rust-based OAuth2/OIDC identity stack for small and medium environments that need:
 
 - OAuth2/OIDC SSO
@@ -343,6 +346,12 @@ Users can use:
 
 For `federated`, the user is linked by invitation and then approved by an admin. The final binding is based on upstream `issuer + subject`, not just email.
 
+For regular browser sign-in, select `Continue with Google` (or your OIDC
+provider's name) on the OAuth2 login page. Only active Google/OIDC providers
+in the OAuth client's tenant are offered. The password form is for local
+and AD/LDAP accounts; never enter your Google password there. Invitations
+are for initial identity linking, not regular sign-in.
+
 For `ad`, the selected `auth_provider_id` decides which AD/LDAP provider is used for password verification, onboarding and role sync.
 
 ## Managed Tenant MFA
@@ -353,6 +362,41 @@ provider or AD for MFA. This avoids stacking two unrelated second-factor
 challenges and keeps the trust boundary explicit.
 
 Each tenant has one of these policies, configurable in **Admin UI → Tenants**:
+
+Migration `044_add_domain_auth_policies.sql` adds optional email-domain overrides
+in **Tenants / domains → Edit domain**. MFA accepts `inherit`, `disabled`,
+`optional`, or `required`; passkeys accept `inherit`, `disabled`, or `allowed`.
+`inherit` uses the tenant policy; explicit `disabled` overrides an enabled tenant.
+Existing domains default to `inherit`. Only active, non-deleted domains in the
+user's own tenant participate, using the domain of the user's current email.
+Unmanaged domains inherit the tenant policy. Federated/AD users still use their
+upstream authentication; these settings do not restrict a domain to local accounts.
+
+For a mixed deployment, keep tenant MFA/passkeys disabled, set `datalite.cloud`
+to MFA `required` and passkeys `allowed`, and leave `datalite.cz` on `inherit`.
+This is independent of the public SSO hostname and WebAuthn RP ID. Enabling MFA
+requires `IDP_SECRETS_MASTER_KEY`; passkeys also require the WebAuthn configuration.
+Password-only browser sessions and refresh tokens cannot bypass newly required
+MFA; passkey sessions cannot continue when passkeys become disabled. Already
+issued access tokens remain valid until their normal expiry.
+
+The CLI supports domain policies with `tenants domains create/update` using
+`--mfa-policy` and `--passkey-policy`; pass `inherit` to remove an override.
+
+Migration `045_add_domain_authentication_rules.sql` adds a separate
+**Authentication policy** to each managed domain: `Unrestricted` (default),
+`Local only`, `Federated only`, or `AD/LDAP only`. The last two require an active
+provider of the matching type in the same tenant. For example, set `datalite.cz`
+to `Federated only` with Google, and `datalite.cloud` to `Local only`.
+This is an enforced restriction, not automatic account conversion or linking.
+Creating/importing users, changing their email/type/provider, and restoring
+deleted users must satisfy the active domain rule. A stricter domain rule is
+rejected if existing non-deleted accounts (including inactive accounts) conflict.
+Deactivated or deleted domains no longer impose a restriction. Deactivating the
+prescribed provider blocks authentication until the provider or policy is fixed.
+Federated linking still requires a verified `issuer + sub`, never just email.
+Existing domains remain unrestricted after migration. CLI flags are
+`--authentication-policy unrestricted|local|federated|ad` and `--auth-provider-id`.
 
 | Policy | Local account without TOTP | Local account with active TOTP | Federated / AD account |
 |---|---|---|---|
@@ -513,6 +557,16 @@ The Admin UI uses an admin session cookie. For development, `ADMIN_ROOT_TOKEN` c
 
 ## Admin CLI
 
+Install all eight native workspace binaries into `~/.cargo/bin`:
+
+```bash
+just install
+```
+
+This replaces previously installed versions and reuses the workspace `target`
+directory. The workspace root is a virtual manifest, so `cargo install --path .`
+does not work; the recipe installs each binary package separately.
+
 Build:
 
 ```bash
@@ -524,6 +578,17 @@ Login through browser:
 ```bash
 simple-idm-ctl login --url https://sso.example.com
 ```
+
+Optional browser login hint:
+
+```bash
+simple-idm-ctl login --url https://sso.example.com --user mares@example.com
+```
+
+`--user` sends the OIDC `login_hint`, not a credential. An active federated
+account with an approved identity in the client's tenant is routed to its
+provider; otherwise the login form is prefilled. Existing SSO sessions still
+take precedence. This option cannot be combined with `--device`.
 
 Login through device flow:
 
@@ -721,6 +786,24 @@ cargo run -p simple-idm-server --bin simple-idm-server
 ## License
 
 MIT
+
+## Commercial Support
+
+This software is provided under the MIT License and comes without warranty
+or free community support. Using the software does not require purchasing support.
+
+Commercial support is available from **[DataLite](https://datalite.cz)**, including:
+
+- technical assistance and troubleshooting,
+- verified releases and updates,
+- bug fixes,
+- deployment assistance,
+- long-term maintenance.
+
+Contact [DataLite](https://datalite.cz) for commercial support options.
+Public issues and external pull requests do not create an obligation to respond,
+review, accept contributions, or implement changes. No SLA or release cadence
+is promised unless separately agreed.
 
 ## Author
 

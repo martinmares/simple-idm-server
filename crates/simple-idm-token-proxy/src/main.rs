@@ -517,7 +517,10 @@ fn verify_sha256(bytes: &[u8], expected: &str) -> anyhow::Result<()> {
         return Ok(());
     }
     let expected = expected.strip_prefix("sha256:").unwrap_or(expected);
-    let actual = format!("{:x}", Sha256::digest(bytes));
+    let actual: String = Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
     if !actual.eq_ignore_ascii_case(expected) {
         anyhow::bail!("SHA-256 mismatch: expected {expected}, got {actual}");
     }
@@ -948,7 +951,10 @@ YyRIHN8wfdVoOw==
         let token_file = root.path().join("token");
         fs::write(&token_file, "projected-token\n").await.unwrap();
         let output_dir = root.path().join("output");
-        let digest = format!("{:x}", Sha256::digest(BODY));
+        let digest: String = Sha256::digest(BODY)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
         let files = serde_json::to_string(&[serde_json::json!({
             "source": "/api/v1/assets/file.bin",
             "target": "ssl/file.bin",

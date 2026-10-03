@@ -239,8 +239,24 @@ pub struct TenantUpdateForm {
     is_active: Option<String>,
 }
 
+fn unrestricted_domain_authentication() -> String {
+    "unrestricted".into()
+}
+
+fn inherited_domain_policy() -> String {
+    "inherit".into()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct TenantDomainCreateForm {
+    #[serde(default = "unrestricted_domain_authentication")]
+    authentication_policy: String,
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
+    auth_provider_id: Option<Uuid>,
+    #[serde(default = "inherited_domain_policy")]
+    mfa_policy: String,
+    #[serde(default = "inherited_domain_policy")]
+    passkey_policy: String,
     tenant_id: Uuid,
     domain: String,
     is_primary: Option<String>,
@@ -249,6 +265,14 @@ pub struct TenantDomainCreateForm {
 
 #[derive(Debug, Deserialize)]
 pub struct TenantDomainUpdateForm {
+    #[serde(default = "unrestricted_domain_authentication")]
+    authentication_policy: String,
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
+    auth_provider_id: Option<Uuid>,
+    #[serde(default = "inherited_domain_policy")]
+    mfa_policy: String,
+    #[serde(default = "inherited_domain_policy")]
+    passkey_policy: String,
     domain: String,
     is_primary: Option<String>,
     is_active: Option<String>,
@@ -683,7 +707,29 @@ struct TenantRow {
 }
 
 #[derive(Debug, Clone, FromRow)]
+struct DomainProviderRow {
+    id: Uuid,
+    tenant_id: Uuid,
+    slug: String,
+    provider_type: String,
+}
+
+impl TenantDomainRow {
+    fn uses_provider(&self, id: &Uuid) -> bool {
+        self.auth_provider_id.as_ref() == Some(id)
+    }
+}
+
+#[derive(Debug, Clone, FromRow)]
 struct TenantDomainRow {
+    tenant_id: Uuid,
+    authentication_policy: String,
+    auth_provider_id: Option<Uuid>,
+    provider_slug: Option<String>,
+    mfa_policy: String,
+    passkey_policy: String,
+    effective_mfa_policy: String,
+    effective_passkey_policy: String,
     id: Uuid,
     tenant_slug: String,
     tenant_name: String,
@@ -1083,6 +1129,7 @@ struct GroupsTemplate {
 #[derive(Template)]
 #[template(path = "admin/tenants.html")]
 struct TenantsTemplate {
+    domain_providers: Vec<DomainProviderRow>,
     sections: Vec<NavItem>,
     message: Option<String>,
     error: Option<String>,
@@ -6249,11 +6296,19 @@ async fn tenants_page(
         r#"
         SELECT
             td.id,
+            td.tenant_id,
+            td.authentication_policy,
+            td.auth_provider_id,
+            (SELECT slug FROM identity_providers WHERE id = td.auth_provider_id) AS provider_slug,
             t.slug AS tenant_slug,
             t.name AS tenant_name,
             td.domain,
             td.is_primary,
-            td.is_active
+            td.is_active,
+            td.mfa_policy,
+            td.passkey_policy,
+            COALESCE(NULLIF(td.mfa_policy, 'inherit'), t.mfa_policy) AS effective_mfa_policy,
+            COALESCE(NULLIF(td.passkey_policy, 'inherit'), t.passkey_policy) AS effective_passkey_policy
         FROM tenant_domains td
         JOIN tenants t ON t.id = td.tenant_id
         WHERE td.deleted_at IS NULL
@@ -6268,11 +6323,19 @@ async fn tenants_page(
         r#"
         SELECT
             td.id,
+            td.tenant_id,
+            td.authentication_policy,
+            td.auth_provider_id,
+            (SELECT slug FROM identity_providers WHERE id = td.auth_provider_id) AS provider_slug,
             t.slug AS tenant_slug,
             t.name AS tenant_name,
             td.domain,
             td.is_primary,
-            td.is_active
+            td.is_active,
+            td.mfa_policy,
+            td.passkey_policy,
+            COALESCE(NULLIF(td.mfa_policy, 'inherit'), t.mfa_policy) AS effective_mfa_policy,
+            COALESCE(NULLIF(td.passkey_policy, 'inherit'), t.passkey_policy) AS effective_passkey_policy
         FROM tenant_domains td
         JOIN tenants t ON t.id = td.tenant_id
         WHERE td.deleted_at IS NOT NULL
@@ -6284,7 +6347,14 @@ async fn tenants_page(
     .await
     .unwrap_or_default();
 
+    let domain_providers = match sqlx::query_as::<_, DomainProviderRow>(
+        "SELECT id, tenant_id, slug, provider_type FROM identity_providers WHERE is_active AND deleted_at IS NULL AND provider_type IN ('google', 'oidc', 'ad_ldap') ORDER BY slug",
+    ).fetch_all(&state.db_pool).await {
+        Ok(rows) => rows,
+        Err(_) => return redirect_with("/admin/ui/", "error", "Could not load identity providers").into_response(),
+    };
     render_template(TenantsTemplate {
+        domain_providers,
         sections: nav_items(AdminSection::Tenants),
         message: query.message,
         error: query.error,
@@ -6396,17 +6466,70 @@ async fn tenant_domains_create(
         return redir.into_response();
     }
 
+    if !matches!(
+        form.authentication_policy.as_str(),
+        "unrestricted" | "local" | "federated" | "ad"
+    ) {
+        return redirect_with(
+            "/admin/ui/tenants",
+            "error",
+            "Invalid domain authentication policy",
+        )
+        .into_response();
+    }
+    let auth_provider_id = if matches!(
+        form.authentication_policy.as_str(),
+        "unrestricted" | "local"
+    ) {
+        None
+    } else {
+        form.auth_provider_id
+    };
+    if matches!(form.authentication_policy.as_str(), "federated" | "ad")
+        && auth_provider_id.is_none()
+    {
+        return redirect_with("/admin/ui/tenants", "error", "Select an identity provider")
+            .into_response();
+    }
+    if let Err(e) = simple_idm_core::auth_policy::validate_domain_overrides(
+        &form.mfa_policy,
+        &form.passkey_policy,
+    ) {
+        return redirect_with("/admin/ui/tenants", "error", &e.to_string()).into_response();
+    }
+    if matches!(form.mfa_policy.as_str(), "optional" | "required") && validate_master_key().is_err()
+    {
+        return redirect_with(
+            "/admin/ui/tenants",
+            "error",
+            "Configure IDP_SECRETS_MASTER_KEY before enabling MFA",
+        )
+        .into_response();
+    }
+
     let domain = match normalize_domain(&form.domain) {
         Ok(v) => v,
         Err(e) => return redirect_with("/admin/ui/tenants", "error", &e).into_response(),
     };
     let is_primary = parse_checkbox(&form.is_primary);
 
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => {
+            return redirect_with(
+                "/admin/ui/tenants",
+                "error",
+                "Could not start domain update",
+            )
+            .into_response();
+        }
+    };
+
     if is_primary {
         if let Err(e) =
             sqlx::query("UPDATE tenant_domains SET is_primary = false WHERE tenant_id = $1")
                 .bind(form.tenant_id)
-                .execute(&state.db_pool)
+                .execute(&mut *tx)
                 .await
         {
             return redirect_with(
@@ -6420,17 +6543,27 @@ async fn tenant_domains_create(
 
     let result = sqlx::query(
         r#"
-        INSERT INTO tenant_domains (tenant_id, domain, is_primary, is_active)
-        VALUES ($1, $2, $3, $4)
+        INSERT INTO tenant_domains (tenant_id, domain, is_primary, is_active, mfa_policy, passkey_policy, authentication_policy, auth_provider_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         "#,
     )
     .bind(form.tenant_id)
     .bind(domain)
     .bind(is_primary)
     .bind(parse_checkbox(&form.is_active))
-    .execute(&state.db_pool)
+    .bind(&form.mfa_policy)
+    .bind(&form.passkey_policy)
+    .bind(&form.authentication_policy)
+    .bind(auth_provider_id)
+    .execute(&mut *tx)
     .await;
 
+    if result.is_ok() {
+        if let Err(e) = tx.commit().await {
+            return redirect_with("/admin/ui/tenants", "error", &format!("Save failed: {e}"))
+                .into_response();
+        }
+    }
     match result {
         Ok(_) => redirect_with("/admin/ui/tenants", "message", "Domain added").into_response(),
         Err(e) => redirect_with("/admin/ui/tenants", "error", &format!("Create failed: {e}"))
@@ -6446,6 +6579,47 @@ async fn tenant_domains_update(
 ) -> Response {
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
+    }
+
+    if !matches!(
+        form.authentication_policy.as_str(),
+        "unrestricted" | "local" | "federated" | "ad"
+    ) {
+        return redirect_with(
+            "/admin/ui/tenants",
+            "error",
+            "Invalid domain authentication policy",
+        )
+        .into_response();
+    }
+    let auth_provider_id = if matches!(
+        form.authentication_policy.as_str(),
+        "unrestricted" | "local"
+    ) {
+        None
+    } else {
+        form.auth_provider_id
+    };
+    if matches!(form.authentication_policy.as_str(), "federated" | "ad")
+        && auth_provider_id.is_none()
+    {
+        return redirect_with("/admin/ui/tenants", "error", "Select an identity provider")
+            .into_response();
+    }
+    if let Err(e) = simple_idm_core::auth_policy::validate_domain_overrides(
+        &form.mfa_policy,
+        &form.passkey_policy,
+    ) {
+        return redirect_with("/admin/ui/tenants", "error", &e.to_string()).into_response();
+    }
+    if matches!(form.mfa_policy.as_str(), "optional" | "required") && validate_master_key().is_err()
+    {
+        return redirect_with(
+            "/admin/ui/tenants",
+            "error",
+            "Configure IDP_SECRETS_MASTER_KEY before enabling MFA",
+        )
+        .into_response();
     }
 
     let domain = match normalize_domain(&form.domain) {
@@ -6470,11 +6644,23 @@ async fn tenant_domains_update(
         }
     };
 
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => {
+            return redirect_with(
+                "/admin/ui/tenants",
+                "error",
+                "Could not start domain update",
+            )
+            .into_response();
+        }
+    };
+
     if is_primary {
         if let Err(e) =
             sqlx::query("UPDATE tenant_domains SET is_primary = false WHERE tenant_id = $1")
                 .bind(tenant_id)
-                .execute(&state.db_pool)
+                .execute(&mut *tx)
                 .await
         {
             return redirect_with(
@@ -6491,7 +6677,11 @@ async fn tenant_domains_update(
         UPDATE tenant_domains
         SET domain = $2,
             is_primary = $3,
-            is_active = $4
+            is_active = $4,
+            mfa_policy = $5,
+            passkey_policy = $6,
+            authentication_policy = $7,
+            auth_provider_id = $8
         WHERE id = $1 AND deleted_at IS NULL
         "#,
     )
@@ -6499,9 +6689,19 @@ async fn tenant_domains_update(
     .bind(domain)
     .bind(is_primary)
     .bind(parse_checkbox(&form.is_active))
-    .execute(&state.db_pool)
+    .bind(&form.mfa_policy)
+    .bind(&form.passkey_policy)
+    .bind(&form.authentication_policy)
+    .bind(auth_provider_id)
+    .execute(&mut *tx)
     .await;
 
+    if result.is_ok() {
+        if let Err(e) = tx.commit().await {
+            return redirect_with("/admin/ui/tenants", "error", &format!("Save failed: {e}"))
+                .into_response();
+        }
+    }
     match result {
         Ok(done) if done.rows_affected() > 0 => {
             redirect_with("/admin/ui/tenants", "message", "Domain updated").into_response()
@@ -8652,6 +8852,21 @@ async fn claim_patterns_deactivate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn domain_form_defaults_and_empty_provider_are_supported() {
+        let form: TenantDomainUpdateForm =
+            serde_urlencoded::from_str("domain=example.test&auth_provider_id=").unwrap();
+        assert_eq!(form.authentication_policy, "unrestricted");
+        assert_eq!(form.auth_provider_id, None);
+        assert_eq!(form.mfa_policy, "inherit");
+        let provider = Uuid::new_v4();
+        let form: TenantDomainUpdateForm = serde_urlencoded::from_str(&format!(
+            "domain=example.test&authentication_policy=federated&auth_provider_id={provider}",
+        ))
+        .unwrap();
+        assert_eq!(form.auth_provider_id, Some(provider));
+    }
 
     #[test]
     fn user_update_form_accepts_empty_auth_provider_id() {

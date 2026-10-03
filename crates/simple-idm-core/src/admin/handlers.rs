@@ -216,6 +216,10 @@ pub struct TenantResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateTenantDomainRequest {
+    pub authentication_policy: Option<String>,
+    pub auth_provider_id: Option<Uuid>,
+    pub mfa_policy: Option<String>,
+    pub passkey_policy: Option<String>,
     pub domain: String,
     pub is_primary: Option<bool>,
     pub is_active: Option<bool>,
@@ -223,6 +227,10 @@ pub struct CreateTenantDomainRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateTenantDomainRequest {
+    pub authentication_policy: Option<String>,
+    pub auth_provider_id: Option<Uuid>,
+    pub mfa_policy: Option<String>,
+    pub passkey_policy: Option<String>,
     pub domain: Option<String>,
     pub is_primary: Option<bool>,
     pub is_active: Option<bool>,
@@ -230,6 +238,10 @@ pub struct UpdateTenantDomainRequest {
 
 #[derive(Debug, Serialize, sqlx::FromRow)]
 pub struct TenantDomainResponse {
+    pub authentication_policy: String,
+    pub auth_provider_id: Option<Uuid>,
+    pub mfa_policy: String,
+    pub passkey_policy: String,
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub domain: String,
@@ -3036,24 +3048,7 @@ pub async fn update_client_group_pattern(
         Ok(Some(_)) => {}
     }
 
-    // Build dynamic update query
-    let mut update_parts = Vec::new();
-    let mut param_count = 1;
-
-    if req.pattern.is_some() {
-        update_parts.push(format!("pattern = ${}", param_count));
-        param_count += 1;
-    }
-    if req.is_include.is_some() {
-        update_parts.push(format!("is_include = ${}", param_count));
-        param_count += 1;
-    }
-    if req.priority.is_some() {
-        update_parts.push(format!("priority = ${}", param_count));
-        param_count += 1;
-    }
-
-    if update_parts.is_empty() {
+    if req.pattern.is_none() && req.is_include.is_none() && req.priority.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -3064,26 +3059,17 @@ pub async fn update_client_group_pattern(
             .into_response();
     }
 
-    let query_str = format!(
-        "UPDATE oauth_client_group_patterns SET {} WHERE id = ${} RETURNING id, client_id, pattern, is_include, priority, created_at",
-        update_parts.join(", "),
-        param_count
-    );
-
-    let mut query = sqlx::query(&query_str);
-
-    if let Some(pattern) = req.pattern {
-        query = query.bind(pattern);
-    }
-    if let Some(is_include) = req.is_include {
-        query = query.bind(is_include);
-    }
-    if let Some(priority) = req.priority {
-        query = query.bind(priority);
-    }
-    query = query.bind(pattern_id);
-
-    let result = query.fetch_one(&db_pool).await;
+    let result = sqlx::query(
+        "UPDATE oauth_client_group_patterns SET pattern = COALESCE($1, pattern),
+         is_include = COALESCE($2, is_include), priority = COALESCE($3, priority)
+         WHERE id = $4 RETURNING id, client_id, pattern, is_include, priority, created_at",
+    )
+    .bind(req.pattern)
+    .bind(req.is_include)
+    .bind(req.priority)
+    .bind(pattern_id)
+    .fetch_one(&db_pool)
+    .await;
 
     match result {
         Ok(row) => {
@@ -3791,6 +3777,43 @@ pub async fn create_tenant_domain(
 ) -> impl IntoResponse {
     let is_primary = req.is_primary.unwrap_or(false);
     let is_active = req.is_active.unwrap_or(true);
+    if let Some(policy) = req.authentication_policy.as_deref() {
+        if !matches!(policy, "unrestricted" | "local" | "federated" | "ad") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".into(),
+                    error_description: "Invalid domain authentication policy".into(),
+                }),
+            )
+                .into_response();
+        }
+    }
+    if let Err(e) = crate::auth_policy::validate_domain_overrides(
+        req.mfa_policy.as_deref().unwrap_or("inherit"),
+        req.passkey_policy.as_deref().unwrap_or("inherit"),
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".into(),
+                error_description: e.to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if matches!(req.mfa_policy.as_deref(), Some("optional" | "required"))
+        && crate::secret_crypto::validate_master_key().is_err()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".into(),
+                error_description: "Configure IDP_SECRETS_MASTER_KEY before enabling MFA".into(),
+            }),
+        )
+            .into_response();
+    }
 
     let mut tx = match db_pool.begin().await {
         Ok(tx) => tx,
@@ -3816,15 +3839,19 @@ pub async fn create_tenant_domain(
 
     let result = sqlx::query_as::<_, TenantDomainResponse>(
         r#"
-        INSERT INTO tenant_domains (tenant_id, domain, is_primary, is_active)
-        VALUES ($1, $2, $3, $4)
-        RETURNING id, tenant_id, domain, is_primary, is_active
+        INSERT INTO tenant_domains (tenant_id, domain, is_primary, is_active, mfa_policy, passkey_policy, authentication_policy, auth_provider_id)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        RETURNING id, tenant_id, domain, is_primary, is_active, mfa_policy, passkey_policy, authentication_policy, auth_provider_id
         "#,
     )
     .bind(tenant_id)
     .bind(req.domain)
     .bind(is_primary)
     .bind(is_active)
+    .bind(req.mfa_policy.as_deref().unwrap_or("inherit"))
+    .bind(req.passkey_policy.as_deref().unwrap_or("inherit"))
+    .bind(req.authentication_policy.as_deref().unwrap_or("unrestricted"))
+    .bind(req.auth_provider_id)
     .fetch_one(&mut *tx)
     .await;
 
@@ -3865,7 +3892,7 @@ pub async fn list_tenant_domains(
 ) -> impl IntoResponse {
     let result = sqlx::query_as::<_, TenantDomainResponse>(
         r#"
-        SELECT id, tenant_id, domain, is_primary, is_active
+        SELECT id, tenant_id, domain, is_primary, is_active, mfa_policy, passkey_policy, authentication_policy, auth_provider_id
         FROM tenant_domains
         WHERE tenant_id = $1 AND deleted_at IS NULL
         ORDER BY is_primary DESC, domain ASC
@@ -3896,7 +3923,51 @@ pub async fn update_tenant_domain(
     Path((tenant_id, domain_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<UpdateTenantDomainRequest>,
 ) -> impl IntoResponse {
-    if req.domain.is_none() && req.is_primary.is_none() && req.is_active.is_none() {
+    if let Some(policy) = req.authentication_policy.as_deref() {
+        if !matches!(policy, "unrestricted" | "local" | "federated" | "ad") {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "bad_request".into(),
+                    error_description: "Invalid domain authentication policy".into(),
+                }),
+            )
+                .into_response();
+        }
+    }
+    if let Err(e) = crate::auth_policy::validate_domain_overrides(
+        req.mfa_policy.as_deref().unwrap_or("inherit"),
+        req.passkey_policy.as_deref().unwrap_or("inherit"),
+    ) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".into(),
+                error_description: e.to_string(),
+            }),
+        )
+            .into_response();
+    }
+    if matches!(req.mfa_policy.as_deref(), Some("optional" | "required"))
+        && crate::secret_crypto::validate_master_key().is_err()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "bad_request".into(),
+                error_description: "Configure IDP_SECRETS_MASTER_KEY before enabling MFA".into(),
+            }),
+        )
+            .into_response();
+    }
+    if req.domain.is_none()
+        && req.is_primary.is_none()
+        && req.is_active.is_none()
+        && req.mfa_policy.is_none()
+        && req.passkey_policy.is_none()
+        && req.authentication_policy.is_none()
+        && req.auth_provider_id.is_none()
+    {
         return (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -3938,9 +4009,13 @@ pub async fn update_tenant_domain(
         SET
             domain = COALESCE($1, domain),
             is_primary = COALESCE($2, is_primary),
-            is_active = COALESCE($3, is_active)
+            is_active = COALESCE($3, is_active),
+            mfa_policy = COALESCE($6, mfa_policy),
+            passkey_policy = COALESCE($7, passkey_policy),
+            authentication_policy = COALESCE($8, authentication_policy),
+            auth_provider_id = CASE WHEN $8 IN ('unrestricted', 'local') THEN NULL ELSE COALESCE($9, auth_provider_id) END
         WHERE tenant_id = $4 AND id = $5 AND deleted_at IS NULL
-        RETURNING id, tenant_id, domain, is_primary, is_active
+        RETURNING id, tenant_id, domain, is_primary, is_active, mfa_policy, passkey_policy, authentication_policy, auth_provider_id
         "#,
     )
     .bind(req.domain)
@@ -3948,6 +4023,10 @@ pub async fn update_tenant_domain(
     .bind(req.is_active)
     .bind(tenant_id)
     .bind(domain_id)
+    .bind(req.mfa_policy)
+    .bind(req.passkey_policy)
+    .bind(req.authentication_policy)
+    .bind(req.auth_provider_id)
     .fetch_optional(&mut *tx)
     .await;
 

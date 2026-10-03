@@ -291,6 +291,29 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn verifies_rs256_token_from_jsonwebtoken_10() {
+        // Signed with jsonwebtoken 10.4.0 and a disposable test key.
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/jwt-10-rs256.json")).unwrap();
+        let key = jsonwebtoken::DecodingKey::from_rsa_pem(
+            fixture["public_key"].as_str().unwrap().as_bytes(),
+        )
+        .unwrap();
+        let token = fixture["token"].as_str().unwrap();
+        let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::RS256);
+        validation.set_issuer(&["https://legacy.example.test"]);
+        validation.set_audience(&["legacy-client"]);
+        let decoded = jsonwebtoken::decode::<super::Claims>(token, &key, &validation).unwrap();
+        assert_eq!(decoded.claims.sub, "legacy-user");
+        assert_eq!(decoded.header.kid.as_deref(), Some("legacy-key"));
+        validation.set_audience(&["wrong-client"]);
+        assert!(jsonwebtoken::decode::<super::Claims>(token, &key, &validation).is_err());
+        validation.set_audience(&["legacy-client"]);
+        validation.set_issuer(&["https://wrong.example.test"]);
+        assert!(jsonwebtoken::decode::<super::Claims>(token, &key, &validation).is_err());
+    }
+
+    #[test]
     fn jwks_contains_active_and_additional_keys() {
         let dir = tempdir().expect("temp dir");
         let private_key_path = dir.path().join("private.pem");
@@ -325,6 +348,32 @@ mod tests {
             vec![("old-key".to_string(), public_key.clone())],
         )
         .expect("jwt service should initialize");
+
+        let user_id = uuid::Uuid::new_v4();
+        let token = service
+            .create_access_token(
+                user_id,
+                "test-client".into(),
+                Some("user@example.test".into()),
+                Some("user".into()),
+                Some("openid profile".into()),
+                vec!["test-group".into()],
+                std::collections::HashMap::new(),
+                vec!["pwd".into()],
+                None,
+                3600,
+            )
+            .expect("sign RS256 token");
+        let claims = service
+            .verify_token_for_audience(&token, "test-client")
+            .expect("verify RS256 token");
+        assert_eq!(claims.sub, user_id.to_string());
+        assert_eq!(claims.amr, vec!["pwd"]);
+        assert!(
+            service
+                .verify_token_for_audience(&token, "wrong-client")
+                .is_err()
+        );
 
         let jwks = service.get_jwks().expect("jwks should generate");
         assert_eq!(jwks.keys.len(), 2);

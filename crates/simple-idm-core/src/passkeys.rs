@@ -165,7 +165,7 @@ impl PasskeyService {
         // Serialize concurrent removals for this user so two requests cannot
         // both remove the last remaining method.
         let password_available: bool = sqlx::query_scalar(
-            "SELECT (NOT u.password_disabled AND u.password_hash IS NOT NULL) FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1 AND u.tenant_id = $2 AND u.auth_mode = 'local' AND u.is_active = true AND u.deleted_at IS NULL AND t.is_active = true AND t.passkey_policy = 'allowed' FOR UPDATE OF u",
+            "SELECT (NOT u.password_disabled AND u.password_hash IS NOT NULL) FROM users u JOIN tenants t ON t.id = u.tenant_id JOIN effective_user_auth_policies p ON p.user_id = u.id WHERE u.id = $1 AND u.tenant_id = $2 AND u.auth_mode = 'local' AND u.is_active = true AND u.deleted_at IS NULL AND t.is_active = true AND p.passkey_policy = 'allowed' FOR UPDATE OF u",
         )
         .bind(user_id).bind(tenant_id).fetch_optional(&mut *tx).await?
         .ok_or_else(|| anyhow!("Passkeys are not allowed for this account"))?;
@@ -395,7 +395,7 @@ impl PasskeyService {
 
 async fn local_user_allowed(pool: &PgPool, tenant_id: Uuid, user_id: Uuid) -> Result<bool> {
     let allowed: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM users u JOIN tenants t ON t.id = u.tenant_id WHERE u.id = $1 AND u.tenant_id = $2 AND u.auth_mode = 'local' AND u.is_active = true AND u.deleted_at IS NULL AND t.is_active = true AND t.passkey_policy = 'allowed')",
+        "SELECT EXISTS (SELECT 1 FROM users u JOIN tenants t ON t.id = u.tenant_id JOIN effective_user_auth_policies p ON p.user_id = u.id WHERE u.id = $1 AND u.tenant_id = $2 AND u.auth_mode = 'local' AND u.is_active = true AND u.deleted_at IS NULL AND t.is_active = true AND p.passkey_policy = 'allowed')",
     )
     .bind(user_id).bind(tenant_id).fetch_one(pool).await?;
     Ok(allowed)

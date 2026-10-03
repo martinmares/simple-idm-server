@@ -251,12 +251,24 @@
         });
       }
 
+      // Tabler bundles Bootstrap components under window.tabler, not window.bootstrap.
+      const bootstrapApi = window.bootstrap || window.tabler;
+      const Modal = bootstrapApi && bootstrapApi.Modal;
+      const Collapse = bootstrapApi && bootstrapApi.Collapse;
       let modalBackdrop = null;
 
       function showModal(el) {
         if (!el) return;
-        if (window.bootstrap && window.bootstrap.Modal) {
-          window.bootstrap.Modal.getOrCreateInstance(el).show();
+        if (Modal) {
+          const openModal = document.querySelector('.modal.show');
+          if (openModal && openModal !== el) {
+            openModal.addEventListener('hidden.bs.modal', function() {
+              Modal.getOrCreateInstance(el).show();
+            }, { once: true });
+            Modal.getOrCreateInstance(openModal).hide();
+            return;
+          }
+          Modal.getOrCreateInstance(el).show();
           return;
         }
         hideOpenModal();
@@ -278,8 +290,8 @@
 
       function hideModal(el) {
         if (!el) return;
-        if (window.bootstrap && window.bootstrap.Modal) {
-          const instance = window.bootstrap.Modal.getInstance(el);
+        if (Modal) {
+          const instance = Modal.getInstance(el);
           if (instance) instance.hide();
           return;
         }
@@ -305,7 +317,7 @@
         if (modalToggle) {
           const targetSelector = modalToggle.getAttribute('data-bs-target');
           const target = targetSelector ? document.querySelector(targetSelector) : null;
-          if (target && !(window.bootstrap && window.bootstrap.Modal)) {
+          if (target && !Modal) {
             e.preventDefault();
             showModal(target);
           }
@@ -316,7 +328,7 @@
         if (collapseToggle) {
           const targetSelector = collapseToggle.getAttribute('data-bs-target');
           const target = targetSelector ? document.querySelector(targetSelector) : null;
-          if (target && !(window.bootstrap && window.bootstrap.Collapse)) {
+          if (target && !Collapse) {
             e.preventDefault();
             target.classList.toggle('show');
           }
@@ -324,14 +336,14 @@
         }
 
         const dismiss = e.target.closest('[data-bs-dismiss="modal"]');
-        if (dismiss) {
+        if (dismiss && !Modal) {
           e.preventDefault();
           hideModal(dismiss.closest('.modal'));
         }
       });
 
       document.addEventListener('keydown', function(e) {
-        if (e.key === 'Escape') {
+        if (e.key === 'Escape' && !Modal) {
           hideOpenModal();
         }
       });

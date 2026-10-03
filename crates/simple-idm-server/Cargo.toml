@@ -1,7 +1,8 @@
 [package]
 name = "simple-idm-server"
-version = "0.11.2"
+version = "0.12.0"
 edition = "2024"
+license.workspace = true
 
 [[bin]]
 name = "simple-idm-server"
@@ -12,11 +13,11 @@ path = "src/main.rs"
 axum = { version = "0.8", features = ["multipart"] }
 tokio = { version = "1", features = ["full"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors"] }
+tower-http = { version = "0.7", features = ["trace", "cors"] }
 tower_governor = "0.8"
 
 # Database
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "sqlite", "uuid", "chrono", "migrate"] }
+sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "sqlite", "uuid", "chrono", "migrate"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -24,13 +25,13 @@ serde_json = "1.0"
 serde_urlencoded = "0.7"
 
 # JWT & Crypto
-jsonwebtoken = { version = "10.4", features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.1", features = ["aws_lc_rs"] }
 rustls = { version = "0.23", features = ["aws_lc_rs"] }
-argon2 = "0.5"
-uuid = { version = "1.25", features = ["v4", "serde"] }
+argon2 = "0.6"
+uuid = { version = "1.27", features = ["v4", "serde"] }
 rand = "0.10"
 sha2 = "0.11"
-base64 = "0.22"
+base64 = "0.23"
 rsa = { version = "0.9", features = ["pem"] }
 clap = { version = "4.6", features = ["derive"] }
 tabled = "0.22"
@@ -52,7 +53,7 @@ thiserror = "2.0"
 anyhow = "1.0"
 
 # Validation
-validator = { version = "0.20", features = ["derive"] }
+validator = { version = "0.21", features = ["derive"] }
 regex = "1.13"
 tempfile = "3.27"
 
@@ -65,12 +66,12 @@ openidconnect = "4.0"
 # In-memory storage
 dashmap = "6.2"
 url = "2.5"
-dirs = "6.0"
+dirs = "7.0"
 urlencoding = "2.1"
 qrcode = "0.14"
 open = "5.4"
 simple-idm-common = { path = "../simple-idm-common" }
 simple-idm-ad-auth = { path = "../simple-idm-ad-auth" }
 simple-idm-core = { path = "../simple-idm-core" }
-askama = "0.15"
+askama = "0.16"
 csv = "1.4"

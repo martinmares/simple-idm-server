@@ -210,6 +210,58 @@ pub fn recovery_codes_page(codes: &[String], continue_url: &str) -> String {
 /// Generate login page HTML.
 #[allow(dead_code)]
 pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> String {
+    login_page_with_providers(params, error, &[])
+}
+
+pub(super) fn federated_login_url(params: &HashMap<String, String>, slug: &str) -> String {
+    let mut target = url::Url::parse("http://localhost/").expect("static URL");
+    target
+        .path_segments_mut()
+        .expect("hierarchical URL")
+        .extend(["oauth2", "federated", slug, "start"]);
+    {
+        let mut query = target.query_pairs_mut();
+        for key in [
+            "client_id",
+            "redirect_uri",
+            "tenant",
+            "scope",
+            "state",
+            "nonce",
+            "code_challenge",
+            "code_challenge_method",
+            "login_hint",
+        ] {
+            if let Some(value) = params.get(key).filter(|value| !value.is_empty()) {
+                query.append_pair(key, value);
+            }
+        }
+    }
+    target[url::Position::BeforePath..].to_string()
+}
+
+pub fn login_page_with_providers(
+    params: &HashMap<String, String>,
+    error: Option<&str>,
+    providers: &[(String, String)],
+) -> String {
+    let mut provider_html = String::new();
+    for (slug, provider_type) in providers {
+        let target = federated_login_url(params, slug);
+        let label = if provider_type == "google" && slug == "google" {
+            "Google"
+        } else {
+            slug
+        };
+        provider_html.push_str(&format!(
+            r#"<a class="btn btn-outline-primary w-100 mb-2" href="{}">Continue with {}</a>"#,
+            escape_html(&target),
+            escape_html(label),
+        ));
+    }
+    if !provider_html.is_empty() {
+        provider_html.push_str(r#"<div class="text-center text-secondary my-3">or</div>"#);
+    }
     let client_id = params.get("client_id").map(|s| s.as_str()).unwrap_or("");
     let redirect_uri = params.get("redirect_uri").map(|s| s.as_str()).unwrap_or("");
     let state = params.get("state").map(|s| s.as_str()).unwrap_or("");
@@ -252,6 +304,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
 <div class="alert alert-info" role="alert">
   Signing in to <strong>{client}</strong>
 </div>
+{provider_html}
 <form method="POST" action="/oauth2/login" id="login-form">
   <input type="hidden" name="client_id" value="{client_id}">
   <input type="hidden" name="redirect_uri" value="{redirect_uri}">
@@ -264,7 +317,7 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
   <input type="hidden" name="code_challenge_method" value="{code_challenge_method}">
   <div class="mb-3">
     <label class="form-label" for="username">Email or username</label>
-    <input class="form-control" type="text" id="username" name="username" required autofocus autocomplete="username" placeholder="{placeholder}">
+    <input class="form-control" type="text" id="username" name="username" value="{login_hint}" required autofocus autocomplete="username" placeholder="{placeholder}">
     {username_passkey_error}
   </div>
   <div class="mb-3">
@@ -290,7 +343,8 @@ pub fn login_page(params: &HashMap<String, String>, error: Option<&str>) -> Stri
         passkey_html = passkey_html,
         username_passkey_error = username_passkey_error,
         passkey_script = passkey_script,
-        placeholder = escape_html(&user_placeholder())
+        placeholder = escape_html(&user_placeholder()),
+        login_hint = escape_html(params.get("login_hint").map(String::as_str).unwrap_or(""))
     );
 
     render_page(
@@ -465,5 +519,76 @@ mod tests {
         assert!(html.contains("you will enter its code after your password"));
         assert!(!html.contains("name=\"mfa_code\""));
         assert!(!html.contains("placeholder=\"********\""));
+    }
+
+    #[test]
+    fn federated_sign_in_preserves_authorization_parameters() {
+        let params = HashMap::from([
+            ("client_id".to_string(), "cli-tools".to_string()),
+            (
+                "redirect_uri".to_string(),
+                "http://localhost:8888/callback".to_string(),
+            ),
+            ("state".to_string(), "state&with=characters".to_string()),
+            ("nonce".to_string(), "nonce".to_string()),
+            ("tenant".to_string(), "default".to_string()),
+            (
+                "scope".to_string(),
+                "openid profile email groups".to_string(),
+            ),
+            ("code_challenge".to_string(), "challenge".to_string()),
+            ("code_challenge_method".to_string(), "S256".to_string()),
+            ("csrf_token".to_string(), "local-csrf".to_string()),
+            (
+                "login_hint".to_string(),
+                "mares+test@example.com".to_string(),
+            ),
+        ]);
+        let html = login_page_with_providers(
+            &params,
+            Some("Invalid email or password"),
+            &[("google".to_string(), "google".to_string())],
+        );
+        assert!(html.contains("Continue with Google"));
+        let href = html
+            .split("href=\"/oauth2/federated/")
+            .nth(1)
+            .unwrap()
+            .split('"')
+            .next()
+            .unwrap()
+            .replace("&amp;", "&");
+        let url =
+            url::Url::parse(&format!("https://sso.example.com/oauth2/federated/{href}")).unwrap();
+        assert_eq!(url.path(), "/oauth2/federated/google/start");
+        let query: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        for (key, value) in params
+            .iter()
+            .filter(|(key, _)| key.as_str() != "csrf_token")
+        {
+            assert_eq!(query.get(key), Some(value));
+        }
+        assert!(!query.contains_key("csrf_token"));
+    }
+
+    #[test]
+    fn provider_labels_are_escaped_and_local_login_stays_available() {
+        let html = login_page_with_providers(
+            &HashMap::new(),
+            None,
+            &[("<custom>".to_string(), "oidc".to_string())],
+        );
+        assert!(html.contains("Continue with &lt;custom&gt;"));
+        assert!(html.contains("/oauth2/federated/%3Ccustom%3E/start"));
+        assert!(html.contains("action=\"/oauth2/login\""));
+        assert!(!login_page(&HashMap::new(), None).contains("Continue with Google"));
+    }
+
+    #[test]
+    fn login_hint_prefills_username_without_injecting_html() {
+        let params = HashMap::from([("login_hint".to_string(), "\"><script>".to_string())]);
+        let html = login_page(&params, None);
+        assert!(html.contains("name=\"username\" value=\"&quot;&gt;&lt;script&gt;\""));
+        assert!(html.contains("name=\"password\" required"));
     }
 }

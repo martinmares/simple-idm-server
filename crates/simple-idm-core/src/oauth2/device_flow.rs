@@ -467,9 +467,17 @@ pub async fn handle_device_verify(
     });
 
     if user.auth_mode.eq_ignore_ascii_case("local") {
-        let policy = mfa::tenant_mfa_policy(&state.db_pool, user.tenant_id)
-            .await
-            .unwrap_or(MfaPolicy::Disabled);
+        let policy = match mfa::user_mfa_policy(&state.db_pool, user.id).await {
+            Ok(policy) => policy,
+            Err(_) => {
+                return Html(templates::device_verify_page(
+                    Some(&req.user_code),
+                    Some("Could not evaluate authentication policy. Try again."),
+                    None,
+                ))
+                .into_response();
+            }
+        };
         let authenticator = mfa::active_totp_authenticator(&state.db_pool, user.id)
             .await
             .unwrap_or(None);
@@ -567,6 +575,12 @@ fn is_email_domain_allowed(email: &str, allowed_domains: &[String]) -> bool {
 }
 
 async fn verify_user_password(state: &OAuth2State, user: &User, password: &str) -> bool {
+    if crate::auth_policy::for_user(&state.db_pool, user.id)
+        .await
+        .is_err()
+    {
+        return false;
+    }
     if user.password_disabled || user.auth_mode.eq_ignore_ascii_case("federated") {
         return false;
     }
@@ -792,6 +806,20 @@ pub async fn handle_device_token_internal(
                     .into_response();
             }
         };
+
+    if !crate::auth_policy::accepts_authentication(&state.db_pool, &user, &device_code.amr)
+        .await
+        .unwrap_or(false)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_grant".into(),
+                error_description: "Account or authentication policy changed; sign in again".into(),
+            }),
+        )
+            .into_response();
+    }
 
     let user_group_names = match client.groups_claim_mode.as_str() {
         "none" => vec![],

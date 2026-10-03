@@ -1,0 +1,3 @@
+FROM busybox:1.37
+COPY  target/x86_64-unknown-linux-musl/release/simple-idm-token-proxy /usr/local/bin/simple-idm-token-proxy
+

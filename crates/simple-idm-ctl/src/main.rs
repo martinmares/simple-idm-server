@@ -194,6 +194,9 @@ enum Commands {
         tenant: Option<String>,
         #[arg(long, default_value = "8888")]
         port: u16,
+        /// Optional browser sign-in hint; does not authenticate the user.
+        #[arg(long, conflicts_with = "device")]
+        user: Option<String>,
         #[arg(long, default_value = "default")]
         server: String,
         #[arg(long)]
@@ -280,6 +283,14 @@ enum TenantDomainsCommand {
         is_primary: Option<bool>,
         #[arg(long)]
         is_active: Option<bool>,
+        #[arg(long, value_parser = ["inherit", "disabled", "optional", "required"])]
+        mfa_policy: Option<String>,
+        #[arg(long, value_parser = ["inherit", "disabled", "allowed"])]
+        passkey_policy: Option<String>,
+        #[arg(long, value_parser = ["unrestricted", "local", "federated", "ad"])]
+        authentication_policy: Option<String>,
+        #[arg(long)]
+        auth_provider_id: Option<uuid::Uuid>,
     },
     Update {
         #[arg(long)]
@@ -292,6 +303,14 @@ enum TenantDomainsCommand {
         is_primary: Option<bool>,
         #[arg(long)]
         is_active: Option<bool>,
+        #[arg(long, value_parser = ["inherit", "disabled", "optional", "required"])]
+        mfa_policy: Option<String>,
+        #[arg(long, value_parser = ["inherit", "disabled", "allowed"])]
+        passkey_policy: Option<String>,
+        #[arg(long, value_parser = ["unrestricted", "local", "federated", "ad"])]
+        authentication_policy: Option<String>,
+        #[arg(long)]
+        auth_provider_id: Option<uuid::Uuid>,
     },
     Delete {
         #[arg(long)]
@@ -303,6 +322,40 @@ enum TenantDomainsCommand {
 
 #[derive(Subcommand, Debug)]
 enum UsersCommand {
+    /// Preview or repair full-email usernames of Google federated accounts.
+    NormalizeGoogleUsernames {
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        domain: String,
+        #[arg(long, default_value = "11111111-1111-1111-1111-111111111111")]
+        tenant_id: uuid::Uuid,
+        #[arg(long = "email")]
+        emails: Vec<String>,
+        /// Commit all proposed renames only when there are no conflicts.
+        #[arg(long)]
+        apply: bool,
+    },
+    /// Preview or apply a trusted Google Workspace Directory JSON export.
+    ImportGoogle {
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        domain: String,
+        #[arg(long, default_value = "11111111-1111-1111-1111-111111111111")]
+        tenant_id: uuid::Uuid,
+        /// Restrict import to these emails; repeat for multiple accounts.
+        #[arg(long = "email")]
+        emails: Vec<String>,
+        /// Commit the batch; without this flag only a preview is returned.
+        #[arg(long)]
+        apply: bool,
+        /// Administratively approve newly created identities (trusts the input export).
+        #[arg(long)]
+        approve: bool,
+    },
     #[command(alias = "ls")]
     List {
         #[arg(long)]
@@ -539,6 +592,15 @@ pub(crate) struct TenantRow {
 
 #[derive(Clone, Debug, Deserialize, Serialize, Tabled)]
 pub(crate) struct TenantDomainRow {
+    #[serde(default)]
+    authentication_policy: String,
+    #[serde(default)]
+    #[tabled(display = "display_opt")]
+    auth_provider_id: Option<String>,
+    #[serde(default)]
+    mfa_policy: String,
+    #[serde(default)]
+    passkey_policy: String,
     id: String,
     tenant_id: String,
     domain: String,
@@ -679,6 +741,7 @@ async fn main() -> Result<()> {
             client,
             tenant,
             port,
+            user,
             server,
             device,
         } => {
@@ -697,6 +760,7 @@ async fn main() -> Result<()> {
                 client,
                 tenant.as_deref(),
                 *port,
+                user.as_deref(),
                 server,
                 cli.insecure.unwrap_or(false),
             )
@@ -757,11 +821,20 @@ async fn resolve_auth(_cli: &Cli) -> Result<Session> {
     Ok(session)
 }
 
+fn append_login_hints(url: &mut url::Url, tenant: Option<&str>, user: Option<&str>) {
+    for (key, value) in [("tenant", tenant), ("login_hint", user)] {
+        if let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) {
+            url.query_pairs_mut().append_pair(key, value);
+        }
+    }
+}
+
 async fn handle_login(
     base_url: &str,
     client_id: &str,
     tenant: Option<&str>,
     port: u16,
+    user: Option<&str>,
     server_name: &str,
     insecure: bool,
 ) -> Result<()> {
@@ -784,7 +857,7 @@ async fn handle_login(
     let pkce_challenge =
         PkceCodeChallenge::from_code_verifier_sha256(&PkceCodeVerifier::new(code_verifier.clone()));
 
-    let (auth_url, csrf_state, nonce) = client
+    let (mut auth_url, csrf_state, nonce) = client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
@@ -796,13 +869,8 @@ async fn handle_login(
         .add_scope(Scope::new("groups".to_string()))
         .set_pkce_challenge(pkce_challenge)
         .url();
-    let mut auth_url = auth_url.to_string();
-    if let Some(tenant) = tenant.filter(|t| !t.trim().is_empty()) {
-        let sep = if auth_url.contains('?') { '&' } else { '?' };
-        auth_url.push(sep);
-        auth_url.push_str("tenant=");
-        auth_url.push_str(&urlencoding::encode(tenant));
-    }
+    append_login_hints(&mut auth_url, tenant, user);
+    let auth_url = auth_url.to_string();
 
     let (tx, rx) = oneshot::channel::<(String, String)>();
     let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
@@ -1206,11 +1274,19 @@ async fn handle_tenants(
                 domain,
                 is_primary,
                 is_active,
+                mfa_policy,
+                passkey_policy,
+                authentication_policy,
+                auth_provider_id,
             } => {
                 let payload = serde_json::json!({
                     "domain": domain,
                     "is_primary": is_primary,
                     "is_active": is_active,
+                    "mfa_policy": mfa_policy,
+                    "passkey_policy": passkey_policy,
+                    "authentication_policy": authentication_policy,
+                    "auth_provider_id": auth_provider_id,
                 });
                 let body = http
                     .post_json(&format!("/admin/tenants/{tenant_id}/domains"), payload)
@@ -1223,14 +1299,29 @@ async fn handle_tenants(
                 domain,
                 is_primary,
                 is_active,
+                mfa_policy,
+                passkey_policy,
+                authentication_policy,
+                auth_provider_id,
             } => {
-                if domain.is_none() && is_primary.is_none() && is_active.is_none() {
+                if domain.is_none()
+                    && is_primary.is_none()
+                    && is_active.is_none()
+                    && mfa_policy.is_none()
+                    && passkey_policy.is_none()
+                    && authentication_policy.is_none()
+                    && auth_provider_id.is_none()
+                {
                     bail!("At least one field must be provided for update.");
                 }
                 let payload = serde_json::json!({
                     "domain": domain,
                     "is_primary": is_primary,
                     "is_active": is_active,
+                    "mfa_policy": mfa_policy,
+                    "passkey_policy": passkey_policy,
+                    "authentication_policy": authentication_policy,
+                    "auth_provider_id": auth_provider_id,
                 });
                 let body = http
                     .put_json(
@@ -1260,6 +1351,122 @@ async fn handle_users(
     command: UsersCommand,
 ) -> Result<()> {
     match command {
+        UsersCommand::NormalizeGoogleUsernames {
+            provider,
+            domain,
+            tenant_id,
+            emails,
+            apply,
+        } => {
+            let body = http.post_json("/admin/users/normalize-google-usernames", serde_json::json!({
+                "provider": provider, "domain": domain, "tenant_id": tenant_id, "emails": emails, "apply": apply,
+            })).await?;
+            let report: Value = serde_json::from_str(&body).context("Invalid rename report")?;
+            match output.format {
+                OutputFormat::Json => println!("{body}"),
+                OutputFormat::Table => {
+                    #[derive(Serialize, Deserialize, Tabled)]
+                    struct RenameRow {
+                        email: String,
+                        old_username: String,
+                        new_username: String,
+                        action: String,
+                        detail: String,
+                    }
+                    let rows: Vec<RenameRow> = serde_json::from_value(report["rows"].clone())
+                        .context("Invalid rename rows")?;
+                    print_table_rows_vec(output, rows)?;
+                    println!(
+                        "{}: rename {}, skip {}, conflicts {}.",
+                        if report["applied"] == true {
+                            "Applied"
+                        } else {
+                            "Preview (no changes)"
+                        },
+                        report["rename"],
+                        report["skip"],
+                        report["conflicts"]
+                    );
+                    if !apply {
+                        println!(
+                            "Use --apply to commit. Google identities and memberships are unchanged."
+                        );
+                    }
+                }
+            }
+            if apply && report["applied"] != true {
+                bail!(
+                    "Renames not applied: resolve all conflicts and run preview again. No changes committed."
+                );
+            }
+        }
+        UsersCommand::ImportGoogle {
+            file,
+            provider,
+            domain,
+            tenant_id,
+            emails,
+            apply,
+            approve,
+        } => {
+            let bytes = fs::read(&file).context("Failed to read Directory JSON export")?;
+            if bytes.len() > 1024 * 1024 {
+                bail!("Directory export exceeds 1 MiB; split it into smaller batches");
+            }
+            let users: Vec<Value> = serde_json::from_slice(&bytes)
+                .context("Expected a JSON array from export_google_workspace_users.py, not CSV")?;
+            let body = http.post_json("/admin/users/import-google", serde_json::json!({
+                "tenant_id": tenant_id, "provider": provider, "domain": domain, "users": users,
+                "emails": emails, "apply": apply, "approve": approve,
+            })).await?;
+            let report: Value = serde_json::from_str(&body).context("Invalid import report")?;
+            match output.format {
+                OutputFormat::Json => println!("{body}"),
+                OutputFormat::Table => {
+                    #[derive(Serialize, Tabled)]
+                    struct ImportRow {
+                        email: String,
+                        username: String,
+                        action: String,
+                        detail: String,
+                    }
+                    let rows: Vec<_> = report["rows"]
+                        .as_array()
+                        .context("Missing import rows")?
+                        .iter()
+                        .map(|row| ImportRow {
+                            email: row["email"].as_str().unwrap_or_default().into(),
+                            username: row["username"].as_str().unwrap_or_default().into(),
+                            action: row["action"].as_str().unwrap_or_default().into(),
+                            detail: row["detail"].as_str().unwrap_or_default().into(),
+                        })
+                        .collect();
+                    print_table_rows_vec(output, rows)?;
+                    println!(
+                        "{}: create {}, skip {}, conflicts {}. New identities: {}.",
+                        if report["applied"] == true {
+                            "Applied"
+                        } else {
+                            "Preview (no changes)"
+                        },
+                        report["create"],
+                        report["skip"],
+                        report["conflicts"],
+                        report["approval_status"].as_str().unwrap_or_default()
+                    );
+                    if !apply {
+                        println!(
+                            "Use --apply to commit. --approve explicitly approves NEW identities only."
+                        );
+                    }
+                }
+            }
+            if apply && report["applied"] != true {
+                bail!(
+                    "Import not applied: resolve all conflicts and run preview again. No changes committed."
+                );
+            }
+        }
         UsersCommand::List { page, limit } => {
             let path = append_pagination("/admin/users", page, limit);
             let body = http.get(&path).await?;
@@ -2150,4 +2357,177 @@ async fn lookup_group_id(http: &HttpClient, group_name: &str) -> Result<String> 
         .find(|g| g.name == group_name)
         .map(|g| g.id.clone())
         .ok_or_else(|| anyhow!("Group '{}' not found", group_name))
+}
+
+#[cfg(test)]
+mod login_hint_tests {
+    use super::*;
+
+    #[test]
+    fn username_repair_defaults_to_preview() {
+        let args = [
+            "simple-idm-ctl",
+            "users",
+            "normalize-google-usernames",
+            "--provider",
+            "google",
+            "--domain",
+            "example.com",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(args).unwrap().command,
+            Commands::Users {
+                command: UsersCommand::NormalizeGoogleUsernames { apply: false, .. }
+            }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(
+                args.into_iter()
+                    .chain(["--apply", "--email", "a@example.com"])
+            )
+            .unwrap()
+            .command,
+            Commands::Users {
+                command: UsersCommand::NormalizeGoogleUsernames { apply: true, .. }
+            }
+        ));
+    }
+
+    #[test]
+    fn google_import_requires_explicit_write_and_approval_flags() {
+        let args = [
+            "simple-idm-ctl",
+            "users",
+            "import-google",
+            "--file",
+            "users.json",
+            "--provider",
+            "google",
+            "--domain",
+            "example.com",
+        ];
+        let cli = Cli::try_parse_from(args).unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Users {
+                command: UsersCommand::ImportGoogle {
+                    apply: false,
+                    approve: false,
+                    ..
+                }
+            }
+        ));
+        let cli = Cli::try_parse_from(args.into_iter().chain([
+            "--apply",
+            "--approve",
+            "--email",
+            "a@example.com",
+            "--email",
+            "b@example.com",
+        ]))
+        .unwrap();
+        match cli.command {
+            Commands::Users {
+                command:
+                    UsersCommand::ImportGoogle {
+                        apply,
+                        approve,
+                        emails,
+                        ..
+                    },
+            } => {
+                assert!(apply && approve);
+                assert_eq!(emails, ["a@example.com", "b@example.com"]);
+            }
+            _ => panic!("expected import command"),
+        }
+    }
+
+    #[test]
+    fn user_hint_is_optional_and_not_a_device_flow_parameter() {
+        let base = [
+            "simple-idm-ctl",
+            "login",
+            "--url",
+            "https://sso.example.com",
+        ];
+        assert!(matches!(
+            Cli::try_parse_from(base).unwrap().command,
+            Commands::Login { user: None, .. }
+        ));
+        let cli =
+            Cli::try_parse_from(base.into_iter().chain(["--user", "mares@example.com"])).unwrap();
+        assert!(
+            matches!(cli.command, Commands::Login { user: Some(user), .. } if user == "mares@example.com")
+        );
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--user",
+                "mares@example.com",
+                "--device"
+            ]))
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn login_hint_is_encoded_without_changing_state_or_pkce() {
+        let mut url = url::Url::parse(
+            "https://sso.example.com/oauth2/authorize?state=abc&code_challenge=xyz",
+        )
+        .unwrap();
+        append_login_hints(&mut url, Some("default"), Some(" mares+test@example.com "));
+        let params: HashMap<String, String> = url.query_pairs().into_owned().collect();
+        assert_eq!(params["login_hint"], "mares+test@example.com");
+        assert_eq!(params["tenant"], "default");
+        assert_eq!(params["state"], "abc");
+        assert_eq!(params["code_challenge"], "xyz");
+        let original = url.clone();
+        append_login_hints(&mut url, None, Some("  "));
+        assert_eq!(url, original);
+    }
+
+    #[test]
+    fn domain_security_flags_validate_and_allow_inheritance() {
+        let base = [
+            "simple-idm-ctl",
+            "tenants",
+            "domains",
+            "update",
+            "--tenant-id",
+            "tenant",
+            "--domain-id",
+            "domain",
+        ];
+        let cli = Cli::try_parse_from(base.into_iter().chain([
+            "--mfa-policy",
+            "required",
+            "--passkey-policy",
+            "allowed",
+        ]))
+        .unwrap();
+        assert!(matches!(cli.command, Commands::Tenants {
+            command: TenantsCommand::Domains {
+                command: TenantDomainsCommand::Update { mfa_policy: Some(mfa), passkey_policy: Some(passkeys), .. }
+            }
+        } if mfa == "required" && passkeys == "allowed"));
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--mfa-policy", "inherit"])).is_ok());
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--passkey-policy", "required"])).is_err()
+        );
+        let provider = uuid::Uuid::new_v4().to_string();
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain([
+                "--authentication-policy",
+                "federated",
+                "--auth-provider-id",
+                &provider,
+            ]))
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--authentication-policy", "mixed"]))
+                .is_err()
+        );
+    }
 }

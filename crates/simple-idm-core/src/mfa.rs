@@ -156,11 +156,11 @@ pub async fn consume_login_transaction(pool: &PgPool, token: &str) -> Result<Mfa
     row.ok_or_else(|| anyhow!("MFA transaction is invalid or expired"))
 }
 
-pub async fn tenant_mfa_policy(pool: &PgPool, tenant_id: Uuid) -> Result<MfaPolicy> {
+pub async fn user_mfa_policy(pool: &PgPool, user_id: Uuid) -> Result<MfaPolicy> {
     let value = sqlx::query_scalar::<_, String>(
-        "SELECT mfa_policy FROM tenants WHERE id = $1 AND is_active = true",
+        "SELECT mfa_policy FROM effective_user_auth_policies WHERE user_id = $1",
     )
-    .bind(tenant_id)
+    .bind(user_id)
     .fetch_one(pool)
     .await?;
     Ok(MfaPolicy::parse(&value))

@@ -3,6 +3,16 @@ set shell := ["zsh", "-cu"]
 release_target_linux := "x86_64-unknown-linux-musl"
 release_target_windows := "x86_64-pc-windows-msvc"
 
+# Install all native binaries, replacing previous local versions.
+install:
+    #!/usr/bin/env zsh
+    set -eu
+    for crate in simple-idm-server simple-idm-ctl simple-idm-oauth2-proxy \
+        simple-idm-oidc-metadata-proxy simple-idm-token-proxy simple-idm-ad-proxy \
+        simple-idm-ssh-login simple-idm-ssh-signer; do
+        cargo install --path "crates/$crate" --root "$HOME/.cargo" --target-dir target --force
+    done
+
 release-linux:
     cargo zigbuild --release --workspace --target {{ release_target_linux }}
 

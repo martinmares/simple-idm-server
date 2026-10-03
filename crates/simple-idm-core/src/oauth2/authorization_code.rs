@@ -176,7 +176,7 @@ pub struct TokenResponseWithRefresh {
 }
 
 /// Helper: Get valid auth session from cookie
-pub(super) async fn get_auth_session_from_cookie(
+pub(crate) async fn get_auth_session_from_cookie(
     db_pool: &sqlx::PgPool,
     headers: &HeaderMap,
 ) -> Option<AuthenticationSession> {
@@ -204,27 +204,18 @@ pub(super) async fn get_auth_session_from_cookie(
     .await
     .ok()??;
 
-    // A password-only session must never bypass a tenant policy that was
-    // changed to require MFA after the session was issued.
-    let policy = sqlx::query_as::<_, (String, String)>(
-        r#"
-        SELECT u.auth_mode, t.mfa_policy
-        FROM users u
-        JOIN tenants t ON t.id = u.tenant_id
-        WHERE u.id = $1 AND u.is_active = true AND u.deleted_at IS NULL AND t.is_active = true
-        "#,
+    // Re-evaluate tenant/domain policy after settings or the user's email change.
+    let auth_mode = sqlx::query_scalar::<_, String>(
+        "SELECT auth_mode FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
     )
     .bind(session.user_id)
     .fetch_optional(db_pool)
     .await
     .ok()??;
-    if policy.0.eq_ignore_ascii_case("local")
-        && MfaPolicy::parse(&policy.1) == MfaPolicy::Required
-        && !session
-            .amr
-            .iter()
-            .any(|method| method == "otp" || method == "recovery" || method == "webauthn")
-    {
+    let policy = crate::auth_policy::for_user(db_pool, session.user_id)
+        .await
+        .ok()?;
+    if auth_mode.eq_ignore_ascii_case("local") && !policy.accepts_session(&session.amr) {
         return None;
     }
 
@@ -376,7 +367,48 @@ pub async fn handle_authorize(
         return Redirect::to(&redirect_url).into_response();
     }
 
-    // No valid session - show login form
+    // A hint selects a provider only; the callback must still verify the linked identity.
+    if let Some(hint) = params
+        .get("login_hint")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        let provider = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT ip.slug FROM users u
+            JOIN oauth_clients oc ON oc.tenant_id = u.tenant_id
+            JOIN identity_providers ip ON ip.id = u.auth_provider_id AND ip.tenant_id = u.tenant_id
+            WHERE oc.id = $1 AND u.is_active = true AND u.deleted_at IS NULL
+              AND u.auth_mode = 'federated'
+              AND (LOWER(u.email) = LOWER($2) OR ($3 AND u.username = $2))
+              AND ip.provider_type IN ('google', 'oidc') AND ip.is_active = true AND ip.deleted_at IS NULL
+              AND EXISTS (
+                  SELECT 1 FROM user_identities ui WHERE ui.user_id = u.id
+                    AND ui.tenant_id = u.tenant_id AND ui.idp_id = ip.id AND ui.issuer = ip.issuer
+                    AND ui.approval_status = 'approved' AND ui.deleted_at IS NULL
+              )
+            LIMIT 1
+            "#,
+        ).bind(client.id).bind(hint).bind(state.allow_username_login)
+            .fetch_optional(&state.db_pool).await;
+        match provider {
+            Ok(Some(slug)) => {
+                return Redirect::to(&templates::federated_login_url(&params, &slug))
+                    .into_response();
+            }
+            Ok(None) => {}
+            Err(err) => {
+                tracing::error!("Failed to resolve sign-in hint: {err}");
+                return Html(templates::error_page(
+                    "server_error",
+                    "Failed to prepare sign-in. Please try again.",
+                ))
+                .into_response();
+            }
+        }
+    }
+
+    // No valid session or linked provider - show login form.
     let csrf_token: String = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
         .take(32)
@@ -387,7 +419,7 @@ pub async fn handle_authorize(
     if state.passkeys.is_some() {
         params.insert("passkeys_enabled".to_string(), "true".to_string());
     }
-    let html = templates::login_page(&params, None);
+    let html = render_login_page(state.as_ref(), &params, None).await;
 
     let secure =
         state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
@@ -562,6 +594,7 @@ async fn resolve_identity_provider_for_client(
         JOIN oauth_clients oc ON oc.tenant_id = ip.tenant_id
         WHERE oc.id = $1
           AND ip.slug = $2
+          AND ip.provider_type IN ('google', 'oidc')
           AND ip.is_active = true
           AND ip.deleted_at IS NULL
         LIMIT 1
@@ -762,6 +795,13 @@ pub async fn handle_federated_start(
         .append_pair("redirect_uri", &callback)
         .append_pair("scope", &scope)
         .append_pair("state", &state_token);
+    if let Some(hint) = params
+        .get("login_hint")
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+    {
+        auth_url.query_pairs_mut().append_pair("login_hint", hint);
+    }
     if let Some(domain) = &idp.hd_domain {
         auth_url.query_pairs_mut().append_pair("hd", domain);
     }
@@ -984,7 +1024,10 @@ pub async fn handle_federated_callback(
         SELECT u.*
         FROM user_identities ui
         JOIN users u ON u.id = ui.user_id
+        JOIN effective_user_auth_policies policy ON policy.user_id = u.id
         WHERE ui.tenant_id = $1
+          AND u.auth_mode = 'federated'
+          AND u.auth_provider_id = ui.idp_id
           AND ui.idp_id = $2
           AND ui.subject = $3
           AND COALESCE(ui.approval_status, 'approved') = 'approved'
@@ -1142,7 +1185,7 @@ pub async fn handle_login(
             .await
             .unwrap_or(false)
     {
-        return rate_limited_login_response(&req, state.passkeys.is_some());
+        return rate_limited_login_response(state.as_ref(), &req).await;
     }
 
     let req_csrf = req.csrf_token.clone().unwrap_or_default();
@@ -1168,7 +1211,7 @@ pub async fn handle_login(
             })),
         )
         .await;
-        return invalid_login_response(&req, state.passkeys.is_some());
+        return invalid_login_response(state.as_ref(), &req).await;
     }
 
     let tenant_id = if req.username.contains('@') {
@@ -1200,7 +1243,7 @@ pub async fn handle_login(
             })),
         )
         .await;
-        return invalid_login_response(&req, state.passkeys.is_some());
+        return invalid_login_response(state.as_ref(), &req).await;
     }
 
     // Ověř uživatele
@@ -1243,7 +1286,7 @@ pub async fn handle_login(
                 })),
             )
             .await;
-            return invalid_login_response(&req, state.passkeys.is_some());
+            return invalid_login_response(state.as_ref(), &req).await;
         }
         Err(_) => {
             let html =
@@ -1273,7 +1316,7 @@ pub async fn handle_login(
             })),
         )
         .await;
-        return invalid_login_response(&req, state.passkeys.is_some());
+        return invalid_login_response(state.as_ref(), &req).await;
     }
 
     // Ověř heslo (lokálně nebo delegovaně přes AD/LDAP)
@@ -1298,7 +1341,7 @@ pub async fn handle_login(
             })),
         )
         .await;
-        return invalid_login_response(&req, state.passkeys.is_some());
+        return invalid_login_response(state.as_ref(), &req).await;
     }
 
     // Ověř klienta
@@ -1355,7 +1398,7 @@ pub async fn handle_login(
     // MFA is enforced only for identities managed locally by Simple IDM.
     // AD and federated identities delegate authentication policy upstream.
     if user.auth_mode.eq_ignore_ascii_case("local") {
-        let policy = match mfa::tenant_mfa_policy(&state.db_pool, user.tenant_id).await {
+        let policy = match mfa::user_mfa_policy(&state.db_pool, user.id).await {
             Ok(policy) => policy,
             Err(err) => {
                 tracing::error!(user_id = %user.id, "Failed to load tenant MFA policy: {err}");
@@ -1820,8 +1863,53 @@ fn build_mfa_transaction_cookie(token: Option<&str>, secure: bool) -> String {
     cookie
 }
 
-fn invalid_login_response(req: &LoginRequest, passkeys_enabled: bool) -> Response {
+async fn render_login_page(
+    state: &OAuth2State,
+    params: &HashMap<String, String>,
+    error: Option<&str>,
+) -> String {
+    let providers = async {
+        let Some(client_id) = params.get("client_id") else {
+            return Ok::<Vec<(String, String)>, String>(Vec::new());
+        };
+        let client = resolve_oauth_client(
+            &state.db_pool,
+            client_id,
+            params.get("tenant").map(String::as_str),
+        )
+        .await
+        .map_err(|err| format!("{err:?}"))?;
+        let Some(client) = client else {
+            return Ok(Vec::new());
+        };
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT ip.slug, ip.provider_type FROM identity_providers ip \
+             JOIN oauth_clients oc ON oc.tenant_id = ip.tenant_id WHERE oc.id = $1 \
+             AND ip.provider_type IN ('google', 'oidc') AND ip.is_active = true \
+             AND ip.deleted_at IS NULL ORDER BY ip.slug",
+        )
+        .bind(client.id)
+        .fetch_all(&state.db_pool)
+        .await
+        .map_err(|err| err.to_string())
+    }
+    .await;
+    match providers {
+        Ok(providers) => templates::login_page_with_providers(params, error, &providers),
+        Err(err) => {
+            tracing::error!("Failed to load sign-in identity providers: {err}");
+            templates::error_page(
+                "server_error",
+                "Failed to load sign-in providers. Please try again.",
+            )
+        }
+    }
+}
+
+async fn invalid_login_response(state: &OAuth2State, req: &LoginRequest) -> Response {
+    let passkeys_enabled = state.passkeys.is_some();
     let mut params = HashMap::new();
+    params.insert("login_hint".to_string(), req.username.clone());
     if let Some(csrf_token) = &req.csrf_token {
         params.insert("csrf_token".to_string(), csrf_token.clone());
     }
@@ -1848,12 +1936,14 @@ fn invalid_login_response(req: &LoginRequest, passkeys_enabled: bool) -> Respons
     if let Some(method) = &req.code_challenge_method {
         params.insert("code_challenge_method".to_string(), method.clone());
     }
-    let html = templates::login_page(&params, Some("Invalid email or password"));
+    let html = render_login_page(state, &params, Some("Invalid email or password")).await;
     Html(html).into_response()
 }
 
-fn rate_limited_login_response(req: &LoginRequest, passkeys_enabled: bool) -> Response {
+async fn rate_limited_login_response(state: &OAuth2State, req: &LoginRequest) -> Response {
+    let passkeys_enabled = state.passkeys.is_some();
     let mut params = HashMap::new();
+    params.insert("login_hint".to_string(), req.username.clone());
     if let Some(csrf_token) = &req.csrf_token {
         params.insert("csrf_token".to_string(), csrf_token.clone());
     }
@@ -1880,10 +1970,12 @@ fn rate_limited_login_response(req: &LoginRequest, passkeys_enabled: bool) -> Re
     if let Some(method) = &req.code_challenge_method {
         params.insert("code_challenge_method".to_string(), method.clone());
     }
-    let html = templates::login_page(
+    let html = render_login_page(
+        state,
         &params,
         Some("Too many failed attempts. Please wait and try again."),
-    );
+    )
+    .await;
     (StatusCode::TOO_MANY_REQUESTS, Html(html)).into_response()
 }
 
@@ -1995,6 +2087,12 @@ pub(super) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 async fn verify_user_password(state: &OAuth2State, user: &User, password: &str) -> bool {
+    if crate::auth_policy::for_user(&state.db_pool, user.id)
+        .await
+        .is_err()
+    {
+        return false;
+    }
     if user.password_disabled || user.auth_mode.eq_ignore_ascii_case("federated") {
         return false;
     }
@@ -2423,6 +2521,20 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
             }
         };
 
+    if !crate::auth_policy::accepts_authentication(&state.db_pool, &user, &auth_code.amr)
+        .await
+        .unwrap_or(false)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_grant".into(),
+                error_description: "Account or authentication policy changed; sign in again".into(),
+            }),
+        )
+            .into_response();
+    }
+
     let user_group_names = match client.groups_claim_mode.as_str() {
         "none" => vec![],
         "direct" => {
@@ -2788,6 +2900,30 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
                 .into_response();
             }
         };
+
+    let policy = match crate::auth_policy::for_user(&state.db_pool, user.id).await {
+        Ok(policy) => policy,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_grant".into(),
+                    error_description: "Account is unavailable; sign in again".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    if user.auth_mode.eq_ignore_ascii_case("local") && !policy.accepts_session(&refresh_token.amr) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_grant".into(),
+                error_description: "Authentication policy changed; sign in again".into(),
+            }),
+        )
+            .into_response();
+    }
 
     let user_group_names = match client.groups_claim_mode.as_str() {
         "none" => vec![],
