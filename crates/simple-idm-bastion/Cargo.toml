@@ -1,8 +1,12 @@
 [package]
 name = "simple-idm-bastion"
-version = "0.2.2"
+version.workspace = true
 edition = "2024"
 license.workspace = true
+
+[[bin]]
+name = "simple-idm-bastion"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

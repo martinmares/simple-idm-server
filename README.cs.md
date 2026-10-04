@@ -1,5 +1,9 @@
 # Simple IDM
 
+Všech 13 crates sdílí jednu verzi přes `version.workspace = true`.
+Další vydání připravíš pomocí `just release-version 0.12.2`;
+[postup vydávání](docs/RELEASING.md) popisuje GitHub i GitLab pipeline.
+
 Simple IDM je OAuth2/OIDC identity stack napsaný v Rustu. Cíl projektu je provozovat vlastní SSO, řídit groups/claims efektivněji než běžné cloudové IdP a přitom podporovat legacy aplikace, SSH certifikáty i delegované ověření přes Google/OIDC nebo AD/LDAP.
 
 Export uživatelů z Google Workspace a následný CLI import s náhledem popisuje

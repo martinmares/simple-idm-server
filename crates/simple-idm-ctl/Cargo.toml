@@ -1,6 +1,6 @@
 [package]
 name = "simple-idm-ctl"
-version = "0.11.0"
+version.workspace = true
 edition = "2024"
 license.workspace = true
 

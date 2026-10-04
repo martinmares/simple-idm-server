@@ -1,6 +1,6 @@
 [package]
 name = "simple-idm-common"
-version = "0.10.0"
+version.workspace = true
 edition = "2024"
 license.workspace = true
 

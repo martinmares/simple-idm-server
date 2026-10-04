@@ -1,6 +1,6 @@
 [package]
 name = "simple-idm-core"
-version = "0.12.0"
+version.workspace = true
 edition = "2024"
 license.workspace = true
 authors = ["Martin Mareš <martin.mares@seznam.cz>"]
@@ -75,8 +75,8 @@ simple-idm-common = { path = "../simple-idm-common" }
 simple-idm-ad-auth = { path = "../simple-idm-ad-auth" }
 simple-idm-ldap-sync = { path = "../simple-idm-ldap-sync" }
 
-[target.'cfg(all(target_os = "linux", target_env = "musl"))'.dependencies]
-# webauthn-rs uses OpenSSL; cross-compiling from macOS needs a Linux musl build.
+[target.'cfg(any(all(target_os = "linux", target_env = "musl"), target_os = "macos", target_env = "msvc"))'.dependencies]
+# Statically link OpenSSL into portable release binaries on MUSL, macOS and MSVC.
 openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]

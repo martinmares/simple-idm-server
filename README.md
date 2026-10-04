@@ -1,5 +1,9 @@
 # Simple IDM
 
+All 13 crates share one version through `version.workspace = true`.
+Use `just release-version 0.12.2` for the next release; see the
+[release guide](docs/RELEASING.md) for GitHub and GitLab pipelines.
+
 For Linux installation with a dedicated service user, linger, and a systemd
 user unit, see the [step-by-step Linux bootstrap guide (Czech)](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md).
 

@@ -1,111 +1,74 @@
-stages:
-  - prepare
-  - verify
-  - build
-  - release
+stages: [verify, build, release]
+
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
 
 default:
-  image: rust:1-bookworm
+  image: rust:1.99.0-bookworm
+  before_script:
+    - apt-get update && apt-get install -y --no-install-recommends python3 curl jq ca-certificates cmake clang lld pkg-config libssl-dev perl make
 
 variables:
-  CARGO_TERM_COLOR: always
   GIT_DEPTH: "0"
   SQLX_OFFLINE: "true"
-  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  CARGO_TERM_COLOR: always
+  CARGO_HOME: "$CI_PROJECT_DIR/.cache/cargo"
 
 cache:
-  key: "$CI_COMMIT_REF_SLUG"
+  key:
+    prefix: "rust-1.99-$CI_JOB_NAME-$CI_COMMIT_REF_SLUG"
+    files: [Cargo.lock]
   paths:
-    - target/
-    - .cargo/
+    - .cache/cargo/registry/
+    - .cache/cargo/git/
+
+.release_rules:
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "web"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "push"'
+      changes: [VERSION]
 
 check:
   stage: verify
+  timeout: 1h
   script:
-    - cargo check --workspace
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - python3 scripts/release.py check
+    - python3 -m unittest discover -s scripts -p 'test_*.py'
+    - rustup component add rustfmt
+    - cargo fmt --all -- --check
+    - cargo test --locked --workspace --all-targets
 
-test:
-  stage: verify
-  script:
-    - cargo test --workspace --lib
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-
-release_notes:
-  stage: prepare
-  script:
-    - bash scripts/ci_release_notes.sh
-  artifacts:
-    reports:
-      dotenv: dist/release.env
-    paths:
-      - dist/release_notes.md
-      - dist/CHANGELOG.generated.md
-    expire_in: 30 days
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes:
-        - VERSION
-
-release_linux:
+build_linux:
+  extends: .release_rules
   stage: build
   timeout: 2h
-  needs:
-    - job: release_notes
-      artifacts: true
   script:
-    - apt-get update
-    - apt-get install -y --no-install-recommends musl-tools
+    - python3 scripts/release.py check --release
+    - apt-get install -y --no-install-recommends python3-venv
+    - python3 -m venv .cache/build-tools
+    - .cache/build-tools/bin/pip install cargo-zigbuild==0.21.5 ziglang==0.16.0
+    - export PATH="$CI_PROJECT_DIR/.cache/build-tools/bin:$PATH"
     - rustup target add x86_64-unknown-linux-musl
-    - RUSTFLAGS="-C target-feature=+crt-static" cargo build --release --workspace --target x86_64-unknown-linux-musl
-    - bash scripts/ci_package_binaries.sh "linux-x86_64" "target/x86_64-unknown-linux-musl/release"
+    - cargo zigbuild --locked --release --workspace --target x86_64-unknown-linux-musl
+    - python3 scripts/release.py package x86_64-unknown-linux-musl
   artifacts:
-    paths:
-      - dist/simple-idm-*-linux-x86_64.tar.gz
-    expire_in: 30 days
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes:
-        - VERSION
-
-release_windows:
-  stage: build
-  timeout: 2h
-  needs:
-    - job: release_notes
-      artifacts: true
-  script:
-    - apt-get update
-    - apt-get install -y --no-install-recommends clang lld llvm curl ca-certificates
-    - cargo install cargo-xwin --locked
-    - rustup target add x86_64-pc-windows-msvc
-    - cargo xwin build --release --workspace --target x86_64-pc-windows-msvc
-    - bash scripts/ci_package_binaries.sh "windows-x86_64" "target/x86_64-pc-windows-msvc/release" ".exe"
-  artifacts:
-    paths:
-      - dist/simple-idm-*-windows-x86_64.tar.gz
-    expire_in: 30 days
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes:
-        - VERSION
+    paths: [dist/release/]
+    expire_in: 7 days
 
 publish_release:
+  extends: .release_rules
   stage: release
+  resource_group: release
   needs:
-    - job: release_notes
-      artifacts: true
-    - job: release_linux
-      artifacts: true
-    - job: release_windows
-      artifacts: true
+    - job: check
+      artifacts: false
+    - job: build_linux
   script:
-    - bash scripts/ci_publish_release.sh
-  rules:
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-      changes:
-        - VERSION
+    - python3 scripts/release.py prepare
+    - python3 scripts/release.py checksums
+    - bash scripts/publish_gitlab.sh
+  artifacts:
+    paths: [dist/release/SHA256SUMS, dist/release_notes.md]
+    expire_in: 30 days
