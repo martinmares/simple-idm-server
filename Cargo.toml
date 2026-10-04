@@ -12,6 +12,7 @@ members = [
     "crates/simple-idm-ad-proxy",
     "crates/simple-idm-ssh-login",
     "crates/simple-idm-ssh-signer",
+    "crates/simple-idm-bastion",
 ]
 resolver = "2"
 

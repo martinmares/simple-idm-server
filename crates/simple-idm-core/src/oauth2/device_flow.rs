@@ -862,7 +862,7 @@ pub async fn handle_device_token_internal(
     };
 
     // Vytvoř custom claims
-    let custom_claims = if client.include_claim_maps {
+    let mut custom_claims = if client.include_claim_maps {
         let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
             .await
             .unwrap_or_default();
@@ -877,6 +877,9 @@ pub async fn handle_device_token_internal(
     } else {
         std::collections::HashMap::new()
     };
+
+    // Tenant is authoritative server metadata, never a group claim-map override.
+    custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));
 
     // Log JWT claims and groups for debugging
     tracing::debug!(

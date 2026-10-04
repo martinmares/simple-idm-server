@@ -16,6 +16,29 @@ pub struct TokenClaims {
     pub email: Option<String>,
     #[serde(default)]
     pub groups: Vec<String>,
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub nonce: Option<String>,
+    #[serde(default)]
+    pub tenant_id: Option<String>,
+}
+
+impl TokenClaims {
+    /// API access tokens have scopes; OIDC ID tokens are not API credentials.
+    pub fn require_access_scope(&self, required: &str) -> Result<(), String> {
+        if self.nonce.is_some()
+            || !self
+                .scope
+                .as_deref()
+                .unwrap_or_default()
+                .split_whitespace()
+                .any(|s| s == required)
+        {
+            return Err(format!("Access token with scope {required} is required"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -55,7 +78,10 @@ impl JwtValidator {
         expected_audience: String,
         allowed_algs: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let http_client = reqwest::Client::new();
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(15))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()?;
 
         // Fetch OIDC discovery
         let discovery_url = format!("{}/.well-known/openid-configuration", oidc_issuer);
@@ -119,6 +145,7 @@ impl JwtValidator {
         validation.set_issuer(&[&self.oidc_issuer]);
         validation.set_audience(&[&self.expected_audience]);
         validation.algorithms = self.allowed_algs.clone();
+        validation.leeway = 0;
 
         let token_data = decode::<TokenClaims>(token, &decoding_key, &validation)
             .map_err(|e| format!("Token validation failed: {}", e))?;
@@ -185,5 +212,93 @@ impl JwtValidator {
         let mut cache = self.jwks_cache.write().await;
         cache.clear();
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Json, Router, routing::get};
+    use rsa::{
+        RsaPrivateKey, RsaPublicKey,
+        pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
+        rand_core::OsRng,
+    };
+
+    #[tokio::test]
+    async fn api_token_verifies_signature_audience_expiry_scope_and_tenant() {
+        let dir = tempfile::tempdir().unwrap();
+        let private = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let public = RsaPublicKey::from(&private);
+        let private_path = dir.path().join("private.pem");
+        let public_path = dir.path().join("public.pem");
+        std::fs::write(
+            &private_path,
+            private.to_pkcs8_pem(LineEnding::LF).unwrap().as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            &public_path,
+            public.to_public_key_pem(LineEnding::LF).unwrap(),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let issuer = format!("http://{}", listener.local_addr().unwrap());
+        let jwt = crate::auth::jwt::JwtService::new(
+            private_path.to_str().unwrap(),
+            public_path.to_str().unwrap(),
+            issuer.clone(),
+            "test".into(),
+            vec![],
+        )
+        .unwrap();
+        let jwks = serde_json::to_value(jwt.get_jwks().unwrap()).unwrap();
+        let uri = format!("{issuer}/jwks");
+        let app = Router::new()
+            .route(
+                "/.well-known/openid-configuration",
+                get(move || async move { Json(serde_json::json!({"jwks_uri":uri})) }),
+            )
+            .route("/jwks", get(move || async move { Json(jwks) }));
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let validator = JwtValidator::new(issuer, "bastion".into(), vec!["RS256".into()])
+            .await
+            .unwrap();
+        let make_token = |aud: &str, scope: &str, ttl: i64| {
+            jwt.create_access_token(
+                uuid::Uuid::new_v4(),
+                aud.into(),
+                None,
+                Some("alice".into()),
+                Some(scope.into()),
+                vec!["infra".into()],
+                HashMap::from([("tenant_id".into(), serde_json::json!("tenant-a"))]),
+                vec![],
+                None,
+                ttl,
+            )
+            .unwrap()
+        };
+        let token = make_token("bastion", "openid bastion:connect", 3600);
+        let claims = validator.validate_token(&token).await.unwrap();
+        assert_eq!(claims.tenant_id.as_deref(), Some("tenant-a"));
+        assert!(claims.require_access_scope("bastion:connect").is_ok());
+        assert!(claims.require_access_scope("bastion:admin").is_err());
+        assert!(
+            validator
+                .validate_token(&make_token("another-client", "bastion:connect", 3600))
+                .await
+                .is_err()
+        );
+        assert!(
+            validator
+                .validate_token(&make_token("bastion", "bastion:connect", -10))
+                .await
+                .is_err()
+        );
+        let mut id_claims = claims;
+        id_claims.nonce = Some("oidc-nonce".into());
+        assert!(id_claims.require_access_scope("bastion:connect").is_err());
+        server.abort();
     }
 }

@@ -1,0 +1,17 @@
+# Install alongside config.toml in the OS configuration directory.
+# macOS: ~/Library/Application Support/simple-idm-ssh-login/bastions.toml
+# Linux: $XDG_CONFIG_HOME/simple-idm-ssh-login/bastions.toml
+#        (default ~/.config/simple-idm-ssh-login/bastions.toml)
+[bastions."bastion.datalite.cz"]
+url = "https://bastion.datalite.cz:8443"
+issuer = "https://idm.datalite.cz"
+client_id = "simple-idm-bastion"
+# tenant = "datalite"
+# Include the scopes required by your bastion's access-token policy.
+scopes = ["openid", "profile", "email", "groups", "bastion:connect"]
+
+# Local isolated fixture only (both endpoints explicitly use loopback HTTP):
+# [bastions."localhost"]
+# url = "http://127.0.0.1:9223"
+# issuer = "http://127.0.0.1:8080"
+# client_id = "simple-idm-bastion"

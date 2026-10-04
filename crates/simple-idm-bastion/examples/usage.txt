@@ -1,0 +1,55 @@
+Simple IDM Bastion V1 (Linux/macOS)
+
+Prerequisites: /usr/bin/ssh, /usr/bin/ssh-keygen; managed known_hosts
+with pinned host keys or host CA; target sshd trusting the user CA and mapping
+signer-authorized principals to permitted Linux accounts. Create private (0700)
+audit/session directories. Run HTTP only on loopback behind TLS nginx.
+Set BASTION_SERVICE_KEY to the signer's shared delegation secret (>=32 bytes).
+Use the same public OIDC client ID as expected_audience in daemon and signer.
+Tokens require the configured tenant, bastion:connect scope, and no ID-token nonce.
+
+Configuration: crates/simple-idm-bastion/examples/bastion.toml
+Guide: crates/simple-idm-bastion/README.md (also docs/BASTION.md)
+
+simple-idm-bastion examples
+simple-idm-bastion --config /etc/simple-idm-bastion/bastion.toml check-config
+simple-idm-bastion --config /etc/simple-idm-bastion/bastion.toml serve
+simple-idm-bastion --config /etc/simple-idm-bastion/bastion.toml audit --host grafana --username alice --since 1790985600000 --format json
+simple-idm-bastion --config /etc/simple-idm-bastion/bastion.toml audit --subject USER_UUID --result exited --format csv
+simple-idm-bastion --config /etc/simple-idm-bastion/bastion.toml retain
+
+Audit since/until values are UTC Unix epoch milliseconds. Retain requires the
+daemon stopped and removes only completed/reconciled records older than the
+configured retention_days. JSON and CSV exports never contain terminal data.
+
+Add a host (interactive wizard; does not restart the service):
+simple-idm-bastion --config /home/bastion/.config/simple-idm-bastion/config.toml add-host
+
+Preview using arguments:
+simple-idm-bastion --config /home/bastion/.config/simple-idm-bastion/config.toml add-host \
+  --id intel-nuc1 --name 'Intel NUC1' --address intel-nuc1.cluster \
+  --environment infra --group ssh:principal:mares --login mares --principal mares --dry-run
+
+Save using the same arguments with --yes instead of --dry-run.
+Optional --host-key-fingerprint SHA256:... scans the ED25519 key and pins it
+only if the fingerprint matches an independently verified target fingerprint.
+Obtain that fingerprint ON THE TARGET:
+  sudo ssh-keygen -E sha256 -lf /etc/ssh/ssh_host_ed25519_key.pub
+Example ssh-keygen output:
+  256 SHA256:ZudzRznJG5nvUqgei4Ef4Nn9j0VhxbW2iHrsnKo3TgY root@target (ED25519)
+Paste ONLY the second field (including SHA256:):
+  SHA256:ZudzRznJG5nvUqgei4Ef4Nn9j0VhxbW2iHrsnKo3TgY
+Use your target's fingerprint, not this example. Do not paste the whole output line.
+Without the fingerprint, known_hosts must already contain a trusted host key
+or be managed separately. Comments/layout and permissions are preserved;
+unique .bak-UUID backups are kept beside each changed file. No target sshd or
+service configuration is modified. Apply changes with a manual service restart
+and reopen the client list. Restart terminates active sessions.
+
+Configuration discovery (0.2.1): --config overrides automatic selection.
+Otherwise: OS user directory/simple-idm-bastion/{config,bastion}.toml, then
+/etc/simple-idm-bastion/{config,bastion}.toml, in that order.
+Linux: XDG_CONFIG_HOME or ~/.config; macOS: ~/Library/Application Support.
+With a user configuration installed, simply run:
+  simple-idm-bastion add-host
+Missing --yes fields are reported by Clap; interactive mode prompts for them.

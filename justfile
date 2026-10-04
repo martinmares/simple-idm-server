@@ -9,7 +9,7 @@ install:
     set -eu
     for crate in simple-idm-server simple-idm-ctl simple-idm-oauth2-proxy \
         simple-idm-oidc-metadata-proxy simple-idm-token-proxy simple-idm-ad-proxy \
-        simple-idm-ssh-login simple-idm-ssh-signer; do
+        simple-idm-ssh-login simple-idm-ssh-signer simple-idm-bastion; do
         cargo install --path "crates/$crate" --root "$HOME/.cargo" --target-dir target --force
     done
 
@@ -40,7 +40,10 @@ release-linux-ssh-login:
 release-linux-ssh-signer:
     cargo zigbuild --release --bin simple-idm-ssh-signer --target {{ release_target_linux }}
 
-release-linux-bins: release-linux-server release-linux-ctl release-linux-oauth2-proxy release-linux-oidc-metadata-proxy release-linux-token-proxy release-linux-ad-proxy release-linux-ssh-login release-linux-ssh-signer
+release-linux-bastion:
+    cargo zigbuild --release --bin simple-idm-bastion --target {{ release_target_linux }}
+
+release-linux-bins: release-linux-server release-linux-ctl release-linux-oauth2-proxy release-linux-oidc-metadata-proxy release-linux-token-proxy release-linux-ad-proxy release-linux-ssh-login release-linux-ssh-signer release-linux-bastion
 
 image-token-proxy tag="simple-idm-token-proxy:local":
     docker build -f Dockerfile-token-proxy -t {{ tag }} .

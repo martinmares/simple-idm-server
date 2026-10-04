@@ -600,6 +600,25 @@ docs/multi-oauth/
 
 ## SSH Certifikáty
 
+### Interaktivní přístup přes bastion
+
+`simple-idm-bastion` nabízí katalog povolených hostů, SSH terminál a trvalý
+audit relací. Přihlášení probíhá přes SSO; SSH klíče a certifikáty spravuje
+bastion pomocí existujícího signeru. Otevřený terminál pokračuje i po expiraci
+certifikátu.
+
+```sh
+simple-idm-ssh-login bastion.datalite.cz
+# Explicitní forma:
+simple-idm-ssh-login bastion bastion.datalite.cz
+```
+
+Konfiguraci klienta, oprávnění, nasazení a audit popisuje
+[dokumentace bastionu](docs/BASTION.cs.md). Průběžný stav realizace je v
+[implementačním plánu](docs/BASTION_IMPLEMENTATION_PLAN.cs.md).
+
+### Přímé SSH certifikáty
+
 SSH stack:
 
 - `simple-idm-ssh-login`

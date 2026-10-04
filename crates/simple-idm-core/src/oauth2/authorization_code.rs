@@ -2596,7 +2596,7 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     };
 
     // Vytvoř custom claims pomocí claim maps (pokud povoleno)
-    let custom_claims = if client.include_claim_maps {
+    let mut custom_claims = if client.include_claim_maps {
         let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
             Ok(ids) => ids,
             Err(_) => {
@@ -2627,6 +2627,9 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     } else {
         std::collections::HashMap::new()
     };
+
+    // Tenant is authoritative server metadata, never a group claim-map override.
+    custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));
 
     // Log JWT claims and groups for debugging
     tracing::debug!(
@@ -2965,7 +2968,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         }
     };
 
-    let custom_claims = if client.include_claim_maps {
+    let mut custom_claims = if client.include_claim_maps {
         let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
             .await
             .unwrap_or_default();
@@ -2980,6 +2983,9 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     } else {
         std::collections::HashMap::new()
     };
+
+    // Tenant is authoritative server metadata, never a group claim-map override.
+    custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));
 
     // Log JWT claims and groups for debugging
     tracing::debug!(

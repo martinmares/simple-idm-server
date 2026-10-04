@@ -1,0 +1,14 @@
+# Install alongside config.toml in the OS configuration directory.
+# macOS: ~/Library/Application Support/simple-idm-ssh-login/bastions.toml
+# Linux: $XDG_CONFIG_HOME/simple-idm-ssh-login/bastions.toml
+#        (default ~/.config/simple-idm-ssh-login/bastions.toml)
+# Separate from config.toml used by existing direct SSH login profiles.
+[bastions."bastion.example.com"]
+url = "https://bastion.example.com"
+issuer = "https://sso.example.com"
+# Register a public OIDC client with PKCE. Its access-token audience must
+# match expected_audience on BOTH the bastion and delegated signer.
+client_id = "simple-idm-bastion"
+# Client login hint: tenant slug. Daemon/signer instead pin the tenant UUID.
+tenant = "default"
+scopes = ["openid", "profile", "email", "groups", "bastion:connect"]

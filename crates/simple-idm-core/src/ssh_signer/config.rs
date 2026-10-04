@@ -70,6 +70,23 @@ pub struct SshSignerConfig {
 
     #[serde(default)]
     pub permit_user_rc: bool,
+
+    /// Enables delegated signing for the bastion access-token audience.
+    pub bastion: Option<BastionSigningConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BastionSigningConfig {
+    pub expected_audience: String,
+    pub tenant_id: String,
+    /// Name of an environment variable containing the bastion service secret.
+    pub service_key_env: String,
+    #[serde(default = "default_bastion_scope")]
+    pub required_scope: String,
+}
+
+fn default_bastion_scope() -> String {
+    "bastion:connect".into()
 }
 
 fn default_listen_addr() -> String {
@@ -129,6 +146,7 @@ impl Default for SshSignerConfig {
             permit_agent_forwarding: false,
             permit_x11_forwarding: false,
             permit_user_rc: false,
+            bastion: None,
         }
     }
 }

@@ -1,0 +1,35 @@
+[Unit]
+Description=Simple IDM Bastion V1
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=simple-idm-bastion
+Group=simple-idm-bastion
+EnvironmentFile=/etc/simple-idm-bastion/bastion.env
+ExecStart=/usr/local/bin/simple-idm-bastion --config /etc/simple-idm-bastion/config.toml serve
+WorkingDirectory=/var/lib/simple-idm-bastion
+StateDirectory=simple-idm-bastion
+StateDirectoryMode=0700
+RuntimeDirectory=simple-idm-bastion
+RuntimeDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=3
+KillMode=control-group
+TimeoutStopSec=30
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+# A real PTY is required by the outbound OpenSSH process.
+PrivateDevices=false
+ReadWritePaths=/var/lib/simple-idm-bastion /run/simple-idm-bastion
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+CapabilityBoundingSet=
+LockPersonality=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

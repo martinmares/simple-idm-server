@@ -662,6 +662,25 @@ docs/multi-oauth/
 
 ## SSH Certificates
 
+### Interactive infrastructure access through a bastion
+
+`simple-idm-bastion` provides an SSO-authenticated host catalog, an interactive
+SSH terminal and durable session auditing. The client manages no target SSH
+keys or certificates: the bastion obtains a per-session certificate from the
+existing signer. An established terminal remains open after certificate expiry.
+
+```sh
+simple-idm-ssh-login bastion.datalite.cz
+# Explicit form:
+simple-idm-ssh-login bastion bastion.datalite.cz
+```
+
+See [Bastion deployment and usage](docs/BASTION.md) for client profiles,
+OIDC scopes, signer delegation, host authorization, nginx and audit exports.
+Implementation status is tracked in the [implementation plan](docs/BASTION_IMPLEMENTATION_PLAN.cs.md).
+
+### Direct SSH certificates
+
 The SSH stack consists of:
 
 - `simple-idm-ssh-login`

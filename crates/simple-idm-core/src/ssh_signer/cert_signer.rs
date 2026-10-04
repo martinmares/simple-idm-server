@@ -49,6 +49,28 @@ impl CertSigner {
     }
 
     pub fn sign_certificate(&self, req: SignRequest) -> Result<SignedCert, String> {
+        self.sign_with_identity(req, &self.cert_key_id, false)
+    }
+
+    pub fn sign_bastion_certificate(
+        &self,
+        req: SignRequest,
+        session_id: &str,
+    ) -> Result<SignedCert, String> {
+        let session_id = uuid::Uuid::parse_str(session_id).map_err(|_| "Invalid session ID")?;
+        self.sign_with_identity(
+            req,
+            &format!("{}:bastion:{}", self.cert_key_id, session_id),
+            true,
+        )
+    }
+
+    fn sign_with_identity(
+        &self,
+        req: SignRequest,
+        identity: &str,
+        bastion: bool,
+    ) -> Result<SignedCert, String> {
         // Validate public key format
         self.validate_public_key(&req.public_key)?;
 
@@ -57,6 +79,9 @@ impl CertSigner {
             .ttl_seconds
             .unwrap_or(self.default_ttl_seconds)
             .min(self.max_ttl_seconds);
+        if ttl == 0 || req.principals.is_empty() {
+            return Err("Nonzero TTL and principals required".into());
+        }
 
         // Calculate validity period
         let now = std::time::SystemTime::now()
@@ -79,7 +104,7 @@ impl CertSigner {
         let principals_csv = req.principals.join(",");
 
         // Build validity string
-        let validity = format!("+{}s", ttl);
+        let validity = format!("-{}s:+{}s", self.clock_skew_seconds, ttl);
 
         // Call ssh-keygen
         tracing::debug!(
@@ -94,17 +119,22 @@ impl CertSigner {
             .as_micros()
             .to_string();
 
-        let output = Command::new("ssh-keygen")
+        let mut command = Command::new("ssh-keygen");
+        command
             .arg("-s")
             .arg(&self.ca_private_key_path)
             .arg("-I")
-            .arg(&self.cert_key_id)
+            .arg(identity)
             .arg("-n")
             .arg(&principals_csv)
             .arg("-V")
             .arg(&validity)
             .arg("-z")
-            .arg(&serial)
+            .arg(&serial);
+        if bastion {
+            command.args(["-O", "clear", "-O", "permit-pty"]);
+        }
+        let output = command
             .arg(&pubkey_path)
             .output()
             .map_err(|e| format!("Failed to execute ssh-keygen: {}", e))?;
@@ -165,6 +195,49 @@ impl CertSigner {
 mod tests {
     use super::*;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn bastion_certificate_is_correlated_and_only_permits_pty() {
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca");
+        let user = dir.path().join("user");
+        for path in [&ca, &user] {
+            assert!(
+                Command::new("ssh-keygen")
+                    .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let signer = CertSigner::new(ca, "test-ca".into(), 3600, 3600, 30).unwrap();
+        let session = uuid::Uuid::new_v4().to_string();
+        let cert = signer
+            .sign_bastion_certificate(
+                SignRequest {
+                    public_key: fs::read_to_string(user.with_extension("pub")).unwrap(),
+                    principals: vec!["alice".into()],
+                    ttl_seconds: Some(3600),
+                },
+                &session,
+            )
+            .unwrap();
+        let path = dir.path().join("cert.pub");
+        fs::write(&path, cert.certificate).unwrap();
+        let inspect = Command::new("ssh-keygen")
+            .args(["-L", "-f"])
+            .arg(path)
+            .output()
+            .unwrap();
+        assert!(inspect.status.success());
+        let text = String::from_utf8(inspect.stdout).unwrap();
+        assert!(text.contains(&format!("test-ca:bastion:{session}")));
+        assert!(text.contains("permit-pty"));
+        assert!(!text.contains("permit-port-forwarding"));
+        assert!(!text.contains("permit-agent-forwarding"));
+        assert!(!text.contains("permit-X11-forwarding"));
+    }
 
     #[test]
     fn test_validate_public_key_valid() {

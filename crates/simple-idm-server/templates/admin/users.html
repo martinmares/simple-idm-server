@@ -100,6 +100,7 @@
       <tr>
         <td>
           <div>{{ r.username }}</div>
+          <div class="small text-secondary mt-1">User UUID: <code>{{ r.id }}</code></div>
           <div class="small text-secondary mt-1">auth: {{ r.auth_mode }}</div>
           {% if r.auth_mode == "local" %}
           <div class="small mt-1">
@@ -495,6 +496,10 @@
       <form method="post" action="/admin/ui/users/{{ r.id }}/update" autocomplete="off">
         <div class="modal-body">
             <div class="row g-3">
+              <div class="col-md-12">
+                <label class="form-label" for="user-uuid-{{ r.id }}">User UUID</label>
+                <input id="user-uuid-{{ r.id }}" class="form-control font-monospace" value="{{ r.id }}" readonly>
+              </div>
               <div class="col-md-12">
                 <label class="form-label">Email</label>
                 <input class="form-control" type="email" name="email" value="{{ r.email }}" required>

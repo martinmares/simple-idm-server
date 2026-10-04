@@ -1,0 +1,46 @@
+# simple-idm-bastion V1: loopback HTTP behind an HTTPS/WSS reverse proxy.
+bind = "127.0.0.1:9230"
+bastion_id = "bastion-prod-1"
+# Replace with the actual immutable tenant UUID (not its slug).
+tenant_id = "11111111-1111-4111-8111-111111111111"
+issuer = "https://sso.example.com"
+expected_audience = "simple-idm-bastion"
+# Full delegated endpoint, not the signer's base URL.
+signer_url = "https://ssh-signer.example.com/ssh/sign/bastion"
+bastion_key_env = "BASTION_SERVICE_KEY"
+known_hosts = "/etc/simple-idm-bastion/known_hosts"
+audit_db = "/var/lib/simple-idm-bastion/audit.db"
+session_dir = "/run/simple-idm-bastion/sessions"
+ttl_seconds = 3600
+retention_days = 90
+max_sessions = 64
+# Only the local nginx is allowed to supply client IP headers.
+trusted_proxies = ["127.0.0.1"]
+
+[[hosts]]
+id = "grafana"
+name = "Grafana"
+address = "grafana.internal.example.com"
+port = 22
+environment = "production"
+description = "Monitoring host"
+allowed_groups = ["infra-admins"]
+# The daemon validates the verified preferred_username before substitution.
+logins = ["{username}"]
+# Optional narrowing of signer-derived principals; never grants a new principal.
+# principals = ["role:infra-admins"]
+# Requires allow_ssh_role_principals = true on the signer and the verified IDM
+# group ssh:role:infra-admins (in addition to infra-admins for catalog access).
+# Authorize role:infra-admins in each target account's AuthorizedPrincipalsFile.
+
+[[hosts]]
+id = "postgres"
+name = "PostgreSQL"
+address = "postgres.internal.example.com"
+port = 22
+environment = "production"
+description = "Shared database operations account; audit retains the IDM identity"
+allowed_groups = ["database-admins"]
+logins = ["postgres"]
+# User needs signer-authorized ssh:principal:postgres, or a role principal
+# explicitly mapped to postgres by the target AuthorizedPrincipalsFile.

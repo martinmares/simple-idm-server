@@ -1,0 +1,28 @@
+bind = "127.0.0.1:8095"
+bastion_id = "bastion-1"
+tenant_id = "tenant-1"
+issuer = "https://idm.example.com"
+expected_audience = "ssh-login"
+# Exact delegation endpoint; same public client ID audience in signer.
+signer_url = "https://signer.example.com/ssh/sign/bastion"
+bastion_key_env = "BASTION_SERVICE_KEY"
+known_hosts = "/etc/simple-idm-bastion/known_hosts"
+audit_db = "/var/lib/simple-idm-bastion/audit.sqlite"
+session_dir = "/var/lib/simple-idm-bastion/sessions"
+ttl_seconds = 3600
+retention_days = 90
+max_sessions = 64
+# Only these peers may supply a single X-Real-IP; X-Forwarded-For is ignored.
+trusted_proxies = ["127.0.0.1", "::1"]
+
+[[hosts]]
+id = "grafana"
+name = "Grafana"
+address = "192.168.42.165"
+port = 22
+environment = "production"
+description = "Grafana operations"
+allowed_groups = ["infra-admins"]
+logins = ["{username}", "postgres"]
+# Optional narrowing of the signer's group-derived principals, not login names.
+principals = ["infra-admins"]

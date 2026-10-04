@@ -98,6 +98,7 @@
       </div>
       <div class="card-body">
         <div class="mb-2"><span class="text-muted">client_id:</span> <code>{{ r.client_id }}</code></div>
+        <div class="mb-2"><span class="text-muted">Client UUID:</span> <code>{{ r.id }}</code></div>
         <div class="mb-2"><span class="text-muted">redirect_uris:</span> {{ r.redirect_uris | join(", ") }}</div>
         <div class="mb-2"><span class="text-muted">grant_types:</span> {{ r.grant_types | join(", ") }}</div>
         <div class="mb-2"><span class="text-muted">scope:</span> {{ r.scope }}</div>
@@ -129,6 +130,11 @@
         <form method="post" action="/admin/ui/clients/{{ r.id }}/update">
           <div class="modal-body">
             <div class="row g-3">
+              <div class="col-md-12">
+                <label class="form-label" for="client-uuid-{{ r.id }}">Client UUID</label>
+                <input id="client-uuid-{{ r.id }}" class="form-control font-monospace" value="{{ r.id }}" readonly>
+                <div class="form-text">Internal record ID. Use client_id for OAuth login and audience configuration.</div>
+              </div>
               <div class="col-md-6">
                 <label class="form-label">client_id</label>
                 <input class="form-control" name="client_id" value="{{ r.client_id }}" required>

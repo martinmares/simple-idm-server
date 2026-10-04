@@ -6,7 +6,7 @@ use axum::{
 };
 use openidconnect::{
     AuthenticationFlow, AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce,
-    PkceCodeChallenge, RedirectUrl, Scope,
+    OAuth2TokenResponse, PkceCodeChallenge, RedirectUrl, Scope,
     core::{CoreClient, CoreProviderMetadata, CoreResponseType},
     reqwest,
 };
@@ -41,6 +41,27 @@ pub async fn browser_flow(
     client_id: &str,
     tenant: Option<&str>,
     scopes: &[String],
+) -> Result<String, String> {
+    browser_token_flow(issuer, client_id, tenant, scopes, false).await
+}
+
+/// Browser login for an API client. Validates the ID token/nonce before returning
+/// the access token; the API remains responsible for audience and scope checks.
+pub async fn browser_access_token_flow(
+    issuer: &str,
+    client_id: &str,
+    tenant: Option<&str>,
+    scopes: &[String],
+) -> Result<String, String> {
+    browser_token_flow(issuer, client_id, tenant, scopes, true).await
+}
+
+async fn browser_token_flow(
+    issuer: &str,
+    client_id: &str,
+    tenant: Option<&str>,
+    scopes: &[String],
+    access_token: bool,
 ) -> Result<String, String> {
     tracing::info!("Starting browser flow");
 
@@ -123,6 +144,9 @@ pub async fn browser_flow(
         axum::serve(listener, app).await.ok();
     });
 
+    // Abort even if this future is cancelled or authentication times out.
+    let _server_guard = CallbackServerGuard(server.abort_handle());
+
     // Open browser
     println!("\n🔐 Opening browser for authentication...");
     println!("If browser doesn't open, visit:\n{}\n", auth_url);
@@ -191,7 +215,19 @@ pub async fn browser_flow(
 
     tracing::info!("Browser flow successful: sub={:?}", claims.subject());
 
-    Ok(id_token.to_string())
+    if access_token {
+        Ok(token_response.access_token().secret().to_owned())
+    } else {
+        Ok(id_token.to_string())
+    }
+}
+
+struct CallbackServerGuard(tokio::task::AbortHandle);
+
+impl Drop for CallbackServerGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 async fn handle_callback(
@@ -238,6 +274,10 @@ async fn handle_callback(
         }
     };
 
+    if callback_state != *state.expected_state {
+        return callback_page(false, "Login", "Invalid authentication state.");
+    }
+
     // Send result back to main flow
     if let Some(tx) = state.tx.lock().await.take() {
         tracing::info!("Sending callback result to main flow");
@@ -261,4 +301,37 @@ async fn handle_callback(
         "Login",
         "✓ Login successful! You can close this window.",
     )
+}
+
+#[cfg(test)]
+mod browser_flow_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn wrong_state_does_not_consume_callback_slot() {
+        let (tx, rx) = oneshot::channel();
+        let state = CallbackState {
+            tx: Arc::new(tokio::sync::Mutex::new(Some(tx))),
+            expected_state: Arc::new("expected".into()),
+        };
+        let query = |value: &str| CallbackQuery {
+            code: Some("code".into()),
+            state: Some(value.into()),
+            error: None,
+            error_description: None,
+        };
+        let _ = handle_callback(State(state.clone()), Query(query("wrong"))).await;
+        assert!(state.tx.lock().await.is_some());
+        let _ = handle_callback(State(state.clone()), Query(query("expected"))).await;
+        assert_eq!(rx.await.unwrap().state, "expected");
+        assert!(state.tx.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn abort_guard_cancels_callback_server() {
+        let task = tokio::spawn(std::future::pending::<()>());
+        let guard = CallbackServerGuard(task.abort_handle());
+        drop(guard);
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
 }

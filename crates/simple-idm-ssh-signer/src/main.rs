@@ -6,7 +6,7 @@ use clap::Parser;
 use simple_idm_core::ssh_signer::{
     SshSignerConfig,
     cert_signer::CertSigner,
-    handlers::{AppState, handle_sign},
+    handlers::{AppState, BastionSigningState, handle_bastion_sign, handle_sign},
     jwt_validator::JwtValidator,
     principal_mapper::PrincipalMapper,
 };
@@ -130,16 +130,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing::info!("Certificate signer initialized");
 
     // Build app state
+    let bastion = if let Some(b) = &config.bastion {
+        if b.expected_audience.trim().is_empty()
+            || b.tenant_id.trim().is_empty()
+            || b.required_scope.trim().is_empty()
+        {
+            return Err("Bastion audience, tenant_id and scope must be configured".into());
+        }
+        let key = std::env::var(&b.service_key_env)
+            .map_err(|_| "Bastion service secret environment variable is missing")?;
+        if key.len() < 32 {
+            return Err("Bastion service secret must contain at least 32 bytes".into());
+        }
+        Some(BastionSigningState {
+            jwt_validator: Arc::new(
+                JwtValidator::new(
+                    config.oidc_issuer.clone(),
+                    b.expected_audience.clone(),
+                    config.allowed_algs.clone(),
+                )
+                .await?,
+            ),
+            service_key: key,
+            required_scope: b.required_scope.clone(),
+            tenant_id: b.tenant_id.clone(),
+        })
+    } else {
+        None
+    };
     let app_state = Arc::new(AppState {
         jwt_validator,
         principal_mapper,
         cert_signer,
+        bastion,
     });
 
     // Build router
     let app = Router::new()
         .route("/healthz", get(healthz))
         .route("/ssh/sign", post(handle_sign))
+        .route("/ssh/sign/bastion", post(handle_bastion_sign))
         .with_state(app_state);
 
     // Start server

@@ -1,4 +1,7 @@
-use clap::{Parser, Subcommand};
+mod bastion;
+mod protocol;
+
+use clap::{CommandFactory, Parser, Subcommand};
 use simple_idm_core::ssh_login::{SshLoginConfig, commands};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -47,6 +50,19 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Print offline usage examples and a bastions.toml sample
+    Examples,
+
+    /// Open the bastion host picker (configured in bastions.toml)
+    #[command(
+        after_long_help = "Both forms are supported:\n  simple-idm-ssh-login <hostname>\n  simple-idm-ssh-login bastion <hostname>\n\nProfiles are read from bastions.toml alongside config.toml in the OS configuration directory."
+    )]
+    Bastion { hostname: String },
+
+    /// Bastion hostname shortcut
+    #[command(external_subcommand)]
+    Hostname(Vec<String>),
+
     /// Login and obtain SSH certificate
     Login {
         /// Force browser flow
@@ -83,8 +99,16 @@ enum Commands {
     PrintSshConfig,
 }
 
+fn initialize_tls() {
+    // OIDC (reqwest 0.12) enables ring; reqwest 0.13 enables AWS-LC.
+    // WSS uses the process default, which cannot be inferred with both enabled.
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    initialize_tls();
+    bastion::install_panic_hook();
     // Initialize logging
     tracing_subscriber::registry()
         .with(
@@ -95,6 +119,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
+
+    match &cli.command {
+        Commands::Examples => {
+            print_examples();
+            return Ok(());
+        }
+        Commands::Bastion { hostname } => return bastion::run(hostname).await,
+        Commands::Hostname(args) => {
+            if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
+                let mut command = Cli::command();
+                command.build();
+                if let Some(bastion) = command.find_subcommand_mut("bastion") {
+                    bastion.print_long_help()?;
+                    println!();
+                }
+                return Ok(());
+            }
+            if args.len() != 1 {
+                return Err("Usage: simple-idm-ssh-login <hostname> (or: simple-idm-ssh-login bastion <hostname>)".into());
+            }
+            return bastion::run(&args[0]).await;
+        }
+        _ => {}
+    }
 
     // Load config
     let mut config = SshLoginConfig::load(cli.profile.as_deref())?;
@@ -132,6 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     match cli.command {
+        Commands::Examples | Commands::Bastion { .. } | Commands::Hostname(_) => unreachable!(),
         Commands::Login { browser, device } => {
             commands::login(&config, browser, device).await?;
         }
@@ -154,4 +203,130 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn print_examples() {
+    print!("{}", EXAMPLES);
+}
+
+const EXAMPLES: &str = r#"Bastion client V1 (Linux/macOS)
+
+Create bastions.toml alongside config.toml in the OS configuration directory:
+  macOS: ~/Library/Application Support/simple-idm-ssh-login/bastions.toml
+  Linux: $XDG_CONFIG_HOME/simple-idm-ssh-login/bastions.toml
+         (default ~/.config/simple-idm-ssh-login/bastions.toml)
+
+[bastions."bastion.datalite.cz"]
+url = "https://bastion.datalite.cz:8443"
+issuer = "https://idm.datalite.cz"
+client_id = "simple-idm-bastion"
+# tenant = "datalite"
+scopes = ["openid", "profile", "email", "groups", "bastion:connect"]
+
+Hostname shortcut:
+  simple-idm-ssh-login bastion.datalite.cz
+Explicit command (also works for names that collide with subcommands):
+  simple-idm-ssh-login bastion bastion.datalite.cz
+
+Start in the host list. / edits the filter; Enter applies it and returns to the list.
+Arrows select; Enter in the list connects; Esc in the filter cancels the edit.
+Ctrl-U clears the filter while editing; q quits the host list; Esc goes back/cancels.
+Multiple Linux accounts open an account picker. Ctrl-C goes to the remote
+program. Exit the shell to return to the host list.
+The dedicated public client ID is the access-token audience; configure the
+OIDC client for PKCE and dynamic-port loopback callbacks. HTTPS is required,
+except explicit localhost/loopback HTTP fixtures.
+
+Existing direct SSH certificate login is preserved and uses config.toml:
+  simple-idm-ssh-login login --browser
+  simple-idm-ssh-login ssh user@host
+  simple-idm-ssh-login status
+  simple-idm-ssh-login print-ssh-config
+  simple-idm-ssh-login logout
+
+Deployment guide: docs/BASTION.md
+Client guide: crates/simple-idm-ssh-login/README.bastion.md
+Configuration example: crates/simple-idm-ssh-login/examples/bastions.toml
+"#;
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn wss_tls_configuration_can_be_built() {
+        use tokio::io::AsyncReadExt;
+        super::initialize_tls();
+        let _config = rustls::ClientConfig::builder()
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        // Exercise tungstenite's native-root TLS path, not only HTTP/cleartext WS.
+        // A fixture closes after ClientHello: failure must be an error, not a panic.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut record_type = [0];
+            stream.read_exact(&mut record_type).await.unwrap();
+            assert_eq!(record_type[0], 22, "expected TLS handshake record");
+        });
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            tokio_tungstenite::connect_async(format!("wss://{address}/api/v1/terminal")),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        server.await.unwrap();
+    }
+    use super::*;
+
+    #[test]
+    fn bastion_and_shortcut() {
+        assert!(matches!(
+            Cli::try_parse_from(["login", "bastion", "example.org"])
+                .unwrap()
+                .command,
+            Commands::Bastion { .. }
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["login", "example.org"])
+                .unwrap()
+                .command,
+            Commands::Hostname(_)
+        ));
+        assert!(Cli::try_parse_from(["login", "bastion"]).is_err());
+    }
+
+    #[test]
+    fn examples_is_static_and_parses() {
+        assert!(matches!(
+            Cli::try_parse_from(["login", "examples"]).unwrap().command,
+            Commands::Examples
+        ));
+        for text in [
+            "bastions.toml",
+            "bastion.datalite.cz",
+            "bastion bastion.datalite.cz",
+            "login --browser",
+            "docs/BASTION.md",
+        ] {
+            assert!(EXAMPLES.contains(text));
+        }
+    }
+
+    #[test]
+    fn existing_commands_still_parse() {
+        for name in [
+            "login",
+            "ssh",
+            "status",
+            "logout",
+            "print-ssh-config",
+            "examples",
+        ] {
+            assert!(!matches!(
+                Cli::try_parse_from(["login", name]).unwrap().command,
+                Commands::Hostname(_)
+            ));
+        }
+    }
 }
