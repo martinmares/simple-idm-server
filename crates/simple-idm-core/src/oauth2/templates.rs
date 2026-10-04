@@ -432,47 +432,65 @@ pub fn password_reset_success_page() -> String {
     )
 }
 
-/// Generate device verification form page HTML.
-#[allow(dead_code)]
-pub fn device_verify_page(
-    user_code: Option<&str>,
-    error: Option<&str>,
-    success: Option<&str>,
-) -> String {
-    let error_html = error.map(|err| alert("danger", err)).unwrap_or_default();
-    let success_html = success.map(|msg| alert("success", msg)).unwrap_or_default();
-    let user_code_value = user_code.unwrap_or("");
-
-    let body = format!(
-        r#"{error_html}
-{success_html}
-<form method="POST" action="/device">
-  <div class="mb-3">
-    <label class="form-label" for="user_code">Device code</label>
-    <input class="form-control text-center font-monospace text-uppercase" type="text" id="user_code" name="user_code" value="{user_code}" required autofocus placeholder="XXXX-XXXX" pattern="[A-Z0-9]{{4}}-[A-Z0-9]{{4}}" maxlength="9">
-    <div class="form-hint">Format: XXXX-XXXX (8 characters)</div>
-  </div>
-  <div class="mb-3">
-    <label class="form-label" for="username">Email or username</label>
-    <input class="form-control" type="text" id="username" name="username" required autocomplete="username" placeholder="{placeholder}">
-  </div>
-  <div class="mb-3">
-    <label class="form-label" for="password">Password</label>
-    <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password">
-  </div>
-  <button type="submit" class="btn btn-primary w-100">Authorize device</button>
-</form>"#,
-        error_html = error_html,
-        success_html = success_html,
-        user_code = escape_html(user_code_value),
-        placeholder = escape_html(&user_placeholder())
-    );
-
+/// Device code entry is a GET; access always requires a separate explicit approval.
+pub fn device_code_page() -> String {
     render_page(
         "Device authorization",
         "Device Authorization",
         "Connect your device",
-        "Enter the code shown on your device and sign in to authorize access.",
+        "Enter the code shown on your device. You will sign in using your normal SSO account.",
+        r#"<form method="GET" action="/device">
+  <label class="form-label" for="user_code">Device code</label>
+  <input class="form-control text-center font-monospace text-uppercase mb-3" type="text" id="user_code" name="user_code" required autofocus placeholder="XXXX-XXXX" maxlength="64">
+  <button type="submit" class="btn btn-primary w-100">Continue to sign in</button>
+</form>"#,
+        &oidc_footer("Protected by OAuth 2.0 Device Flow"),
+        "",
+    )
+}
+
+pub fn device_approval_page(code: &str, client: &str, username: &str, csrf: &str) -> String {
+    let body = format!(
+        r#"<p>Signed in as <strong>{username}</strong>.</p>
+<p>Authorize <strong>{client}</strong> on the device displaying this code?</p>
+<div class="alert alert-info text-center font-monospace">{code}</div>
+<p class="text-secondary">Only approve if you started this request and the code matches your device.</p>
+<form method="POST" action="/device">
+  <input type="hidden" name="user_code" value="{code}">
+  <input type="hidden" name="csrf_token" value="{csrf}">
+  <button type="submit" class="btn btn-primary w-100">Authorize device</button>
+</form>"#,
+        code = escape_html(code),
+        client = escape_html(client),
+        username = escape_html(username),
+        csrf = escape_html(csrf)
+    );
+    render_page(
+        "Device authorization",
+        "Device Authorization",
+        "Confirm your device",
+        "Check the application, account and device code before approving.",
+        &body,
+        &oidc_footer("Protected by OAuth 2.0 Device Flow"),
+        "",
+    )
+}
+
+pub fn device_verify_page(
+    _user_code: Option<&str>,
+    error: Option<&str>,
+    success: Option<&str>,
+) -> String {
+    let body = format!(
+        "{}{}",
+        error.map(|err| alert("danger", err)).unwrap_or_default(),
+        success.map(|msg| alert("success", msg)).unwrap_or_default()
+    );
+    render_page(
+        "Device authorization",
+        "Device Authorization",
+        "Device authorization",
+        "",
         &body,
         &oidc_footer("Protected by OAuth 2.0 Device Flow"),
         "",

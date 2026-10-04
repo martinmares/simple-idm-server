@@ -175,24 +175,24 @@ impl Drop for TerminalGuard {
     }
 }
 
-pub async fn run(hostname: &str) -> Result<()> {
+pub async fn run(hostname: &str, device: bool) -> Result<()> {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};
         let mut terminate = signal(SignalKind::terminate())?;
         let mut hangup = signal(SignalKind::hangup())?;
         tokio::select! {
-            result = run_inner(hostname) => result,
+            result = run_inner(hostname, device) => result,
             _ = terminate.recv() => Ok(()),
             _ = hangup.recv() => Ok(()),
             _ = tokio::signal::ctrl_c() => Ok(()),
         }
     }
     #[cfg(not(unix))]
-    run_inner(hostname).await
+    run_inner(hostname, device).await
 }
 
-async fn run_inner(hostname: &str) -> Result<()> {
+async fn run_inner(hostname: &str, device: bool) -> Result<()> {
     if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
         return Err("Bastion requires an interactive terminal".into());
     }
@@ -212,14 +212,14 @@ async fn run_inner(hostname: &str) -> Result<()> {
         })?;
         let profile = profile_from(&content, hostname)?;
         let base = secure_url(&profile.url)?;
-        let mut token = authenticate(&profile).await?;
+        let mut token = authenticate(&profile, device).await?;
         let client = reqwest::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .timeout(Duration::from_secs(30))
             .build()?;
         let mut catalog = match load_catalog(&client, &base, &token).await {
             Err(error) if unauthorized(error.as_ref()) => {
-                token = authenticate(&profile).await?;
+                token = authenticate(&profile, device).await?;
                 load_catalog(&client, &base, &token).await?
             }
             result => result?,
@@ -285,7 +285,7 @@ async fn run_inner(hostname: &str) -> Result<()> {
                 Err(error) if unauthorized(error.as_ref()) => {
                     // Restore the local terminal before printing browser instructions.
                     drop(terminal.take());
-                    token = authenticate(&profile).await?;
+                    token = authenticate(&profile, device).await?;
                     catalog = load_catalog(&client, &base, &token).await?;
                     terminal = Some(TerminalGuard::enter()?);
                     "Authentication renewed; choose a host to reconnect".into()
@@ -297,16 +297,25 @@ async fn run_inner(hostname: &str) -> Result<()> {
     }
 }
 
-async fn authenticate(profile: &Profile) -> Result<String> {
-    Ok(
+async fn authenticate(profile: &Profile, device: bool) -> Result<String> {
+    let token = if device {
+        simple_idm_core::ssh_login::oidc_device::device_access_token_flow(
+            &profile.issuer,
+            &profile.client_id,
+            profile.tenant.as_deref(),
+            &profile.scopes,
+        )
+        .await?
+    } else {
         simple_idm_core::ssh_login::oidc_browser::browser_access_token_flow(
             &profile.issuer,
             &profile.client_id,
             profile.tenant.as_deref(),
             &profile.scopes,
         )
-        .await?,
-    )
+        .await?
+    };
+    Ok(token)
 }
 
 async fn load_catalog(client: &reqwest::Client, base: &Url, token: &str) -> Result<Catalog> {

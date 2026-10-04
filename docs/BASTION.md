@@ -42,6 +42,38 @@ catalogs remain compatible but lack this metadata. Mouse capture is disabled
 so native terminal text selection works. Screen updates follow input/resize,
 without continuous repainting.
 
+## Headless VPS login (client 0.12.0)
+
+Keep a bastions.toml profile in the OS config directory on the VPS, then run:
+
+```sh
+simple-idm-ssh-login bastion bastion.example.com --device
+simple-idm-ssh-login bastion.example.com --device
+```
+
+Open the printed URL/code on a phone or another computer and finish login/MFA
+there. No local browser or callback is started; the VPS never asks for your
+password or MFA code. Approval opens the TUI. Reauthentication after HTTP 401
+uses the same device mode. Browser mode is still the default (`--browser`);
+Clap rejects combining it with `--device`. The bastion API receives the access
+token. Existing direct SSH login keeps its ID-token contract. Tokens stay in
+memory. Device Flow honors the IDM policy rather than forcing MFA itself.
+
+The public bastion OAuth client must allow both `authorization_code` and
+`urn:ietf:params:oauth:grant-type:device_code`. Preserve existing scopes,
+including `bastion:connect`. The current admin edit form drops custom scopes;
+for the existing deployment, use a partial admin API PUT of grant_types to
+avoid changing them. Deploy IDM server **0.12.1 or newer** for shared browser authentication.
+The device link reuses a valid SSO session or offers the normal login, including
+registered Passkeys and the configured MFA challenge. Signing in does not
+approve a device: the next page shows the account, application and code and
+requires an explicit **Authorize device** confirmation. Signer and bastion
+binaries do not change. No database migration is added by this change.
+`POST /device` is now browser approval with a session and CSRF token; it no
+longer accepts username/password credentials.
+
+A terminal QR code lets you open the device link with your phone camera (SSH client 0.12.1+). The printed URL and code remain available.
+
 ## Adding hosts with the CLI (0.2.0)
 
 Run the text wizard as the configuration owner:

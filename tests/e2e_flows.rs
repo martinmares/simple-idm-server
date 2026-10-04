@@ -325,20 +325,56 @@ async fn device_authorize(client: &Client, scope: &str) -> serde_json::Value {
 }
 
 async fn device_verify(client: &Client, user_code: &str) {
-    let encoded = serde_urlencoded::to_string([
-        ("user_code", user_code),
-        ("username", TEST_USERNAME),
-        ("password", TEST_PASSWORD),
-    ])
-    .expect("Failed to encode device verify form");
-
+    fn cookie(response: &reqwest::Response, name: &str) -> String {
+        response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .map(|v| v.split(';').next().unwrap())
+            .find(|v| v.starts_with(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("Missing {name} cookie"))
+            .to_string()
+    }
+    let entry = format!("{BASE_URL}/device?user_code={user_code}");
+    let response = client.get(&entry).send().await.unwrap();
+    assert_eq!(response.status(), 200);
+    let csrf_cookie = cookie(&response, "csrf_token");
+    let csrf = csrf_cookie.strip_prefix("csrf_token=").unwrap();
     let response = client
-        .post(&format!("{}/device", BASE_URL))
-        .header("Content-Type", "application/x-www-form-urlencoded")
-        .body(encoded)
+        .post(format!("{BASE_URL}/oauth2/login"))
+        .header("Cookie", &csrf_cookie)
+        .form(&[
+            ("username", TEST_USERNAME),
+            ("password", TEST_PASSWORD),
+            ("client_id", DEVICE_CLIENT_ID),
+            (
+                "redirect_uri",
+                &format!("urn:simple-idm:device:{user_code}"),
+            ),
+            ("csrf_token", csrf),
+        ])
         .send()
         .await
-        .expect("Failed to call device verify");
+        .unwrap();
+    assert_eq!(response.status(), 303);
+    let session = cookie(&response, "auth_session");
+    let response = client
+        .get(&entry)
+        .header("Cookie", &session)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    let csrf_cookie = cookie(&response, "csrf_token");
+    let csrf = csrf_cookie.strip_prefix("csrf_token=").unwrap();
+    let response = client
+        .post(format!("{BASE_URL}/device"))
+        .header("Cookie", format!("{session}; {csrf_cookie}"))
+        .form(&[("user_code", user_code), ("csrf_token", csrf)])
+        .send()
+        .await
+        .expect("Failed to approve device");
     assert_eq!(response.status(), 200);
 }
 

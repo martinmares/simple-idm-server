@@ -1,7 +1,7 @@
 mod bastion;
 mod protocol;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{Parser, Subcommand};
 use simple_idm_core::ssh_login::{SshLoginConfig, commands};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -55,9 +55,18 @@ enum Commands {
 
     /// Open the bastion host picker (configured in bastions.toml)
     #[command(
-        after_long_help = "Both forms are supported:\n  simple-idm-ssh-login <hostname>\n  simple-idm-ssh-login bastion <hostname>\n\nProfiles are read from bastions.toml alongside config.toml in the OS configuration directory."
+        after_long_help = "Both forms are supported:\n  simple-idm-ssh-login <hostname>\n  simple-idm-ssh-login bastion <hostname>\n\nUse --device on a headless VPS: authorize the printed URL/code in a browser on another device.
+Profiles are read from bastions.toml alongside config.toml in the OS configuration directory."
     )]
-    Bastion { hostname: String },
+    Bastion {
+        hostname: String,
+        /// Authenticate on another device; print URL/code without opening a local browser.
+        #[arg(long, conflicts_with = "browser")]
+        device: bool,
+        /// Use local browser authentication (the default).
+        #[arg(long)]
+        browser: bool,
+    },
 
     /// Bastion hostname shortcut
     #[command(external_subcommand)]
@@ -125,21 +134,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             print_examples();
             return Ok(());
         }
-        Commands::Bastion { hostname } => return bastion::run(hostname).await,
+        Commands::Bastion {
+            hostname, device, ..
+        } => return bastion::run(hostname, *device).await,
         Commands::Hostname(args) => {
-            if args.len() == 2 && matches!(args[1].as_str(), "--help" | "-h") {
-                let mut command = Cli::command();
-                command.build();
-                if let Some(bastion) = command.find_subcommand_mut("bastion") {
-                    bastion.print_long_help()?;
-                    println!();
-                }
-                return Ok(());
+            // Parse the shortcut using the same Clap command, flags and help as the explicit form.
+            let shortcut = Cli::try_parse_from(
+                ["simple-idm-ssh-login", "bastion"]
+                    .into_iter()
+                    .chain(args.iter().map(String::as_str)),
+            )
+            .unwrap_or_else(|error| error.exit());
+            if let Commands::Bastion {
+                hostname, device, ..
+            } = shortcut.command
+            {
+                return bastion::run(&hostname, device).await;
             }
-            if args.len() != 1 {
-                return Err("Usage: simple-idm-ssh-login <hostname> (or: simple-idm-ssh-login bastion <hostname>)".into());
-            }
-            return bastion::run(&args[0]).await;
+            unreachable!();
         }
         _ => {}
     }
@@ -227,10 +239,15 @@ Hostname shortcut:
   simple-idm-ssh-login bastion.datalite.cz
 Explicit command (also works for names that collide with subcommands):
   simple-idm-ssh-login bastion bastion.datalite.cz
+  simple-idm-ssh-login bastion bastion.datalite.cz --device
+  simple-idm-ssh-login bastion.datalite.cz --device
 
 Start in the host list. / edits the filter; Enter applies it and returns to the list.
 Arrows select; Enter in the list connects; Esc in the filter cancels the edit.
 Ctrl-U clears the filter while editing; q quits the host list; Esc goes back/cancels.
+--device prints URL/code only; finish login/MFA on a phone or another computer.
+Enable grant urn:ietf:params:oauth:grant-type:device_code on the bastion OIDC client.
+Device Flow does not force MFA; the IDM policy does.
 Multiple Linux accounts open an account picker. Ctrl-C goes to the remote
 program. Exit the shell to return to the host list.
 The dedicated public client ID is the access-token audience; configure the
@@ -294,6 +311,37 @@ mod tests {
             Commands::Hostname(_)
         ));
         assert!(Cli::try_parse_from(["login", "bastion"]).is_err());
+    }
+
+    #[test]
+    fn bastion_device_flags_and_shortcut_share_clap_parsing() {
+        for argv in [
+            vec!["login", "bastion", "example.org", "--device"],
+            vec!["login", "bastion", "--device", "example.org"],
+        ] {
+            assert!(matches!(
+                Cli::try_parse_from(argv).unwrap().command,
+                Commands::Bastion { device: true, .. }
+            ));
+        }
+        let cli = Cli::try_parse_from(["login", "example.org", "--device"]).unwrap();
+        let Commands::Hostname(args) = cli.command else {
+            panic!("expected shortcut")
+        };
+        let cli = Cli::try_parse_from(
+            ["login", "bastion"]
+                .into_iter()
+                .chain(args.iter().map(String::as_str)),
+        )
+        .unwrap();
+        assert!(matches!(
+            cli.command,
+            Commands::Bastion { device: true, .. }
+        ));
+        assert!(
+            Cli::try_parse_from(["login", "bastion", "example.org", "--device", "--browser"])
+                .is_err()
+        );
     }
 
     #[test]

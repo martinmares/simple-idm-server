@@ -1,15 +1,14 @@
 use crate::auth::{
     build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
-    get_user_group_names, verify_password,
+    get_user_group_names,
 };
 use crate::client_group_filters::apply_client_group_filters;
 use crate::db::models::{DeviceCode, OAuthClient, OAuthClientGroupPattern, User};
-use crate::mfa::{self, MfaPolicy};
 use axum::{
     Form, Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse},
+    response::{Html, IntoResponse, Response},
 };
 use chrono::{Duration, Utc};
 use rand::RngExt;
@@ -19,11 +18,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use super::client_credentials::{ErrorResponse, OAuth2State};
-use super::ldap_role_sync::{load_ad_ldap_provider_for_user, sync_ldap_roles_if_stale};
 use super::templates;
-use super::throttle;
 use super::utils::{ClientLookupError, resolve_oauth_client};
-use simple_idm_ad_auth::verify_ldap_password;
 
 #[derive(Debug, Deserialize)]
 pub struct DeviceAuthorizationRequest {
@@ -64,9 +60,7 @@ pub struct DeviceTokenResponse {
 #[derive(Debug, Deserialize)]
 pub struct DeviceVerifyRequest {
     pub user_code: String,
-    pub username: String,
-    pub password: String,
-    pub mfa_code: Option<String>,
+    pub csrf_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,14 +92,146 @@ fn generate_user_code(length: usize, format: &str) -> String {
     }
 }
 
-/// Endpoint pro zobrazení HTML formuláře pro device verification
-/// GET /device?user_code=XXXX-XXXX
-pub async fn show_device_form(Query(query): Query<DevicePageQuery>) -> impl IntoResponse {
-    Html(templates::device_verify_page(
-        query.user_code.as_deref(),
-        None,
-        None,
+pub(crate) const DEVICE_LOGIN_PREFIX: &str = "urn:simple-idm:device:";
+
+pub(crate) fn device_login_code(destination: &str) -> Option<&str> {
+    destination
+        .strip_prefix(DEVICE_LOGIN_PREFIX)
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 64
+                && code
+                    .bytes()
+                    .all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == b'-')
+        })
+}
+
+pub(crate) fn device_confirmation_url(code: &str) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("user_code", code)
+        .finish();
+    format!("/device?{query}")
+}
+
+pub(crate) async fn pending_device_client(
+    pool: &sqlx::PgPool,
+    code: &str,
+) -> Result<OAuthClient, String> {
+    sqlx::query_as::<_, OAuthClient>(
+        "SELECT oc.* FROM device_codes dc JOIN oauth_clients oc ON oc.id = dc.client_id          JOIN tenants t ON t.id = oc.tenant_id          WHERE dc.user_code = $1 AND dc.expires_at > NOW() AND NOT dc.is_authorized          AND oc.is_active AND oc.deleted_at IS NULL AND t.is_active AND t.deleted_at IS NULL          AND 'urn:ietf:params:oauth:grant-type:device_code' = ANY(oc.grant_types)",
+    ).bind(code).fetch_optional(pool).await
+        .map_err(|err| { tracing::error!("Could not load device request: {err}"); "Could not load device request".to_string() })?
+        .ok_or_else(|| "Device code is invalid, expired or already used".into())
+}
+
+pub(crate) async fn device_user_allowed(
+    state: &OAuth2State,
+    client_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, String> {
+    let email = sqlx::query_scalar::<_, String>(
+        "SELECT u.email FROM users u JOIN oauth_clients oc ON oc.tenant_id = u.tenant_id          WHERE u.id = $1 AND oc.id = $2 AND u.is_active AND u.deleted_at IS NULL",
+    ).bind(user_id).bind(client_id).fetch_optional(&state.db_pool).await
+        .map_err(|err| format!("Could not validate device account: {err}"))?;
+    Ok(email.is_some_and(|email| {
+        state.allowed_email_domains.is_empty()
+            || email.rsplit_once('@').is_some_and(|(_, domain)| {
+                state
+                    .allowed_email_domains
+                    .iter()
+                    .any(|allowed| allowed.eq_ignore_ascii_case(domain))
+            })
+    }))
+}
+
+/// Device approval shares the normal browser login, including SSO, Passkeys and MFA.
+/// GET never grants access: an authenticated user must explicitly approve by POST.
+pub async fn show_device_form(
+    State(state): State<Arc<OAuth2State>>,
+    headers: HeaderMap,
+    Query(query): Query<DevicePageQuery>,
+) -> Response {
+    use super::authorization_code::{
+        build_csrf_cookie, get_auth_session_from_cookie, request_is_https,
+    };
+    let Some(code) = query.user_code.filter(|code| !code.trim().is_empty()) else {
+        return Html(templates::device_code_page()).into_response();
+    };
+    let code = code.trim().to_ascii_uppercase();
+    let client = match pending_device_client(&state.db_pool, &code).await {
+        Ok(client) => client,
+        Err(err) => return device_error(StatusCode::BAD_REQUEST, &err),
+    };
+    let Some(session) = get_auth_session_from_cookie(&state.db_pool, &headers).await else {
+        let tenant = match sqlx::query_scalar::<_, String>(
+            "SELECT t.slug FROM tenants t JOIN oauth_clients oc ON oc.tenant_id = t.id WHERE oc.id = $1",
+        ).bind(client.id).fetch_one(&state.db_pool).await {
+            Ok(tenant) => tenant,
+            Err(_) => return device_error(StatusCode::INTERNAL_SERVER_ERROR, "Could not prepare sign-in"),
+        };
+        let params = std::collections::HashMap::from([
+            ("response_type".into(), "code".into()),
+            ("client_id".into(), client.client_id),
+            ("tenant".into(), tenant),
+            (
+                "redirect_uri".into(),
+                format!("{DEVICE_LOGIN_PREFIX}{code}"),
+            ),
+        ]);
+        return super::authorization_code::handle_authorize(State(state), headers, Query(params))
+            .await
+            .into_response();
+    };
+    match device_user_allowed(&state, client.id, session.user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return device_error(
+                StatusCode::FORBIDDEN,
+                "This account cannot authorize this device application. Sign out and use an account in the application's tenant.",
+            );
+        }
+        Err(err) => return device_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+    let username = match sqlx::query_scalar::<_, String>("SELECT username FROM users WHERE id = $1")
+        .bind(session.user_id)
+        .fetch_one(&state.db_pool)
+        .await
+    {
+        Ok(name) => name,
+        Err(_) => {
+            return device_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not load signed-in account",
+            );
+        }
+    };
+    let csrf: String = rand::rng()
+        .sample_iter(rand::distr::Alphanumeric)
+        .take(32)
+        .map(char::from)
+        .collect();
+    let secure =
+        state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
+    let mut response = Html(templates::device_approval_page(
+        &code,
+        &client.name,
+        &username,
+        &csrf,
     ))
+    .into_response();
+    response.headers_mut().insert(
+        axum::http::header::SET_COOKIE,
+        build_csrf_cookie(&csrf, secure).parse().unwrap(),
+    );
+    response
+}
+
+fn device_error(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        Html(templates::error_page("device_authorization", message)),
+    )
+        .into_response()
 }
 
 /// Endpoint pro iniciaci device flow
@@ -213,438 +339,77 @@ pub async fn handle_device_authorization(
     .into_response()
 }
 
-/// Endpoint pro ověření user_code uživatelem
-/// Uživatel zadá user_code a svoje credentials
-/// Podporuje JSON i HTML formuláře
+/// Approve only with a policy-valid browser session and CSRF token.
 pub async fn handle_device_verify(
     State(state): State<Arc<OAuth2State>>,
     headers: HeaderMap,
-    axum::extract::Form(req): axum::extract::Form<DeviceVerifyRequest>,
-) -> impl IntoResponse {
-    let mut throttle_keys = vec![format!("login:{}", req.username.trim().to_lowercase())];
-    let client_ip = throttle::extract_client_ip(&headers, state.trust_proxy_headers)
-        .unwrap_or_else(|| "unknown".to_string());
-    if client_ip != "unknown" {
-        throttle_keys.push(format!("ip:{}", client_ip));
-    }
-    if state.auth_protection.enabled {
-        for key in &throttle_keys {
-            if throttle::is_locked(&state.db_pool, "oauth2_device_verify", key)
-                .await
-                .unwrap_or(false)
-            {
-                return (
-                    StatusCode::TOO_MANY_REQUESTS,
-                    Html(templates::device_verify_page(
-                        Some(&req.user_code),
-                        Some("Too many failed attempts. Please wait and try again."),
-                        None,
-                    )),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    let tenant_id = if req.username.contains('@') {
-        resolve_tenant_for_email(&state.db_pool, &req.username)
-            .await
-            .unwrap_or_else(default_tenant_id)
-    } else {
-        default_tenant_id()
-    };
-    // Načti device code podle user_code
-    let device_code =
-        match sqlx::query_as::<_, DeviceCode>("SELECT * FROM device_codes WHERE user_code = $1")
-            .bind(&req.user_code)
-            .fetch_optional(&state.db_pool)
-            .await
-        {
-            Ok(Some(dc)) => dc,
-            Ok(None) => {
-                return Html(templates::device_verify_page(
-                    Some(&req.user_code),
-                    Some("Invalid user code"),
-                    None,
-                ))
-                .into_response();
-            }
-            Err(_) => {
-                return Html(templates::device_verify_page(
-                    Some(&req.user_code),
-                    Some("Database error"),
-                    None,
-                ))
-                .into_response();
-            }
-        };
-
-    // Brute force protection: Zkontroluj počet failed attempts
-    let failed_attempts: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM device_verification_attempts WHERE user_code = $1",
-    )
-    .bind(&req.user_code)
-    .fetch_one(&state.db_pool)
-    .await
-    .unwrap_or(0);
-
-    if failed_attempts >= state.device_flow_config.max_verification_attempts as i64 {
-        // Smaž device code po překročení limitu
-        let _ = sqlx::query("DELETE FROM device_codes WHERE user_code = $1")
-            .bind(&req.user_code)
-            .execute(&state.db_pool)
-            .await;
-
-        return Html(templates::device_verify_page(
-            Some(&req.user_code),
-            Some("Too many failed attempts. This device code has been invalidated."),
-            None,
-        ))
-        .into_response();
-    }
-
-    // Zkontroluj expiraci
-    if device_code.expires_at < Utc::now() {
-        let _ = sqlx::query("DELETE FROM device_codes WHERE user_code = $1")
-            .bind(&req.user_code)
-            .execute(&state.db_pool)
-            .await;
-
-        return Html(templates::device_verify_page(
-            Some(&req.user_code),
-            Some("User code expired"),
-            None,
-        ))
-        .into_response();
-    }
-
-    // Zkontroluj, jestli už není autorizovaný
-    if device_code.is_authorized {
-        return Html(templates::device_verify_page(
-            Some(&req.user_code),
-            Some("Device already authorized"),
-            None,
-        ))
-        .into_response();
-    }
-
-    if !state.allow_username_login && !req.username.contains('@') {
-        if state.auth_protection.enabled {
-            for key in &throttle_keys {
-                let _ = throttle::register_failure(
-                    &state.db_pool,
-                    "oauth2_device_verify",
-                    key,
-                    &state.auth_protection,
-                )
-                .await;
-            }
-        }
-        return Html(templates::device_verify_page(
-            Some(&req.user_code),
-            Some("Invalid credentials"),
-            None,
-        ))
-        .into_response();
-    }
-
-    // Ověř uživatele
-    let user = match if state.allow_username_login {
-        sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE tenant_id = $1 AND (username = $2 OR email = $2) AND is_active = true AND deleted_at IS NULL",
-        )
-        .bind(tenant_id)
-        .bind(&req.username)
-        .fetch_optional(&state.db_pool)
-        .await
-    } else {
-        sqlx::query_as::<_, User>(
-            "SELECT * FROM users WHERE tenant_id = $1 AND email = $2 AND is_active = true AND deleted_at IS NULL",
-        )
-        .bind(tenant_id)
-        .bind(&req.username)
-        .fetch_optional(&state.db_pool)
-        .await
-    } {
-        Ok(Some(user)) => user,
-        Ok(None) => {
-            if state.auth_protection.enabled {
-                for key in &throttle_keys {
-                    let _ = throttle::register_failure(
-                        &state.db_pool,
-                        "oauth2_device_verify",
-                        key,
-                        &state.auth_protection,
-                    )
-                    .await;
-                }
-            }
-            // Log failed attempt
-            let _ = sqlx::query(
-                "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)",
-            )
-            .bind(&req.user_code)
-            .bind(&client_ip)
-            .execute(&state.db_pool)
-            .await;
-
-            return Html(templates::device_verify_page(
-                Some(&req.user_code),
-                Some("Invalid credentials"),
-                None,
-            ))
-            .into_response();
-        }
-        Err(_) => {
-            return Html(templates::device_verify_page(
-                Some(&req.user_code),
-                Some("Database error"),
-                None,
-            ))
-            .into_response();
-        }
-    };
-
-    if !is_email_domain_allowed(&user.email, &state.allowed_email_domains) {
-        if state.auth_protection.enabled {
-            for key in &throttle_keys {
-                let _ = throttle::register_failure(
-                    &state.db_pool,
-                    "oauth2_device_verify",
-                    key,
-                    &state.auth_protection,
-                )
-                .await;
-            }
-        }
-        return Html(templates::device_verify_page(
-            Some(&req.user_code),
-            Some("Invalid credentials"),
-            None,
-        ))
-        .into_response();
-    }
-
-    // Ověř heslo (lokálně nebo delegovaně přes AD/LDAP)
-    if !verify_user_password(state.as_ref(), &user, &req.password).await {
-        if state.auth_protection.enabled {
-            for key in &throttle_keys {
-                let _ = throttle::register_failure(
-                    &state.db_pool,
-                    "oauth2_device_verify",
-                    key,
-                    &state.auth_protection,
-                )
-                .await;
-            }
-        }
-        // Log failed attempt
-        let _ = sqlx::query(
-            "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)",
-        )
-        .bind(&req.user_code)
-        .bind(&client_ip)
-        .execute(&state.db_pool)
-        .await;
-
-        return Html(templates::device_verify_page(
-            Some(&req.user_code),
-            Some("Invalid credentials"),
-            None,
-        ))
-        .into_response();
-    }
-
-    let mut amr = vec![if user.auth_mode.eq_ignore_ascii_case("ad") {
-        "federated".to_string()
-    } else {
-        "pwd".to_string()
-    }];
-    let mut acr = Some(if user.auth_mode.eq_ignore_ascii_case("ad") {
-        "urn:simple-idm:acr:federated".to_string()
-    } else {
-        "urn:simple-idm:acr:password".to_string()
-    });
-
-    if user.auth_mode.eq_ignore_ascii_case("local") {
-        let policy = match mfa::user_mfa_policy(&state.db_pool, user.id).await {
-            Ok(policy) => policy,
-            Err(_) => {
-                return Html(templates::device_verify_page(
-                    Some(&req.user_code),
-                    Some("Could not evaluate authentication policy. Try again."),
-                    None,
-                ))
-                .into_response();
-            }
-        };
-        let authenticator = mfa::active_totp_authenticator(&state.db_pool, user.id)
-            .await
-            .unwrap_or(None);
-
-        if policy == MfaPolicy::Required && authenticator.is_none() {
-            return Html(templates::device_verify_page(
-                Some(&req.user_code),
-                Some("MFA enrollment is required. Sign in through a browser first to enroll an authenticator."),
-                None,
-            ))
-            .into_response();
-        }
-
-        if policy == MfaPolicy::Required
-            || (policy == MfaPolicy::Optional && authenticator.is_some())
-        {
-            let code = req.mfa_code.as_deref().unwrap_or("").trim();
-            let verified = if let Some(authenticator) = authenticator.as_ref() {
-                mfa::verify_totp(&state.db_pool, authenticator, code)
-                    .await
-                    .unwrap_or(false)
-            } else {
-                false
-            };
-            let recovery = if verified {
-                false
-            } else {
-                mfa::consume_recovery_code(&state.db_pool, user.id, code)
-                    .await
-                    .unwrap_or(false)
-            };
-            if !verified && !recovery {
-                let _ = sqlx::query(
-                    "INSERT INTO device_verification_attempts (user_code, ip_address) VALUES ($1, $2)",
-                )
-                .bind(&req.user_code)
-                .bind(&client_ip)
-                .execute(&state.db_pool)
-                .await;
-                return Html(templates::device_verify_page(
-                    Some(&req.user_code),
-                    Some("Invalid MFA or recovery code"),
-                    None,
-                ))
-                .into_response();
-            }
-            amr.push(if recovery { "recovery" } else { "otp" }.to_string());
-            acr = Some("urn:simple-idm:acr:mfa".to_string());
-        }
-    }
-
-    // Označ device code jako autorizovaný
-    if sqlx::query(
-        "UPDATE device_codes SET is_authorized = true, user_id = $1, amr = $3, acr = $4 WHERE user_code = $2",
-    )
-    .bind(user.id)
-    .bind(&req.user_code)
-    .bind(&amr)
-    .bind(&acr)
-    .execute(&state.db_pool)
-    .await
-    .is_err()
+    Form(req): Form<DeviceVerifyRequest>,
+) -> Response {
+    use super::authorization_code::{cookie_value, get_auth_session_from_cookie};
+    if req.csrf_token.is_empty()
+        || cookie_value(&headers, "csrf_token").as_deref() != Some(&req.csrf_token)
     {
-        return Html(templates::device_verify_page(
-            Some(&req.user_code),
-            Some("Failed to authorize device"),
-            None,
-        ))
-        .into_response();
+        return device_error(
+            StatusCode::FORBIDDEN,
+            "Invalid approval request. Reload the device page and try again.",
+        );
     }
-
-    if state.auth_protection.enabled {
-        for key in &throttle_keys {
-            let _ = throttle::clear_failures(&state.db_pool, "oauth2_device_verify", key).await;
+    let Some(session) = get_auth_session_from_cookie(&state.db_pool, &headers).await else {
+        return device_error(
+            StatusCode::UNAUTHORIZED,
+            "Your sign-in has expired. Reopen the device link to sign in again.",
+        );
+    };
+    let code = req.user_code.trim().to_ascii_uppercase();
+    let client = match pending_device_client(&state.db_pool, &code).await {
+        Ok(client) => client,
+        Err(err) => return device_error(StatusCode::BAD_REQUEST, &err),
+    };
+    match device_user_allowed(&state, client.id, session.user_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return device_error(
+                StatusCode::FORBIDDEN,
+                "This account cannot authorize this device application",
+            );
+        }
+        Err(err) => return device_error(StatusCode::INTERNAL_SERVER_ERROR, &err),
+    }
+    let result = sqlx::query(
+        "UPDATE device_codes SET is_authorized = true, user_id = $1, amr = $3, acr = $4          WHERE user_code = $2 AND expires_at > NOW() AND NOT is_authorized",
+    ).bind(session.user_id).bind(&code).bind(&session.amr).bind(&session.acr)
+        .execute(&state.db_pool).await;
+    match result {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            return device_error(
+                StatusCode::BAD_REQUEST,
+                "Device code is expired or already used",
+            );
+        }
+        Err(err) => {
+            tracing::error!("Device approval failed: {err}");
+            return device_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Could not authorize device",
+            );
         }
     }
-
+    crate::audit::emit_event(
+        &state.db_pool,
+        "auth.device.approve",
+        "oauth_client",
+        Some(client.id),
+        "success",
+        Some(serde_json::json!({"user_id":session.user_id, "amr":session.amr})),
+    )
+    .await;
     Html(templates::device_verify_page(
         None,
         None,
         Some("Device authorized successfully! You can now return to your device."),
     ))
     .into_response()
-}
-
-fn is_email_domain_allowed(email: &str, allowed_domains: &[String]) -> bool {
-    if allowed_domains.is_empty() {
-        return true;
-    }
-    let domain = match email.rsplit_once('@') {
-        Some((_, d)) => d.trim().to_lowercase(),
-        None => return false,
-    };
-    allowed_domains.iter().any(|d| d == &domain)
-}
-
-async fn verify_user_password(state: &OAuth2State, user: &User, password: &str) -> bool {
-    if crate::auth_policy::for_user(&state.db_pool, user.id)
-        .await
-        .is_err()
-    {
-        return false;
-    }
-    if user.password_disabled || user.auth_mode.eq_ignore_ascii_case("federated") {
-        return false;
-    }
-
-    if user.auth_mode.eq_ignore_ascii_case("ad") {
-        let provider = match load_ad_ldap_provider_for_user(state, user).await {
-            Ok(Some(v)) => v,
-            Ok(None) => return false,
-            Err(err) => {
-                tracing::warn!(user_id = %user.id, username = %user.username, "LDAP provider load failed: {}", err);
-                return false;
-            }
-        };
-        match verify_ldap_password(&provider.config, &user.email, password).await {
-            Ok(()) => {
-                if let Err(err) = sync_ldap_roles_if_stale(state, user, &user.email).await {
-                    tracing::warn!(
-                        user_id = %user.id,
-                        username = %user.username,
-                        "LDAP role sync warning: {}",
-                        err
-                    );
-                }
-                return true;
-            }
-            Err(err) => {
-                tracing::warn!(
-                    user_id = %user.id,
-                    username = %user.username,
-                    "LDAP auth failed: {}",
-                    err
-                );
-                return false;
-            }
-        }
-    }
-    match user.password_hash.as_deref() {
-        Some(hash) => verify_password(password, hash).unwrap_or(false),
-        None => false,
-    }
-}
-
-fn default_tenant_id() -> Uuid {
-    Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid default tenant uuid")
-}
-
-async fn resolve_tenant_for_email(db_pool: &sqlx::PgPool, email: &str) -> Option<Uuid> {
-    let domain = email.rsplit_once('@')?.1.trim().to_lowercase();
-    sqlx::query_scalar::<_, Uuid>(
-        r#"
-        SELECT td.tenant_id
-        FROM tenant_domains td
-        JOIN tenants t ON t.id = td.tenant_id
-        WHERE lower(td.domain) = $1
-          AND td.is_active = true
-          AND t.is_active = true
-        LIMIT 1
-        "#,
-    )
-    .bind(domain)
-    .fetch_optional(db_pool)
-    .await
-    .ok()
-    .flatten()
 }
 
 /// Interní implementace device token exchange - volaná z handle_token routeru
@@ -971,4 +736,451 @@ pub async fn handle_device_token(
     Form(req): Form<DeviceTokenRequest>,
 ) -> axum::response::Response {
     handle_device_token_internal(state, req).await
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::super::authorization_code::{
+        LoginRequest, PendingAuthorization, complete_user_authorization, handle_login,
+        is_login_destination_allowed,
+    };
+    use super::*;
+    use axum::http::header::{COOKIE, SET_COOKIE};
+
+    #[test]
+    fn internal_destination_and_pages() {
+        assert_eq!(
+            device_login_code("urn:simple-idm:device:ABCD-1234"),
+            Some("ABCD-1234")
+        );
+        for bad in [
+            "urn:simple-idm:device:",
+            "urn:simple-idm:device:abcd",
+            "urn:simple-idm:device:ABCD?evil",
+            "https://evil.test/device",
+        ] {
+            assert!(device_login_code(bad).is_none());
+        }
+        assert!(!templates::device_code_page().contains("name=\"password\""));
+        let page =
+            templates::device_approval_page("ABCD-1234", "<script>app</script>", "<user>", "csrf");
+        assert!(page.contains("&lt;script&gt;app&lt;/script&gt;"));
+        assert!(page.contains("&lt;user&gt;"));
+        assert!(page.contains("name=\"csrf_token\""));
+        assert!(!page.contains("name=\"password\""));
+        let success = templates::device_verify_page(None, None, Some("Authorized"));
+        assert!(!success.contains("<form"));
+    }
+
+    async fn body(response: Response) -> String {
+        String::from_utf8(
+            axum::body::to_bytes(response.into_body(), 8 * 1024 * 1024)
+                .await
+                .unwrap()
+                .to_vec(),
+        )
+        .unwrap()
+    }
+    fn cookies(session: &str, csrf: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            COOKIE,
+            format!("auth_session={session}; csrf_token={csrf}")
+                .parse()
+                .unwrap(),
+        );
+        headers
+    }
+    fn pending(user: Uuid, client: Uuid, code: &str) -> PendingAuthorization {
+        PendingAuthorization {
+            user_id: user,
+            client_id: client,
+            redirect_uri: format!("{DEVICE_LOGIN_PREFIX}{code}"),
+            scope: "openid".into(),
+            state: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            nonce: None,
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires disposable DEVICE_SSO_TEST_DATABASE_URL"]
+    async fn postgres_browser_device_approval() {
+        use rsa::{
+            RsaPrivateKey, RsaPublicKey,
+            pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
+            rand_core::OsRng,
+        };
+        let pool = sqlx::PgPool::connect(&std::env::var("DEVICE_SSO_TEST_DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        let migrations = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        sqlx::migrate::Migrator::new(migrations)
+            .await
+            .unwrap()
+            .run(&pool)
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let private = dir.path().join("private.pem");
+        let public = dir.path().join("public.pem");
+        std::fs::write(
+            &private,
+            key.to_pkcs8_pem(LineEnding::LF).unwrap().as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            &public,
+            RsaPublicKey::from(&key)
+                .to_public_key_pem(LineEnding::LF)
+                .unwrap(),
+        )
+        .unwrap();
+        let jwt = crate::auth::JwtService::new(
+            private.to_str().unwrap(),
+            public.to_str().unwrap(),
+            "https://idm.test".into(),
+            "test".into(),
+            vec![],
+        )
+        .unwrap();
+        let state = Arc::new(OAuth2State {
+            db_pool: pool.clone(),
+            jwt_service: Arc::new(jwt),
+            access_token_expiry: 3600,
+            refresh_token_expiry: 3600,
+            auth_session_expiry: 3600,
+            allow_username_login: true,
+            allowed_email_domains: vec![],
+            trust_proxy_headers: false,
+            force_secure_cookies: false,
+            passkeys: Some(Arc::new(
+                crate::passkeys::PasskeyService::new(&crate::config::WebauthnConfig {
+                    rp_id: "idm.test".into(),
+                    rp_name: "Test".into(),
+                    origins: vec!["https://idm.test".into()],
+                })
+                .unwrap(),
+            )),
+            device_flow_config: crate::config::DeviceFlowConfig {
+                expiry_seconds: 600,
+                polling_interval_seconds: 1,
+                user_code_length: 8,
+                user_code_format: "XXXX-XXXX".into(),
+                cleanup_interval_seconds: 60,
+                max_verification_attempts: 5,
+            },
+            auth_protection: crate::config::AuthProtectionConfig {
+                enabled: false,
+                failure_window_seconds: 60,
+                max_failures: 5,
+                lockout_seconds: 60,
+                clear_on_start: false,
+            },
+        });
+        let user = Uuid::new_v4();
+        let client = Uuid::new_v4();
+        let suffix = user.simple().to_string();
+        let username = format!("device-{suffix}");
+        let client_name = format!("app-{suffix}");
+        let password = crate::auth::hash_password("device-test-password").unwrap();
+        sqlx::query("INSERT INTO users (id, username, email, password_hash) VALUES ($1,$2,$3,$4)")
+            .bind(user)
+            .bind(&username)
+            .bind(format!("{suffix}@example.test"))
+            .bind(password)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO oauth_clients (id,client_id,name,redirect_uris,grant_types,is_public) VALUES ($1,$2,'Device test','{}',ARRAY['urn:ietf:params:oauth:grant-type:device_code'],true)")
+            .bind(client).bind(&client_name).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE tenants SET mfa_policy='disabled', passkey_policy='allowed' WHERE slug='default'").execute(&pool).await.unwrap();
+        let unique_code = format!("{}-1234", suffix[..4].to_ascii_uppercase());
+        let code = unique_code.as_str();
+        sqlx::query("INSERT INTO device_codes (device_code,user_code,client_id,scope,expires_at,is_authorized) VALUES ($1,$2,$3,'openid',NOW()+INTERVAL '10 minutes',false)")
+            .bind(&suffix).bind(code).bind(client).execute(&pool).await.unwrap();
+        let oauth_client = pending_device_client(&pool, code).await.unwrap();
+        assert!(
+            is_login_destination_allowed(
+                &pool,
+                &oauth_client,
+                &format!("{DEVICE_LOGIN_PREFIX}{code}")
+            )
+            .await
+        );
+        assert!(!is_login_destination_allowed(&pool, &oauth_client, "https://evil.test").await);
+        let mut other_client = oauth_client.clone();
+        other_client.id = Uuid::new_v4();
+        assert!(
+            !is_login_destination_allowed(
+                &pool,
+                &other_client,
+                &format!("{DEVICE_LOGIN_PREFIX}{code}")
+            )
+            .await
+        );
+        sqlx::query("UPDATE oauth_clients SET is_active=false WHERE id=$1")
+            .bind(client)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(pending_device_client(&pool, code).await.is_err());
+        sqlx::query("UPDATE oauth_clients SET is_active=true WHERE id=$1")
+            .bind(client)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let response = show_device_form(
+            State(state.clone()),
+            HeaderMap::new(),
+            Query(DevicePageQuery {
+                user_code: Some(code.into()),
+            }),
+        )
+        .await;
+        let csrf_cookie = response.headers()[SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        let csrf = csrf_cookie.strip_prefix("csrf_token=").unwrap().to_string();
+        let page = body(response).await;
+        assert!(page.contains("/oauth2/login"));
+        assert!(page.contains("passkey"));
+        assert!(page.contains(&format!("{DEVICE_LOGIN_PREFIX}{code}")));
+        // No session and wrong CSRF must never approve.
+        let response = handle_device_verify(
+            State(state.clone()),
+            cookies("invalid", &csrf),
+            Form(DeviceVerifyRequest {
+                user_code: code.into(),
+                csrf_token: csrf.clone(),
+            }),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        // Normal password login now completes into a browser session, not an OAuth code.
+        let mut headers = HeaderMap::new();
+        headers.insert(COOKIE, csrf_cookie.parse().unwrap());
+        let response = handle_login(
+            State(state.clone()),
+            headers,
+            Form(LoginRequest {
+                username: username.clone(),
+                password: "device-test-password".into(),
+                client_id: client_name.clone(),
+                tenant: Some("default".into()),
+                redirect_uri: format!("{DEVICE_LOGIN_PREFIX}{code}"),
+                scope: None,
+                state: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                csrf_token: Some(csrf.clone()),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()[axum::http::header::LOCATION],
+            device_confirmation_url(code)
+        );
+        let session: String = sqlx::query_scalar("SELECT session_token FROM authentication_sessions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1").bind(user).fetch_one(&pool).await.unwrap();
+        let unapproved: bool =
+            sqlx::query_scalar("SELECT NOT is_authorized FROM device_codes WHERE user_code=$1")
+                .bind(code)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(unapproved);
+        let response = show_device_form(
+            State(state.clone()),
+            cookies(&session, &csrf),
+            Query(DevicePageQuery {
+                user_code: Some(code.into()),
+            }),
+        )
+        .await;
+        let approval_csrf = response.headers()[SET_COOKIE]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .strip_prefix("csrf_token=")
+            .unwrap()
+            .to_string();
+        let page = body(response).await;
+        assert!(page.contains(&username));
+        assert!(page.contains("Authorize device"));
+        assert!(!page.contains("name=\"password\""));
+        assert_eq!(
+            handle_device_verify(
+                State(state.clone()),
+                cookies(&session, &approval_csrf),
+                Form(DeviceVerifyRequest {
+                    user_code: code.into(),
+                    csrf_token: "wrong".into()
+                })
+            )
+            .await
+            .status(),
+            StatusCode::FORBIDDEN
+        );
+        // A newly required MFA policy invalidates password-only SSO for device approval.
+        sqlx::query("UPDATE tenants SET mfa_policy='required' WHERE slug='default'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            handle_device_verify(
+                State(state.clone()),
+                cookies(&session, &approval_csrf),
+                Form(DeviceVerifyRequest {
+                    user_code: code.into(),
+                    csrf_token: approval_csrf.clone()
+                })
+            )
+            .await
+            .status(),
+            StatusCode::UNAUTHORIZED
+        );
+        // The same password login now enters the normal MFA challenge, not device approval.
+        sqlx::query("INSERT INTO user_authenticators (tenant_id,user_id,kind,secret_encrypted,status) VALUES ('11111111-1111-1111-1111-111111111111',$1,'totp','not-used-by-this-challenge-test','active')")
+            .bind(user).execute(&pool).await.unwrap();
+        let response = handle_login(
+            State(state.clone()),
+            cookies("invalid", &csrf),
+            Form(LoginRequest {
+                username: username.clone(),
+                password: "device-test-password".into(),
+                client_id: client_name,
+                tenant: Some("default".into()),
+                redirect_uri: format!("{DEVICE_LOGIN_PREFIX}{code}"),
+                scope: None,
+                state: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                csrf_token: Some(csrf),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(
+            response.headers()[axum::http::header::LOCATION],
+            "/oauth2/mfa"
+        );
+        let challenge_destination: String = sqlx::query_scalar("SELECT redirect_uri FROM mfa_login_transactions WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1")
+            .bind(user).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            challenge_destination,
+            format!("{DEVICE_LOGIN_PREFIX}{code}")
+        );
+        // Passkey completion uses the same destination and preserves WebAuthn AMR/ACR.
+        let completion = complete_user_authorization(
+            &state,
+            pending(user, client, code),
+            vec!["webauthn".into()],
+            Some("urn:simple-idm:acr:phishing-resistant".into()),
+        )
+        .await
+        .unwrap();
+        let passkey_session = completion.session_token.unwrap();
+        let authorization_codes: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM authorization_codes WHERE client_id=$1")
+                .bind(client)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            authorization_codes, 0,
+            "Device sign-in must not issue OAuth callback codes"
+        );
+
+        assert_eq!(completion.redirect_url, device_confirmation_url(code));
+        assert_eq!(
+            handle_device_verify(
+                State(state.clone()),
+                cookies(&passkey_session, &approval_csrf),
+                Form(DeviceVerifyRequest {
+                    user_code: code.into(),
+                    csrf_token: approval_csrf.clone()
+                })
+            )
+            .await
+            .status(),
+            StatusCode::OK
+        );
+        let amr: Vec<String> =
+            sqlx::query_scalar("SELECT amr FROM device_codes WHERE user_code=$1")
+                .bind(code)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(amr, vec!["webauthn"]);
+        assert!(pending_device_client(&pool, code).await.is_err());
+        assert_eq!(
+            handle_device_verify(
+                State(state.clone()),
+                cookies(&passkey_session, &approval_csrf),
+                Form(DeviceVerifyRequest {
+                    user_code: code.into(),
+                    csrf_token: approval_csrf
+                })
+            )
+            .await
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
+        sqlx::query("UPDATE device_codes SET is_authorized=false,expires_at=NOW()-INTERVAL '1 minute' WHERE user_code=$1").bind(code).execute(&pool).await.unwrap();
+        assert!(
+            complete_user_authorization(
+                &state,
+                pending(user, client, code),
+                vec!["otp".into()],
+                None
+            )
+            .await
+            .is_err()
+        );
+        // An account from another tenant cannot complete a device login.
+        sqlx::query(
+            "UPDATE device_codes SET expires_at=NOW()+INTERVAL '1 minute' WHERE user_code=$1",
+        )
+        .bind(code)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let foreign = Uuid::new_v4();
+        sqlx::query("INSERT INTO tenants (id,slug,name) VALUES ($1,$2,'Foreign')")
+            .bind(foreign)
+            .bind(foreign.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE users SET tenant_id=$1 WHERE id=$2")
+            .bind(foreign)
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            complete_user_authorization(
+                &state,
+                pending(user, client, code),
+                vec!["otp".into()],
+                None
+            )
+            .await
+            .is_err()
+        );
+    }
 }

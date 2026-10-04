@@ -15,9 +15,18 @@ token, not the ID token. Tokens stay in memory and never appear in terminal URLs
 simple-idm-ssh-login examples
 simple-idm-ssh-login bastion bastion.datalite.cz
 simple-idm-ssh-login bastion.datalite.cz
+simple-idm-ssh-login bastion bastion.datalite.cz --device
+simple-idm-ssh-login bastion.datalite.cz --device
 ```
 
-The browser opens before the terminal picker. Focus starts in the host list.
+The local browser opens by default (`--browser`). On a headless VPS use
+`--device` (client 0.12.0): it prints URL/code without opening a browser or
+starting a loopback callback. Complete login and MFA on another device; approval
+opens the TUI. The bastion OAuth client must additionally allow
+`urn:ietf:params:oauth:grant-type:device_code`, preserving its current scopes.
+IDM decides whether MFA is required. Reauthentication keeps the chosen mode.
+Both modes return API access tokens and require a local bastions.toml profile.
+ Focus starts in the host list.
 Press `/` to edit the filter by host ID, name,
 environment, description, hostname, resolved IP or login; multiple words must
 all match. Enter applies the filter and returns focus to the list without

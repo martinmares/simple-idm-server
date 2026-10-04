@@ -292,13 +292,17 @@ pub async fn handle_authorize(
     };
 
     // Ověř redirect_uri
-    if !is_redirect_uri_allowed(&client, redirect_uri) {
+    if !is_login_destination_allowed(&state.db_pool, &client, redirect_uri).await {
         let html = templates::error_page("invalid_request", "Invalid redirect_uri for this client");
         return Html(html).into_response();
     }
 
     // SSO: Check for existing authentication session
     if let Some(auth_session) = get_auth_session_from_cookie(&state.db_pool, &headers).await {
+        if let Some(code) = super::device_flow::device_login_code(redirect_uri) {
+            return Redirect::to(&super::device_flow::device_confirmation_url(code))
+                .into_response();
+        }
         // User is already authenticated - auto-generate authorization code
         tracing::debug!(
             "SSO: Found valid session for user {}, auto-authorizing",
@@ -431,6 +435,24 @@ pub async fn handle_authorize(
     response
 }
 
+/// Device sign-in uses a reserved internal destination, never an OAuth callback.
+/// Revalidate the pending code against its client at every authentication step.
+pub(crate) async fn is_login_destination_allowed(
+    pool: &sqlx::PgPool,
+    client: &OAuthClient,
+    destination: &str,
+) -> bool {
+    if destination.starts_with(super::device_flow::DEVICE_LOGIN_PREFIX) {
+        let Some(code) = super::device_flow::device_login_code(destination) else {
+            return false;
+        };
+        return super::device_flow::pending_device_client(pool, code)
+            .await
+            .is_ok_and(|pending| pending.id == client.id);
+    }
+    is_redirect_uri_allowed(client, destination)
+}
+
 pub(crate) fn is_redirect_uri_allowed(client: &OAuthClient, redirect_uri: &str) -> bool {
     // Exact match
     if client.redirect_uris.iter().any(|uri| uri == redirect_uri) {
@@ -521,6 +543,28 @@ pub(super) async fn complete_user_authorization(
     amr: Vec<String>,
     acr: Option<String>,
 ) -> Result<AuthorizationCompletion, String> {
+    if let Some(code) = super::device_flow::device_login_code(&pending.redirect_uri) {
+        let client = super::device_flow::pending_device_client(&state.db_pool, code).await?;
+        if client.id != pending.client_id
+            || !super::device_flow::device_user_allowed(state, client.id, pending.user_id).await?
+        {
+            return Err("Device sign-in is not allowed for this account".into());
+        }
+        let session_token = create_auth_session(
+            &state.db_pool,
+            pending.user_id,
+            Some(client.id),
+            state.auth_session_expiry,
+            &amr,
+            acr.as_deref(),
+        )
+        .await
+        .map_err(|err| format!("Failed to create authentication session: {err}"))?;
+        return Ok(AuthorizationCompletion {
+            redirect_url: super::device_flow::device_confirmation_url(code),
+            session_token: Some(session_token),
+        });
+    }
     let code: String = rand::rng()
         .sample_iter(rand::distr::Alphanumeric)
         .take(32)
@@ -687,7 +731,7 @@ pub async fn handle_federated_start(
             .into_response();
         }
     };
-    if !is_redirect_uri_allowed(&client, redirect_uri) {
+    if !is_login_destination_allowed(&state.db_pool, &client, redirect_uri).await {
         return Html(templates::error_page(
             "invalid_request",
             "Invalid redirect_uri for this client",
@@ -879,7 +923,7 @@ pub async fn handle_federated_callback(
             .into_response();
         }
     };
-    if !is_redirect_uri_allowed(&local_client, &payload.redirect_uri) {
+    if !is_login_destination_allowed(&state.db_pool, &local_client, &payload.redirect_uri).await {
         return Html(templates::error_page(
             "invalid_request",
             "Invalid redirect_uri",
@@ -1073,79 +1117,40 @@ pub async fn handle_federated_callback(
     .execute(&state.db_pool)
     .await;
 
-    let code_out: String = rand::rng()
-        .sample_iter(rand::distr::Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect();
-    let expires_at = Utc::now() + Duration::minutes(10);
-    let scope = payload.scope.unwrap_or_else(|| local_client.scope.clone());
-    let nonce = payload.nonce.as_deref().and_then(non_empty);
-    let code_challenge = payload.code_challenge.as_deref().and_then(non_empty);
-    let code_challenge_method = payload.code_challenge_method.as_deref().and_then(non_empty);
-
-    if sqlx::query(
-        r#"
-        INSERT INTO authorization_codes
-        (code, client_id, user_id, redirect_uri, scope, code_challenge, code_challenge_method,
-         nonce, amr, acr, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        "#,
+    let completion = match complete_user_authorization(
+        state.as_ref(),
+        PendingAuthorization {
+            user_id: user.id,
+            client_id: local_client.id,
+            redirect_uri: payload.redirect_uri,
+            scope: payload.scope.unwrap_or_else(|| local_client.scope.clone()),
+            state: payload.state,
+            code_challenge: payload
+                .code_challenge
+                .and_then(|v| non_empty(&v).map(str::to_string)),
+            code_challenge_method: payload
+                .code_challenge_method
+                .and_then(|v| non_empty(&v).map(str::to_string)),
+            nonce: payload
+                .nonce
+                .and_then(|v| non_empty(&v).map(str::to_string)),
+        },
+        vec!["federated".into()],
+        Some("urn:simple-idm:acr:federated".into()),
     )
-    .bind(&code_out)
-    .bind(local_client.id)
-    .bind(user.id)
-    .bind(&payload.redirect_uri)
-    .bind(&scope)
-    .bind(code_challenge)
-    .bind(code_challenge_method)
-    .bind(nonce)
-    .bind(vec!["federated".to_string()])
-    .bind("urn:simple-idm:acr:federated")
-    .bind(expires_at)
-    .execute(&state.db_pool)
     .await
-    .is_err()
     {
-        return Html(templates::error_page(
-            "server_error",
-            "Failed to store authorization code",
-        ))
-        .into_response();
-    }
-
+        Ok(completion) => completion,
+        Err(err) => return Html(templates::error_page("server_error", &err)).into_response(),
+    };
     let secure =
         state.force_secure_cookies || request_is_https(&headers, state.trust_proxy_headers);
-    let session_token = create_auth_session(
-        &state.db_pool,
-        user.id,
-        Some(local_client.id),
+    let auth_cookie = build_auth_session_cookie(
+        completion.session_token.as_deref(),
         state.auth_session_expiry,
-        &["federated".to_string()],
-        Some("urn:simple-idm:acr:federated"),
-    )
-    .await
-    .ok();
-    let auth_cookie =
-        build_auth_session_cookie(session_token.as_deref(), state.auth_session_expiry, secure);
+        secure,
+    );
     let federated_cookie = build_federated_csrf_cookie(None, secure);
-
-    let mut redirect = match Url::parse(&payload.redirect_uri) {
-        Ok(v) => v,
-        Err(_) => {
-            return Html(templates::error_page(
-                "invalid_request",
-                "Invalid redirect URI",
-            ))
-            .into_response();
-        }
-    };
-    redirect.query_pairs_mut().append_pair("code", &code_out);
-    if let Some(state_param) = payload.state {
-        redirect
-            .query_pairs_mut()
-            .append_pair("state", &state_param);
-    }
 
     audit::emit_event(
         &state.db_pool,
@@ -1164,7 +1169,7 @@ pub async fn handle_federated_callback(
 
     (
         [(SET_COOKIE, auth_cookie), (SET_COOKIE, federated_cookie)],
-        Redirect::to(redirect.as_ref()),
+        Redirect::to(&completion.redirect_url),
     )
         .into_response()
 }
@@ -1370,7 +1375,7 @@ pub async fn handle_login(
             }
         };
 
-    if !is_redirect_uri_allowed(&client, &req.redirect_uri) {
+    if !is_login_destination_allowed(&state.db_pool, &client, &req.redirect_uri).await {
         let html = templates::error_page("invalid_request", "Invalid redirect_uri for this client");
         return Html(html).into_response();
     }

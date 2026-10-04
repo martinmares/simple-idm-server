@@ -4464,7 +4464,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-server"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4513,7 +4513,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ssh-login"
-version = "0.11.3"
+version = "0.12.1"
 dependencies = [
  "clap",
  "crossterm",

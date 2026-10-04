@@ -39,6 +39,41 @@ hosty s timeoutem jedné sekundy. Starší daemon je kompatibilní, ale metadata
 nemá. Mouse capture je vypnutý, aby fungoval nativní výběr textu. Obrazovka se
 aktualizuje při vstupu/resize, nikoli neustálým překreslováním.
 
+## Přihlášení z VPS bez prohlížeče (klient 0.12.0)
+
+Na VPS musí existovat `~/.config/simple-idm-ssh-login/bastions.toml` (nebo
+v odpovídajícím XDG adresáři). Profil obsahuje URL bastionu, issuer, client_id,
+tenant a scopes; žádné heslo ani klíč. Spusťte:
+
+```sh
+simple-idm-ssh-login bastion bastion.cloud-app.cz --device
+# Stejný režim přes hostname shortcut:
+simple-idm-ssh-login bastion.cloud-app.cz --device
+```
+
+Klient vypíše URL a krátký kód. URL otevřete na telefonu nebo jiném počítači,
+kde dokončíte přihlášení a MFA dle IDM politiky. Na VPS se žádný prohlížeč
+neotevírá, nevytváří se lokální callback a nezadává se heslo ani MFA kód.
+Po schválení se otevře TUI. Přihlášení obnovované po HTTP 401 také používá
+Device Flow. Browser režim zůstává výchozí (`--browser`), přepínače jsou výlučné.
+V Device Flow se posílá access token, nikoliv ID token; přímý SSH režim nadále
+používá dosavadní ID-token kontrakt. Token žije pouze v paměti.
+
+Veřejný OAuth klient `simple-idm-bastion` musí povolovat oba granty:
+`authorization_code` a `urn:ietf:params:oauth:grant-type:device_code`.
+Existující scopes `openid profile email groups bastion:connect` zachovejte.
+Dosavadní formulář editace OAuth klienta nezachovává vlastní scopes, proto
+pro toto nasazení aktualizujte pouze grant_types přes admin API (PUT); jeho
+ostatní vlastnosti včetně scope zůstávají beze změny. Nasaďte **IDM server 0.12.1 nebo novější**, který Device Flow propojuje s běžným
+browser přihlášením. Existující platná SSO session se použije rovnou; bez ní
+se zobrazí běžný login včetně zaregistrovaných passkeys a MFA podle politiky.
+Přihlášení samo zařízení neschválí: další stránka ukáže účet, aplikaci a kód,
+na ní je potřeba kliknout na **Authorize device**. Signer ani bastion se
+nemění, tato změna nepřidává databázovou migraci.
+`POST /device` nyní vyžaduje browser session a CSRF token, nikoli username/password.
+
+Terminálový QR kód umožňuje otevřít odkaz fotoaparátem telefonu (SSH klient 0.12.1+). Textové URL a krátký kód zůstávají dostupné.
+
 ## Přidání hostu z CLI (0.2.0)
 
 Na bastionu pod uživatelem vlastnícím konfiguraci spusťte průvodce:

@@ -6,7 +6,7 @@
 use crate::config::WebauthnConfig;
 use crate::db::models::OAuthClient;
 use crate::mfa::{generate_transaction_token, transaction_token_hash};
-use crate::oauth2::authorization_code::is_redirect_uri_allowed;
+use crate::oauth2::authorization_code::is_login_destination_allowed;
 use anyhow::{Context, Result, anyhow, ensure};
 use chrono::{Duration, Utc};
 use serde_json::Value;
@@ -297,7 +297,7 @@ impl PasskeyService {
         .await?
         .ok_or_else(|| anyhow!("OAuth client is not active for this tenant"))?;
         ensure!(
-            is_redirect_uri_allowed(&client, &pending.redirect_uri),
+            is_login_destination_allowed(pool, &client, &pending.redirect_uri).await,
             "OAuth redirect URI is not allowed"
         );
         let stored: Vec<StoredPasskey> = sqlx::query_as(
@@ -353,7 +353,7 @@ impl PasskeyService {
         .await?
         .ok_or_else(|| anyhow!("OAuth client is no longer active"))?;
         ensure!(
-            is_redirect_uri_allowed(&client, &transaction.redirect_uri),
+            is_login_destination_allowed(pool, &client, &transaction.redirect_uri).await,
             "OAuth redirect URI is no longer allowed"
         );
         let ceremony: PasskeyAuthentication = serde_json::from_value(transaction.ceremony_state)?;

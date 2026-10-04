@@ -2,12 +2,108 @@
 
 Datum: 3. 10. 2026. Stav: V1 implementována a automaticky ověřena;
 Browser SSO, SSH, audit a návrat po exit jsou potvrzeny uživatelem;
-MFA a nová obrazovka Ratatui ještě čekají na ruční akceptaci.
+Ratatui i Device Flow se seznamem hostů a SSH připojením jsou potvrzeny uživatelem;
+živé Device Flow přihlášení passkey vytvořenou na macOS a použitou na iPhonu
+je potvrzené; samostatný TOTP/recovery test zůstává otevřený.
 Určeno pro vlastní infrastrukturu a Datalite. Tento dokument předává kontext
 dalšímu implementujícímu agentovi. Původní návrh níže zachovává kontext; skutečné kontrakty a konfigurace jsou
 popsané v `BASTION.cs.md` a v příkladech konfigurací.
 
 ## Průběžný stav realizace
+
+### QR kód Device Flow — SSH klient 0.12.1
+
+- Výstup Device Flow doplněn o terminálový QR kód (Unicode half-blocks).
+  Obsahuje `verification_uri_complete`, tedy přímý autorizační odkaz s veřejným
+  user code; pokud provider tento odkaz nevrátí, obsahuje `verification_uri`.
+  Privátní device_code ani token se do QR nevkládá. URL a krátký kód zůstávají.
+- Použita existující závislost qrcode; žádná nová knihovna ani změna serveru.
+  Zachovaný quiet zone, v TTY explicitní černá/bílá kvůli čitelnosti na obou
+  barevných tématech. Redirectovaný výstup neobsahuje ANSI barvy. Případné
+  selhání generování QR neblokuje dosavadní přihlášení přes textové URL.
+- [x] Klient 0.12.1 sestaven pro macOS/debug i Linux/static release.
+  4 Device Flow a 12 klientských testů prošlo (1 PTY fixture ignored);
+  fmt/diff check prošly. Linux binárka:
+  `target/x86_64-unknown-linux-musl/release/simple-idm-ssh-login`.
+- [x] 4. 10. 2026 uživatel potvrdil autorizaci na iPhonu pomocí passkey
+  vytvořené na macOS a následné funkční SSH připojení.
+- [ ] Samostatné výslovné potvrzení načtení QR fotoaparátem (uživatelská zpráva
+  potvrzuje mobilní autorizaci, způsob otevření URL nerozlišuje).
+
+### Device Flow se společným SSO — IDM server 0.12.1
+
+- Odstraněn vlastní password/TOTP formulář a jeho duplicitní ověřování z `/device`.
+  Bez session se použije společné browser přihlášení: heslo/AD, MFA, passkey,
+  případně federace. Platná SSO session vede přímo na potvrzení zařízení.
+- Potvrzení ukazuje účet, název aplikace a kód; GET nikdy zařízení neschválí.
+  POST vyžaduje platnou policy-aware session, CSRF a pending neexpirovaný kód.
+  Tenant účtu musí odpovídat tenantu aplikace. Ukládá původní session AMR/ACR.
+- Interní login cíl `urn:simple-idm:device:<user_code>` nese pouze veřejný
+  user code; v každém kroku se ověřuje vazba na aktivního klienta a pending
+  device request. Nemusí se registrovat další redirect URI, nevystavuje OAuth
+  authorization code. Stávající MFA/passkey transakce jej přenesou bez migrace.
+- Federované dokončení nyní také používá společný completion helper (DRY).
+  OAuth callbacky nadále vyžadují dosavadní registered redirect URI.
+- Browser kontrakt POST /device změněn: session + user_code + csrf_token;
+  dosavadní přímé username/password POST se už nepoužívá. Aktualizovaný E2E helper.
+- [x] PostgreSQL integrační test prošel: login, potvrzení s účtem, CSRF,
+  invalidace password-only session po zavedení required MFA, passkey completion
+  s WebAuthn AMR, expirace/replay a cizí tenant. WebAuthn assertion se v tomto
+  testu nesimuluje; skutečnou passkey následně potvrdil uživatel na iPhonu,
+  TOTP/recovery zůstává k samostatnému ručnímu ověření.
+- [x] Rozšířená regrese potvrdila přechod nového password loginu do běžné
+  `/oauth2/mfa` challenge se zachováním device intentu. 80 core testů + 12
+  klientských prošlo (5 DB fixture a 1 PTY fixture standardně ignored;
+  nová DB fixture spuštěna samostatně a prošla).
+- [x] Linux release 0.12.1 sestaven: `target/x86_64-unknown-linux-musl/release/simple-idm-server`.
+  Clippy bez -D warnings dokončeno; striktní Clippy blokují dosavadní linty
+  v core (mimo tuto změnu), které nebyly hromadně přepisovány. fmt/diff check prošly.
+- Legacy soubor `tests/e2e_flows.rs` je mimo crates ve virtuálním workspace;
+  helper je aktualizovaný, ale tento historický Docker suite nebyl spuštěn.
+  Nový aktivní integrační test je v core a využívá disposable PostgreSQL 16.
+- [x] 4. 10. 2026 uživatel po nasazení opravy potvrdil úspěšné přihlášení
+  příkazem `simple-idm-ssh-login bastion bastion.cloud-app.cz --device`,
+  zobrazení seznamu hostů a funkční SSH connect. Výstup končí
+  `Authentication successful!`. Signer ani bastion tato oprava nemění.
+- [x] Uživatel potvrdil živé passkey přihlášení z iOS/iPhonu s passkey
+  vytvořenou na macOS a úspěšné připojení.
+- [ ] Samostatné ověření TOTP/recovery a obou browser stavů (SSO / bez session).
+
+### Device Flow pro VPS — klient 0.12.0
+
+- Implementováno `bastion <hostname> --device` i `<hostname> --device`.
+  Shortcut používá stejný Clap parser a help jako explicitní příkaz; výchozí
+  browser flow je zachovaný, --device a --browser jsou výlučné.
+- Sdílený core Device Flow má API/access-token variantu bez open::that a bez
+  lokálního callbacku; dosavadní direct SSH stále dostává ID token. Bastion
+  obnovuje přihlášení po HTTP 401 stejným režimem. Profil zůstává povinný.
+- Polling zpracovává authorization_pending, slow_down, denial a expiraci,
+  má HTTP timeout/deadline a nefollowuje redirecty. Chyby device authorization
+  včetně OAuth JSON s HTTP 200 jasně uvádějí nutnost povolit device_code grant.
+  Nová access-token varianta vyžaduje HTTPS endpointy kromě loopback fixture.
+- Existující IDM Device Flow ověřuje TOTP/recovery dle politiky lokálního účtu.
+  --device samo MFA nevynucuje. Device Flow nepřidává přihlášení heslem do CLI.
+- Před živým testem u klienta `simple-idm-bastion` přidat grant
+  `urn:ietf:params:oauth:grant-type:device_code` a zachovat authorization_code,
+  scope `openid profile email groups bastion:connect` i ostatní vlastnosti.
+  Použít partial PUT admin API: existující edit formulář ztrácí vlastní scopes.
+  UUID nasazeného klienta: `be9fb13c-9dfc-4508-8a48-5c28a81546b6`.
+  Tato klientská část sama server nemění; navazující SSO oprava výše
+  vyžaduje nasadit IDM server 0.12.1 (signer se nemění).
+- [x] 4 nové core testy Device Flow prošly (pending/slow_down, access vs ID
+  token, denial/expiry/missing grant nebo access token, endpointy). Klient má
+  12 passing unit testů a 1 ignored PTY fixture.
+- [x] Clippy klienta prošlo, fmt/diff check prošly. Lokální debug klient
+  má verzi 0.12.0 (git ac99b45e7aeb). Linux release sestaven přes
+  `just release-linux-ssh-login`: `target/x86_64-unknown-linux-musl/release/simple-idm-ssh-login`.
+  Obě formy --device i shortcut --help jsou ověřené; navazující živý test
+  explicitního --device a SSH potvrdil uživatel 4. 10. 2026 (viz výše).
+- Pro nasazený OAuth klient: partial PUT `/admin/oauth-clients/be9fb13c-9dfc-4508-8a48-5c28a81546b6`
+  s `{"grant_types":["authorization_code","urn:ietf:params:oauth:grant-type:device_code"]}`.
+  Vyžaduje admin Bearer token na intel-nuc14; neprováděno agentem.
+- [x] Uživatel potvrdil živé Device Flow přihlášení, seznam hostů a SSH connect.
+- [x] Passkey autorizace na iPhonu potvrzena uživatelem.
+- [ ] Běh klienta z Linux VPS není v potvrzení výslovně uveden.
 
 ### Klávesa q — klient 0.11.3
 
