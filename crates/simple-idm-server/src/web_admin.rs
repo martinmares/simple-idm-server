@@ -394,6 +394,7 @@ pub struct ClientCreateForm {
     scope_email: Option<String>,
     scope_groups: Option<String>,
     scope_offline_access: Option<String>,
+    additional_scopes: Option<String>,
     groups_claim_mode: Option<String>,
     include_claim_maps: Option<String>,
     ignore_virtual_groups: Option<String>,
@@ -422,6 +423,7 @@ pub struct ClientUpdateForm {
     scope_email: Option<String>,
     scope_groups: Option<String>,
     scope_offline_access: Option<String>,
+    additional_scopes: Option<String>,
     groups_claim_mode: Option<String>,
     include_claim_maps: Option<String>,
     ignore_virtual_groups: Option<String>,
@@ -800,6 +802,14 @@ struct ClientRow {
 impl ClientRow {
     fn has_grant(&self, grant: &str) -> bool {
         self.grant_types.iter().any(|g| g == grant)
+    }
+
+    fn has_scope(&self, scope: &str) -> bool {
+        self.scope.split_whitespace().any(|s| s == scope)
+    }
+
+    fn additional_scopes(&self) -> String {
+        additional_scope_string(&self.scope)
     }
 }
 
@@ -2230,6 +2240,31 @@ fn selected_scope_string(form_values: &[String], fallback_scope: Option<&str>) -
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+const STANDARD_CLIENT_SCOPES: [&str; 5] =
+    ["openid", "profile", "email", "groups", "offline_access"];
+
+fn additional_scope_string(scope: &str) -> String {
+    scope
+        .split_whitespace()
+        .filter(|s| !STANDARD_CLIENT_SCOPES.contains(s))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn combine_client_scopes(selected: &[String], additional: &str) -> String {
+    let mut scopes = Vec::new();
+    for scope in selected
+        .iter()
+        .map(String::as_str)
+        .chain(additional.split_whitespace())
+    {
+        if !scopes.contains(&scope) {
+            scopes.push(scope);
+        }
+    }
+    scopes.join(" ")
 }
 
 fn selected_grant_types_from_flags(
@@ -7974,7 +8009,9 @@ async fn clients_create(
             &form.scope_groups,
             &form.scope_offline_access,
         );
-        if from_flags.is_empty() {
+        if let Some(additional) = &form.additional_scopes {
+            combine_client_scopes(&from_flags, additional)
+        } else if from_flags.is_empty() {
             selected_scope_string(&form.scopes, form.scope.as_deref())
         } else {
             from_flags.join(" ")
@@ -8048,7 +8085,9 @@ async fn clients_update(
             &form.scope_groups,
             &form.scope_offline_access,
         );
-        if from_flags.is_empty() {
+        if let Some(additional) = &form.additional_scopes {
+            combine_client_scopes(&from_flags, additional)
+        } else if from_flags.is_empty() {
             selected_scope_string(&form.scopes, form.scope.as_deref())
         } else {
             from_flags.join(" ")
@@ -8843,6 +8882,48 @@ async fn claim_patterns_deactivate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_scope_form_preserves_custom_scopes_and_removes_duplicates() {
+        let stored = "openid profile email groups bastion:connect admin:*";
+        assert_eq!(additional_scope_string(stored), "bastion:connect admin:*");
+        let form: ClientUpdateForm = serde_urlencoded::from_str(
+            "client_id=bastion&name=Bastion&redirect_uris=&scope_openid=on&scope_profile=on&scope_email=on&scope_groups=on&additional_scopes=bastion%3Aconnect+admin%3A%2A+openid+bastion%3Aconnect",
+        )
+        .unwrap();
+        let selected = selected_scopes_from_flags(
+            &form.scope_openid,
+            &form.scope_profile,
+            &form.scope_email,
+            &form.scope_groups,
+            &form.scope_offline_access,
+        );
+        assert_eq!(
+            combine_client_scopes(&selected, form.additional_scopes.as_deref().unwrap()),
+            stored
+        );
+    }
+
+    #[test]
+    fn client_scope_form_allows_removing_standard_and_custom_scopes() {
+        let form: ClientUpdateForm = serde_urlencoded::from_str(
+            "client_id=bastion&name=Bastion&redirect_uris=&additional_scopes=",
+        )
+        .unwrap();
+        let selected = selected_scopes_from_flags(
+            &form.scope_openid,
+            &form.scope_profile,
+            &form.scope_email,
+            &form.scope_groups,
+            &form.scope_offline_access,
+        );
+        assert_eq!(form.additional_scopes.as_deref(), Some(""));
+        assert_eq!(combine_client_scopes(&selected, ""), "");
+        assert_eq!(
+            combine_client_scopes(&selected, "bastion:connect"),
+            "bastion:connect"
+        );
+    }
 
     #[test]
     fn domain_form_defaults_and_empty_provider_are_supported() {

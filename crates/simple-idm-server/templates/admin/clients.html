@@ -45,9 +45,17 @@
         </div>
       </div>
       <div class="col-md-4">
-        <label class="form-label">Scope</label>
-        <input class="form-control" name="scope" value="openid profile email groups" placeholder="openid profile email groups bastion:connect">
-        <div class="form-text">Space-separated scopes, including any custom application scopes.</div>
+        <label class="form-label">Standard scopes</label>
+        <div class="d-flex flex-wrap gap-2">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" checked><span class="form-check-label">openid</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_profile" value="on" checked><span class="form-check-label">profile</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_email" value="on" checked><span class="form-check-label">email</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_groups" value="on" checked><span class="form-check-label">groups</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_offline_access" value="on"><span class="form-check-label">offline_access</span></label>
+        </div>
+        <label class="form-label mt-2">Additional scopes</label>
+        <input class="form-control" name="additional_scopes" value="" placeholder="bastion:connect admin:*">
+        <div class="form-text">Space-separated additional scopes. Duplicates are removed when saving.</div>
       </div>
       <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_public" type="checkbox" checked><label class="form-check-label">public</label></div>
       <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked><label class="form-check-label">active</label></div>
@@ -143,9 +151,17 @@
                 <input class="form-control" name="client_secret" type="password" autocomplete="new-password" placeholder="required when switching to confidential without an existing secret">
               </div>
               <div class="col-md-6">
-                <label class="form-label">Scope</label>
-                <input class="form-control" name="scope" value="{{ r.scope }}" placeholder="openid profile email groups bastion:connect">
-                <div class="form-text">Space-separated scopes, including any custom application scopes.</div>
+                <label class="form-label">Standard scopes</label>
+                <div class="d-flex flex-wrap gap-2">
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" {% if r.has_scope("openid") %}checked{% endif %}><span class="form-check-label">openid</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_profile" value="on" {% if r.has_scope("profile") %}checked{% endif %}><span class="form-check-label">profile</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_email" value="on" {% if r.has_scope("email") %}checked{% endif %}><span class="form-check-label">email</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_groups" value="on" {% if r.has_scope("groups") %}checked{% endif %}><span class="form-check-label">groups</span></label>
+                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_offline_access" value="on" {% if r.has_scope("offline_access") %}checked{% endif %}><span class="form-check-label">offline_access</span></label>
+                </div>
+                <label class="form-label mt-2">Additional scopes</label>
+                <input class="form-control" name="additional_scopes" value="{{ r.additional_scopes() }}" placeholder="bastion:connect admin:*">
+                <div class="form-text">Space-separated additional scopes. Duplicates are removed when saving.</div>
               </div>
               <div class="col-md-12">
                 <label class="form-label">Redirect URIs (comma separated)</label>

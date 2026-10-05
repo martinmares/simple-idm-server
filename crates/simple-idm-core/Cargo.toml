@@ -67,6 +67,7 @@ url = "2.5"
 dirs = "7.0"
 urlencoding = "2.1"
 qrcode = "0.14"
+qr_code = { version = "2.0.0", default-features = false }
 open = "5.4"
 chacha20poly1305 = "0.11"
 totp-rs = { version = "6.0", features = ["gen_secret", "otpauth", "zeroize"] }

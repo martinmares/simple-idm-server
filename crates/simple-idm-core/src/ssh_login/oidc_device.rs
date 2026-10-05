@@ -148,21 +148,17 @@ async fn device_token_flow(
         .verification_uri_complete
         .as_deref()
         .unwrap_or(&auth_response.verification_uri);
-    match qrcode::QrCode::new(qr_uri.as_bytes()) {
+    match qr_code::QrCode::new(qr_uri.as_bytes()) {
         Ok(code) => {
-            let qr = code
-                .render::<qrcode::render::unicode::Dense1x2>()
-                .quiet_zone(true)
-                .build();
             println!("\nScan with your phone camera:");
-            let terminal = std::io::stdout().is_terminal();
-            for line in qr.lines() {
-                if terminal {
-                    // Explicit black modules on a white background work with dark and light themes.
-                    println!("\x1b[30;47m{line}\x1b[0m");
-                } else {
-                    println!("{line}");
-                }
+            if std::io::stdout().is_terminal() {
+                println!(
+                    "Keep the QR code unwrapped ({} terminal columns required).",
+                    code.width() + 8
+                );
+                print!("{}", terminal_qr(&code));
+            } else {
+                println!("{}", code.to_string(false, 4));
             }
         }
         Err(error) => tracing::debug!("Cannot render device QR code; use the printed URL: {error}"),
@@ -264,6 +260,25 @@ async fn device_token_flow(
     }
 }
 
+/// Keep the MIT-licensed qr_code renderer's compact geometry and quiet zone.
+/// Only style its output: solid modules use cell backgrounds, and mixed modules
+/// use lower blocks with foreground/background inversion to avoid font gaps.
+fn terminal_qr(code: &qr_code::QrCode) -> String {
+    let mut output = String::new();
+    for line in code.to_string(false, 4).trim_end_matches('\n').lines() {
+        for cell in line.chars() {
+            output.push_str(match cell {
+                '█' => "\x1b[48;5;16m ",
+                '▀' => "\x1b[38;5;231;48;5;16m▄",
+                '▄' => "\x1b[38;5;16;48;5;231m▄",
+                _ => "\x1b[48;5;231m ",
+            });
+        }
+        output.push_str("\x1b[0m\n");
+    }
+    output
+}
+
 fn secure_endpoint(value: &str) -> Result<(), String> {
     let url = reqwest::Url::parse(value).map_err(|_| "Invalid device flow endpoint")?;
     let loopback = url.host_str().is_some_and(|host| {
@@ -300,6 +315,43 @@ mod tests {
             atomic::{AtomicUsize, Ordering},
         },
     };
+
+    #[test]
+    fn terminal_qr_is_compact_with_white_border_and_no_upper_blocks() {
+        let code =
+            qr_code::QrCode::new(b"https://example.test/device?user_code=TEST-1234").unwrap();
+        let rendered = terminal_qr(&code);
+        let mut plain = String::new();
+        let mut escape = false;
+        for ch in rendered.chars() {
+            if ch == '\u{1b}' {
+                escape = true;
+            } else if escape {
+                if ch == 'm' {
+                    escape = false;
+                }
+            } else {
+                plain.push(ch);
+            }
+        }
+        let side = code.width() + 8;
+        let lines: Vec<_> = plain.lines().collect();
+        assert_eq!(lines.len(), side.div_ceil(2));
+        assert!(lines.iter().all(|line| line.chars().count() == side));
+        assert!(!plain.contains(['▀', '█']));
+        assert!(plain.contains('▄'));
+        for line in lines.iter().take(2).chain(lines.iter().rev().take(2)) {
+            assert_eq!(*line, " ".repeat(side));
+        }
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.starts_with("    ") && line.ends_with("    "))
+        );
+        assert!(rendered.contains("\x1b[38;5;231;48;5;16m▄"));
+        assert!(rendered.contains("\x1b[38;5;16;48;5;231m▄"));
+    }
+
     #[derive(Clone)]
     struct Fixture {
         url: String,
