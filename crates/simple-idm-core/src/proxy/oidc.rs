@@ -32,6 +32,10 @@ pub struct TokenResponse {
 
 #[derive(Debug, Clone)]
 pub struct RefreshResult {
+    pub subject: String,
+    pub username: String,
+    pub email: Option<String>,
+    pub groups: Vec<String>,
     pub refresh_token: Option<String>,
 }
 
@@ -39,6 +43,7 @@ impl OidcClient {
     pub async fn new(config: &Config) -> Result<Self> {
         let http_client = reqwest::ClientBuilder::new()
             .redirect(reqwest::redirect::Policy::none())
+            .timeout(std::time::Duration::from_secs(15))
             .build()
             .context("Failed to build OIDC HTTP client")?;
 
@@ -50,6 +55,19 @@ impl OidcClient {
             .await
             .context("Failed to discover OIDC provider metadata")?;
 
+        for endpoint in [
+            Some(provider_metadata.authorization_endpoint().as_str()),
+            provider_metadata.token_endpoint().map(|url| url.as_str()),
+            Some(provider_metadata.jwks_uri().as_str()),
+            provider_metadata
+                .userinfo_endpoint()
+                .map(|url| url.as_str()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            simple_idm_common::validate_identity_url(endpoint).map_err(anyhow::Error::msg)?;
+        }
         tracing::debug!("OIDC client created for issuer: {}", config.oidc_issuer);
 
         Ok(Self {
@@ -180,7 +198,11 @@ impl OidcClient {
         })
     }
 
-    pub async fn refresh_token(&self, refresh_token: &str) -> Result<RefreshResult> {
+    pub async fn refresh_token(
+        &self,
+        refresh_token: &str,
+        expected_subject: &str,
+    ) -> Result<RefreshResult> {
         let redirect_url = format!(
             "{}{}",
             self.config.public_base_url, self.config.redirect_path
@@ -200,7 +222,49 @@ impl OidcClient {
             .await
             .context("Failed to refresh token")?;
 
+        let endpoint = self
+            .provider_metadata
+            .userinfo_endpoint()
+            .context("UserInfo is required to renew authorization claims")?;
+        simple_idm_common::validate_identity_url(endpoint.as_str()).map_err(anyhow::Error::msg)?;
+        let response = self
+            .http_client
+            .get(endpoint.url().clone())
+            .bearer_auth(token_response.access_token().secret())
+            .send()
+            .await?
+            .error_for_status()?;
+        let claims: HashMap<String, Value> = serde_json::from_slice(&response.bytes().await?)
+            .context("Invalid UserInfo response")?;
+        let subject = claims
+            .get("sub")
+            .and_then(Value::as_str)
+            .context("Missing UserInfo subject")?;
+        if subject != expected_subject {
+            anyhow::bail!("UserInfo subject changed during refresh");
+        }
+        let username = self
+            .config
+            .username_claims
+            .iter()
+            .find_map(|key| {
+                claims
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+            })
+            .unwrap_or(subject)
+            .to_owned();
+        let email = claims
+            .get(&self.config.email_claim)
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let groups = self.extract_groups(&claims)?;
         Ok(RefreshResult {
+            subject: subject.to_owned(),
+            username,
+            email,
+            groups,
             refresh_token: token_response
                 .refresh_token()
                 .map(|token| token.secret().to_string()),

@@ -76,7 +76,9 @@ async fn browser_token_flow(
 
     let metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
         .await
-        .map_err(|e| format!("OIDC discovery failed: {}", e))?;
+        // Discovery has no credentials; include the transport cause, which the
+        // library's Display implementation hides behind "Request failed".
+        .map_err(|e| format!("OIDC discovery failed: {e:?}"))?;
 
     // Create OIDC client
     let client = CoreClient::from_provider_metadata(

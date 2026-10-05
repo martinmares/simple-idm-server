@@ -61,9 +61,10 @@ memory. Device Flow honors the IDM policy rather than forcing MFA itself.
 
 The public bastion OAuth client must allow both `authorization_code` and
 `urn:ietf:params:oauth:grant-type:device_code`. Preserve existing scopes,
-including `bastion:connect`. The current admin edit form drops custom scopes;
-for the existing deployment, use a partial admin API PUT of grant_types to
-avoid changing them. Deploy IDM server **0.12.1 or newer** for shared browser authentication.
+including `bastion:connect`. The admin client form accepts space-separated
+scopes and preserves custom scopes when editing. Older builds with only
+scope checkboxes drop custom scopes; use a partial admin API PUT until upgraded.
+Deploy IDM server **0.12.1 or newer** for shared browser authentication.
 The device link reuses a valid SSO session or offers the normal login, including
 registered Passkeys and the configured MFA challenge. Signing in does not
 approve a device: the next page shows the account, application and code and

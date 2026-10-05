@@ -185,3 +185,46 @@ fn asset_content_type(path: &str) -> &'static str {
         _ => "application/octet-stream",
     }
 }
+
+/// Identity credentials may travel over HTTP only to a local loopback service.
+pub fn validate_identity_url(value: &str) -> Result<(), String> {
+    let url = url::Url::parse(value).map_err(|_| "Invalid identity URL")?;
+    if !url.username().is_empty() || url.password().is_some() || url.fragment().is_some() {
+        return Err("Identity URL must not contain credentials or a fragment".into());
+    }
+    let loopback = match url.host() {
+        Some(url::Host::Domain(host)) => host == "localhost",
+        Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+        Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+        None => false,
+    };
+    if url.scheme() == "https" && url.host().is_some() || url.scheme() == "http" && loopback {
+        Ok(())
+    } else {
+        Err("Identity URL requires HTTPS outside loopback".into())
+    }
+}
+
+#[cfg(test)]
+mod identity_url_tests {
+    use super::*;
+    #[test]
+    fn identity_transport_requires_https_or_loopback() {
+        for url in [
+            "https://idm.example.test",
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
+            assert!(validate_identity_url(url).is_ok());
+        }
+        for url in [
+            "http://idm.example.test",
+            "http://localhost.example.test",
+            "https://user:password@idm.example.test",
+            "https://idm.example.test/#fragment",
+        ] {
+            assert!(validate_identity_url(url).is_err());
+        }
+    }
+}

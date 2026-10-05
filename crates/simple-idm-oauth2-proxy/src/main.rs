@@ -49,6 +49,7 @@ struct AppState {
     oidc_client: Arc<OidcClient>,
     session_store: Arc<SessionStore>,
     http_client: Client,
+    refresh_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 #[tokio::main]
@@ -94,10 +95,13 @@ async fn main() -> Result<()> {
         oidc_client,
         session_store,
         http_client,
+        refresh_lock: Arc::new(tokio::sync::Mutex::new(())),
     };
 
     let mut app = Router::new()
         .route("/healthz", get(healthz))
+        // Browser icon requests after logout must not initiate an OIDC login.
+        .route("/favicon.ico", get(|| async { StatusCode::NO_CONTENT }))
         .route("/auth", get(handle_auth))
         .route("/start", get(handle_start))
         .route("/callback", get(handle_callback))
@@ -144,7 +148,10 @@ async fn handle_reverse_proxy(
     ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
     req: Request,
 ) -> Response {
-    let path = req.uri().path().to_string();
+    let path = match canonical_request_path(req.uri().path()) {
+        Ok(path) => path,
+        Err(_) => return (StatusCode::BAD_REQUEST, "Ambiguous request path").into_response(),
+    };
     let protected = is_protected_path(&state.config, &path);
 
     let session = if protected {
@@ -185,7 +192,7 @@ async fn forward_http_request(
         .request(parts.method.clone(), upstream_url)
         .body(reqwest::Body::wrap_stream(body.into_data_stream()));
 
-    let mut headers = sanitize_upstream_headers(&parts.headers);
+    let mut headers = sanitize_upstream_headers(&state.config, &parts.headers);
     if let Some(session) = session {
         inject_auth_headers(&state.config, session, &mut headers);
     }
@@ -220,7 +227,7 @@ async fn handle_websocket_proxy(
             return (StatusCode::BAD_GATEWAY, "invalid websocket upstream").into_response();
         }
     };
-    let headers = sanitize_upstream_headers(req.headers());
+    let headers = sanitize_upstream_headers(&state.config, req.headers());
 
     ws.on_upgrade(move |downstream| async move {
         if let Err(err) =
@@ -292,9 +299,14 @@ async fn handle_start(
         Ok((auth_url, flow_state)) => {
             state.session_store.store_flow_state(&flow_state).await;
 
+            let secure = if state.config.public_base_url.starts_with("https://") {
+                "; Secure"
+            } else {
+                ""
+            };
             let cookie = format!(
-                "{}={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=600",
-                "__oauth_state", flow_state.state
+                "{}={}; Path=/; HttpOnly{}; SameSite=Lax; Max-Age=600",
+                "__oauth_state", flow_state.state, secure
             );
 
             let mut response = Redirect::temporary(&auth_url).into_response();
@@ -352,7 +364,7 @@ async fn handle_callback(
     let flow_state = match state.session_store.get_flow_state(state_param).await {
         Some(fs) => fs,
         None => {
-            tracing::error!("Flow state not found: {}", state_param);
+            tracing::error!("Flow state not found or already consumed");
             return (StatusCode::BAD_REQUEST, "Invalid state").into_response();
         }
     };
@@ -402,7 +414,7 @@ async fn handle_callback(
 async fn handle_logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Some(session_id) = extract_session_cookie(&headers, &state.config.cookie_name) {
         state.session_store.delete(&session_id).await;
-        tracing::info!("Session deleted: {}", session_id);
+        tracing::info!("Session deleted");
     }
 
     let cookie = format!(
@@ -455,12 +467,25 @@ async fn authorize_session(state: &AppState, headers: &HeaderMap) -> Option<Sess
 
     match state.session_store.get(&session_id).await {
         Some(s) if !s.is_expired() => Some(s),
-        Some(s) => {
+        Some(_) => {
+            let _refresh = state.refresh_lock.lock().await;
+            let s = state.session_store.get(&session_id).await?;
+            if !s.is_expired() {
+                return Some(s);
+            }
+            if s.absolute_expired(state.config.session_max_age) {
+                state.session_store.delete(&session_id).await;
+                return None;
+            }
             let Some(refresh_token) = s.refresh_token.clone() else {
-                tracing::debug!("Session expired without refresh token: {}", session_id);
+                tracing::debug!("Session expired without refresh token");
                 return None;
             };
-            match state.oidc_client.refresh_token(&refresh_token).await {
+            match state
+                .oidc_client
+                .refresh_token(&refresh_token, &s.subject)
+                .await
+            {
                 Ok(refresh) => {
                     match state
                         .session_store
@@ -469,19 +494,19 @@ async fn authorize_session(state: &AppState, headers: &HeaderMap) -> Option<Sess
                     {
                         Some(updated) => Some(updated),
                         None => {
-                            tracing::warn!("Failed to refresh session: {}", session_id);
+                            tracing::warn!("Failed to refresh session");
                             None
                         }
                     }
                 }
                 Err(err) => {
-                    tracing::warn!("Token refresh failed for session {}: {:?}", session_id, err);
+                    tracing::warn!("Token refresh failed: {:?}", err);
                     None
                 }
             }
         }
         None => {
-            tracing::debug!("Session not found: {}", session_id);
+            tracing::debug!("Session not found");
             None
         }
     }
@@ -529,18 +554,44 @@ fn insert_auth_header(headers: &mut HeaderMap, name: HeaderName, value: &str) {
     }
 }
 
+fn canonical_request_path(path: &str) -> Result<String> {
+    let decoded = urlencoding::decode(path).context("Invalid path encoding")?;
+    if !decoded.starts_with('/')
+        || decoded.contains(['%', '\\'])
+        || decoded.contains("//")
+        || decoded.chars().any(char::is_control)
+        || decoded.split('/').any(|part| part == "." || part == "..")
+    {
+        anyhow::bail!("Ambiguous path");
+    }
+    Ok(decoded.into_owned())
+}
+
+#[cfg(test)]
+fn canonical_path(path: &str) -> bool {
+    canonical_request_path(path).is_ok()
+}
+
+fn path_matches(path: &str, prefix: &str) -> bool {
+    prefix == "/"
+        || path == prefix.trim_end_matches('/')
+        || path
+            .strip_prefix(prefix.trim_end_matches('/'))
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 fn is_protected_path(config: &Config, path: &str) -> bool {
     if config
         .public_prefixes
         .iter()
-        .any(|prefix| path.starts_with(prefix))
+        .any(|prefix| path_matches(path, prefix))
     {
         return false;
     }
     config
         .protected_prefixes
         .iter()
-        .any(|prefix| path.starts_with(prefix))
+        .any(|prefix| path_matches(path, prefix))
 }
 
 fn redirect_to_login(uri: &Uri) -> Redirect {
@@ -552,10 +603,13 @@ fn build_upstream_url(config: &Config, uri: &Uri) -> Result<String> {
     let upstream = config
         .upstream_url
         .as_deref()
-        .context("upstream_url is not configured")?
-        .trim_end_matches('/');
-    let path = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
-    Ok(format!("{upstream}{path}"))
+        .context("upstream_url is not configured")?;
+    let path = canonical_request_path(uri.path())?;
+    let mut url = reqwest::Url::parse(upstream)?;
+    let base = url.path().trim_end_matches('/').to_string();
+    url.set_path(&format!("{base}{path}"));
+    url.set_query(uri.query());
+    Ok(url.to_string())
 }
 
 fn build_websocket_upstream_url(config: &Config, uri: &Uri) -> Result<String> {
@@ -569,10 +623,15 @@ fn build_websocket_upstream_url(config: &Config, uri: &Uri) -> Result<String> {
     }
 }
 
-fn sanitize_upstream_headers(headers: &HeaderMap) -> HeaderMap {
+fn sanitize_upstream_headers(config: &Config, headers: &HeaderMap) -> HeaderMap {
     let mut out = HeaderMap::new();
     for (name, value) in headers {
-        if should_forward_request_header(name) && !is_auth_header(name) {
+        if should_forward_request_header(name)
+            && !is_auth_header(name)
+            && !name
+                .as_str()
+                .eq_ignore_ascii_case(&config.groups_header_name)
+        {
             out.append(name, value.clone());
         }
     }
@@ -669,5 +728,36 @@ fn tungstenite_to_axum_message(message: TungsteniteMessage) -> Option<AxumWsMess
             }
         }))),
         TungsteniteMessage::Frame(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    #[test]
+    fn public_path_exceptions_use_segment_boundaries() {
+        let config = Config::default();
+        assert!(!is_protected_path(&config, "/healthz"));
+        assert!(is_protected_path(&config, "/healthz-private"));
+        assert!(is_protected_path(&config, "/admin"));
+        assert!(is_protected_path(&config, "/v2/"));
+        assert!(is_protected_path(&config, "/favicon.ico/private"));
+        assert!(!canonical_path("/public/../admin"));
+        assert!(!canonical_path("/public//status"));
+    }
+    #[test]
+    fn custom_identity_headers_are_removed_before_forwarding() {
+        let config = Config {
+            groups_header_name: "X-App-Roles".into(),
+            ..Config::default()
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-app-roles", "untrusted".parse().unwrap());
+        headers.insert("x-auth-user", "untrusted".parse().unwrap());
+        headers.insert("accept", "text/plain".parse().unwrap());
+        let clean = sanitize_upstream_headers(&config, &headers);
+        assert!(!clean.contains_key("x-app-roles"));
+        assert!(!clean.contains_key("x-auth-user"));
+        assert!(clean.contains_key("accept"));
     }
 }

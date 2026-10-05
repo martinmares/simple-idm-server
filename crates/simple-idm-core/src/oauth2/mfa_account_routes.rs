@@ -385,8 +385,12 @@ pub async fn confirm(
         }
         Ok(true) => {}
     }
-    let codes = match mfa::activate_totp_and_generate_recovery_codes(&state.db_pool, &authenticator)
-        .await
+    let codes = match mfa::activate_totp_and_generate_recovery_codes(
+        &state.db_pool,
+        &authenticator,
+        session.credential_version,
+    )
+    .await
     {
         Ok(value) => value,
         Err(err) => {

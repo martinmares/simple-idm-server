@@ -12,7 +12,6 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::auth::password::hash_password;
 use crate::oauth2::OAuth2State;
 use crate::oauth2::templates;
 
@@ -95,7 +94,8 @@ pub async fn submit_password_reset_form(
         return (StatusCode::BAD_REQUEST, Html(html)).into_response();
     }
 
-    let password_hash = match hash_password(&form.password) {
+    let password_hash = match crate::auth::password::hash_user_password_async(&form.password).await
+    {
         Ok(hash) => hash,
         Err(_) => {
             let _ = tx.rollback().await;

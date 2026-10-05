@@ -125,7 +125,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.max_ttl_seconds,
             config.clock_skew_seconds,
         )
-        .map_err(|e| format!("Failed to initialize cert signer: {}", e))?,
+        .map_err(|e| format!("Failed to initialize cert signer: {}", e))?
+        .with_extensions(&config),
     );
     tracing::info!("Certificate signer initialized");
 

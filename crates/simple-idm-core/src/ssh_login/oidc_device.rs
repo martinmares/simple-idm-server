@@ -54,9 +54,7 @@ async fn device_token_flow(
     access_token: bool,
 ) -> Result<String, String> {
     tracing::info!("Starting device flow");
-    if access_token {
-        secure_endpoint(issuer)?;
-    }
+    secure_endpoint(issuer)?;
 
     let http_client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -88,10 +86,8 @@ async fn device_token_flow(
         .as_str()
         .ok_or("No token_endpoint in metadata")?;
 
-    if access_token {
-        for endpoint in [issuer, device_authorization_endpoint, token_endpoint] {
-            secure_endpoint(endpoint)?;
-        }
+    for endpoint in [issuer, device_authorization_endpoint, token_endpoint] {
+        secure_endpoint(endpoint)?;
     }
 
     // Request device authorization

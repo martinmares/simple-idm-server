@@ -281,6 +281,8 @@ impl Config {
             .parse()
             .unwrap_or(false);
 
+        simple_idm_common::validate_identity_url(&jwt_issuer)
+            .map_err(config::ConfigError::Message)?;
         validate_admin_root_token_policy(&app_env, &admin_root_token)?;
         let webauthn = parse_webauthn_config()?;
 

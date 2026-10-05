@@ -10,6 +10,8 @@ use super::cert_signer::{CertSigner, SignRequest};
 use super::jwt_validator::JwtValidator;
 use super::principal_mapper::PrincipalMapper;
 
+static SIGNING_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(4);
+
 pub struct AppState {
     pub jwt_validator: Arc<JwtValidator>,
     pub principal_mapper: Arc<PrincipalMapper>,
@@ -109,10 +111,15 @@ pub async fn handle_bastion_sign(
         Ok(p) => p,
         Err(e) => return fail(StatusCode::FORBIDDEN, e),
     };
+    let permit = match SIGNING_WORKERS.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => return fail(StatusCode::TOO_MANY_REQUESTS, "Certificate signer is busy"),
+    };
     let signer = state.cert_signer.clone();
     let session_id = req.session_id;
     let identity = session_id.clone();
     let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
         signer.sign_bastion_certificate(
             SignRequest {
                 public_key: req.public_key,
@@ -236,7 +243,28 @@ pub async fn handle_sign(
         ttl_seconds: req.ttl_seconds,
     };
 
-    let signed_cert = match state.cert_signer.sign_certificate(sign_req) {
+    let permit = match SIGNING_WORKERS.try_acquire() {
+        Ok(permit) => permit,
+        Err(_) => {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(ErrorResponse {
+                    error: "temporarily_unavailable".into(),
+                    error_description: "Certificate signer is busy".into(),
+                }),
+            )
+                .into_response();
+        }
+    };
+    let signer = state.cert_signer.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        signer.sign_certificate(sign_req)
+    })
+    .await
+    .map_err(|error| error.to_string())
+    .and_then(|result| result);
+    let signed_cert = match result {
         Ok(cert) => cert,
         Err(e) => {
             tracing::error!("Certificate signing failed: {}", e);

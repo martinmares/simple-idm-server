@@ -89,6 +89,11 @@ pub async fn build_custom_claims(
     let mut claims_by_name: std::collections::HashMap<String, Vec<ClaimMap>> =
         std::collections::HashMap::new();
     for map in applicable_claim_maps {
+        if is_reserved_claim(&map.claim_name) {
+            return Err(
+                sqlx::Error::Protocol("Reserved JWT claim name in claim map".into()).into(),
+            );
+        }
         claims_by_name
             .entry(map.claim_name.clone())
             .or_default()
@@ -305,4 +310,30 @@ pub async fn get_direct_user_group_names(
     };
 
     Ok(group_names)
+}
+
+pub fn is_reserved_claim(name: &str) -> bool {
+    matches!(
+        name,
+        "iss"
+            | "sub"
+            | "aud"
+            | "exp"
+            | "iat"
+            | "nbf"
+            | "jti"
+            | "nonce"
+            | "scope"
+            | "groups"
+            | "amr"
+            | "acr"
+            | "credential_version"
+            | "tenant_id"
+            | "email"
+            | "preferred_username"
+            | "azp"
+            | "auth_time"
+            | "at_hash"
+            | "c_hash"
+    )
 }

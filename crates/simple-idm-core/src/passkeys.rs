@@ -36,6 +36,7 @@ pub struct PasskeySummary {
 
 #[derive(Debug, Clone)]
 pub struct PendingAuthorization {
+    pub credential_version: i64,
     pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub client_id: Uuid,
@@ -62,6 +63,7 @@ struct RegistrationTransaction {
 
 #[derive(FromRow)]
 struct AuthenticationTransaction {
+    credential_version: i64,
     tenant_id: Uuid,
     user_id: Uuid,
     client_id: Uuid,
@@ -318,13 +320,14 @@ impl PasskeyService {
             .execute(pool)
             .await?;
         sqlx::query(
-            "INSERT INTO webauthn_authentication_transactions (token_hash, tenant_id, user_id, client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, nonce, ceremony_state, expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
+            "INSERT INTO webauthn_authentication_transactions (token_hash, tenant_id, user_id, client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, nonce, ceremony_state, expires_at, credential_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
         )
         .bind(transaction_token_hash(&token)).bind(pending.tenant_id).bind(pending.user_id)
         .bind(pending.client_id).bind(&pending.redirect_uri).bind(&pending.scope)
         .bind(&pending.state).bind(&pending.code_challenge).bind(&pending.code_challenge_method)
         .bind(&pending.nonce).bind(serde_json::to_value(ceremony)?)
         .bind(Utc::now() + Duration::minutes(CEREMONY_TTL_MINUTES))
+        .bind(pending.credential_version)
         .execute(pool).await?;
         Ok((token, challenge))
     }
@@ -336,7 +339,7 @@ impl PasskeyService {
         credential: &PublicKeyCredential,
     ) -> Result<PendingAuthorization> {
         let transaction = sqlx::query_as::<_, AuthenticationTransaction>(
-            "DELETE FROM webauthn_authentication_transactions WHERE token_hash = $1 AND expires_at > NOW() RETURNING tenant_id, user_id, client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, nonce, ceremony_state",
+            "DELETE FROM webauthn_authentication_transactions WHERE token_hash = $1 AND expires_at > NOW() RETURNING tenant_id, user_id, client_id, redirect_uri, scope, state, code_challenge, code_challenge_method, nonce, ceremony_state, credential_version",
         )
         .bind(transaction_token_hash(token)).fetch_optional(pool).await?
         .ok_or_else(|| anyhow!("Authentication expired or already used"))?;
@@ -380,6 +383,7 @@ impl PasskeyService {
             .execute(&mut *db_tx).await?;
         db_tx.commit().await?;
         Ok(PendingAuthorization {
+            credential_version: transaction.credential_version,
             tenant_id: transaction.tenant_id,
             user_id: transaction.user_id,
             client_id: transaction.client_id,

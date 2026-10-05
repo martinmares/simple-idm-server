@@ -2,7 +2,8 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenClaims {
@@ -63,11 +64,18 @@ struct JwksKey {
     e: Option<String>,
 }
 
+#[derive(Default)]
+struct KeyCache {
+    keys: HashMap<String, DecodingKey>,
+    fetched_at: Option<Instant>,
+    attempted_at: Option<Instant>,
+}
+
 pub struct JwtValidator {
     oidc_issuer: String,
     expected_audience: String,
     allowed_algs: Vec<Algorithm>,
-    jwks_cache: Arc<RwLock<HashMap<String, DecodingKey>>>,
+    jwks_cache: Arc<Mutex<KeyCache>>,
     jwks_uri: String,
     http_client: reqwest::Client,
 }
@@ -78,6 +86,7 @@ impl JwtValidator {
         expected_audience: String,
         allowed_algs: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        simple_idm_common::validate_identity_url(&oidc_issuer)?;
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .redirect(reqwest::redirect::Policy::none())
@@ -89,6 +98,7 @@ impl JwtValidator {
 
         let discovery: OidcDiscovery = http_client.get(&discovery_url).send().await?.json().await?;
 
+        simple_idm_common::validate_identity_url(&discovery.jwks_uri)?;
         tracing::info!("OIDC JWKS URI: {}", discovery.jwks_uri);
 
         // Parse allowed algorithms
@@ -115,7 +125,7 @@ impl JwtValidator {
             oidc_issuer,
             expected_audience,
             allowed_algs,
-            jwks_cache: Arc::new(RwLock::new(HashMap::new())),
+            jwks_cache: Arc::new(Mutex::new(KeyCache::default())),
             jwks_uri: discovery.jwks_uri,
             http_client,
         })
@@ -159,58 +169,73 @@ impl JwtValidator {
     }
 
     async fn get_decoding_key(&self, kid: &str) -> Result<DecodingKey, Box<dyn std::error::Error>> {
-        // Check cache first
-        {
-            let cache = self.jwks_cache.read().await;
-            if let Some(key) = cache.get(kid) {
+        // The lock provides single-flight refresh, including misses for unknown kids.
+        let mut cache = self.jwks_cache.lock().await;
+        let fresh = cache
+            .fetched_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(300));
+        if fresh {
+            if let Some(key) = cache.keys.get(kid) {
                 return Ok(key.clone());
             }
         }
-
-        // Fetch JWKS
-        tracing::debug!("Fetching JWKS from {}", self.jwks_uri);
-        let jwks: Jwks = self
+        if cache
+            .attempted_at
+            .is_some_and(|at| at.elapsed() < Duration::from_secs(30))
+        {
+            return Err("Signing key unavailable; refresh is rate limited".into());
+        }
+        cache.attempted_at = Some(Instant::now());
+        let response = self
             .http_client
             .get(&self.jwks_uri)
             .send()
             .await?
-            .json()
-            .await?;
-
-        // Find key with matching kid
-        let jwks_key = jwks
-            .keys
-            .iter()
-            .find(|k| k.kid == kid)
-            .ok_or_else(|| format!("Key with kid {} not found in JWKS", kid))?;
-
-        // Convert to DecodingKey
-        let decoding_key = match jwks_key.kty.as_str() {
-            "RSA" => {
-                let n = jwks_key.n.as_ref().ok_or("Missing n in RSA key")?;
-                let e = jwks_key.e.as_ref().ok_or("Missing e in RSA key")?;
-
-                DecodingKey::from_rsa_components(n, e)
-                    .map_err(|e| format!("Failed to create RSA key: {}", e))?
-            }
-            kty => return Err(format!("Unsupported key type: {}", kty).into()),
-        };
-
-        // Cache the key
+            .error_for_status()?;
+        if response
+            .content_length()
+            .is_some_and(|length| length > 1_048_576)
         {
-            let mut cache = self.jwks_cache.write().await;
-            cache.insert(kid.to_string(), decoding_key.clone());
+            return Err("JWKS too large".into());
         }
-
-        tracing::info!("Cached decoding key for kid: {}", kid);
-
-        Ok(decoding_key)
+        let bytes = response.bytes().await?;
+        if bytes.len() > 1_048_576 {
+            return Err("JWKS too large".into());
+        }
+        let jwks: Jwks = serde_json::from_slice(&bytes)?;
+        let mut keys = HashMap::new();
+        for key in jwks.keys {
+            if key.kty != "RSA"
+                || key.key_use.as_deref().is_some_and(|usage| usage != "sig")
+                || key
+                    .alg
+                    .as_deref()
+                    .is_some_and(|alg| !matches!(alg, "RS256" | "RS384" | "RS512"))
+            {
+                continue;
+            }
+            let decoding_key = DecodingKey::from_rsa_components(
+                key.n.as_deref().ok_or("Missing RSA modulus")?,
+                key.e.as_deref().ok_or("Missing RSA exponent")?,
+            )?;
+            if keys.insert(key.kid, decoding_key).is_some() {
+                return Err("Duplicate signing key ID".into());
+            }
+        }
+        // Replace the entire set so removed keys cannot remain trusted indefinitely.
+        cache.keys = keys;
+        cache.fetched_at = Some(Instant::now());
+        cache
+            .keys
+            .get(kid)
+            .cloned()
+            .ok_or_else(|| "Signing key not found".into())
     }
 
     pub async fn refresh_jwks(&self) -> Result<(), Box<dyn std::error::Error>> {
-        tracing::info!("Refreshing JWKS cache");
-        let mut cache = self.jwks_cache.write().await;
-        cache.clear();
+        let mut cache = self.jwks_cache.lock().await;
+        cache.keys.clear();
+        cache.fetched_at = None;
         Ok(())
     }
 }

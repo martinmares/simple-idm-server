@@ -801,10 +801,6 @@ impl ClientRow {
     fn has_grant(&self, grant: &str) -> bool {
         self.grant_types.iter().any(|g| g == grant)
     }
-
-    fn has_scope(&self, scope: &str) -> bool {
-        self.scope.split_whitespace().any(|s| s == scope)
-    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1477,7 +1473,36 @@ pub fn router(state: WebAdminState) -> Router {
             "/admin/ui/group-claims/{id}/deactivate",
             post(claim_maps_deactivate),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            admin_origin_guard,
+        ))
         .with_state(state)
+}
+
+async fn admin_origin_guard(
+    State(state): State<WebAdminState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    if request.uri().path().starts_with("/admin/ui")
+        && !matches!(
+            *request.method(),
+            axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+        )
+    {
+        let expected = url::Url::parse(&state.admin_auth.jwt_service.issuer)
+            .ok()
+            .map(|url| url.origin().ascii_serialization());
+        let supplied = request
+            .headers()
+            .get(header::ORIGIN)
+            .and_then(|value| value.to_str().ok());
+        if expected.as_deref().is_none() || supplied != expected.as_deref() {
+            return (StatusCode::FORBIDDEN, "Admin form origin is not allowed").into_response();
+        }
+    }
+    next.run(request).await
 }
 
 async fn users_js() -> impl IntoResponse {
@@ -2946,44 +2971,7 @@ fn session_id_from_cookie(headers: &HeaderMap) -> Option<String> {
 }
 
 async fn validate_admin_token(state: &WebAdminState, token: &str) -> bool {
-    if let Some(root) = &state.admin_auth.admin_root_token {
-        if token == root {
-            return true;
-        }
-    }
-
-    let audiences = match sqlx::query_scalar::<_, String>(
-        "SELECT client_id FROM oauth_clients WHERE is_active = true AND deleted_at IS NULL",
-    )
-    .fetch_all(&state.db_pool)
-    .await
-    {
-        Ok(v) if !v.is_empty() => v,
-        _ => return false,
-    };
-
-    let claims = match state
-        .admin_auth
-        .jwt_service
-        .verify_access_token(token, &audiences, &[])
-    {
-        Ok(c) => c,
-        Err(_) => return false,
-    };
-
-    if claims.groups.contains(&"simple-idm:role:admin".to_string()) {
-        return true;
-    }
-    if state.admin_auth.allow_legacy_admin_group && claims.groups.contains(&"admin".to_string()) {
-        return true;
-    }
-    if state.admin_auth.allow_admin_substring_claim {
-        return claims
-            .custom_claims
-            .keys()
-            .any(|k| k.starts_with("admin") || k.contains("admin"));
-    }
-    false
+    state.admin_auth.validate_token(token).await
 }
 
 async fn require_admin_token(
@@ -4819,7 +4807,7 @@ async fn users_create(
         .filter(|v| !v.is_empty());
     let password_hash: Option<String> = match (auth_mode.as_str(), password) {
         ("federated", _) => None,
-        (_, Some(p)) => match simple_idm_core::auth::password::hash_password(p) {
+        (_, Some(p)) => match simple_idm_core::auth::password::hash_user_password_async(p).await {
             Ok(h) => Some(h),
             Err(e) => {
                 return redirect_with(&return_path, "error", &format!("Password hash failed: {e}"))
@@ -4949,7 +4937,7 @@ async fn users_update(
         .execute(&state.db_pool)
         .await
     } else if let Some(password) = new_password {
-        match simple_idm_core::auth::password::hash_password(password) {
+        match simple_idm_core::auth::password::hash_user_password_async(password).await {
             Ok(hash) => {
                 sqlx::query(
                     r#"UPDATE users
@@ -5235,14 +5223,17 @@ async fn users_import_submit(
             }),
             Ok(None) => {
                 let generated_password = random_import_password();
-                let password_hash =
-                    match simple_idm_core::auth::password::hash_password(&generated_password) {
-                        Ok(h) => h,
-                        Err(_) => {
-                            failed += 1;
-                            continue;
-                        }
-                    };
+                let password_hash = match simple_idm_core::auth::password::hash_user_password_async(
+                    &generated_password,
+                )
+                .await
+                {
+                    Ok(h) => h,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
                 sqlx::query(
                     r#"INSERT INTO users (
                            tenant_id, username, email, password_hash, is_active,
@@ -7953,7 +7944,7 @@ async fn clients_create(
             )
             .into_response();
         };
-        match simple_idm_core::auth::password::hash_password(secret) {
+        match simple_idm_core::auth::password::hash_password_async(secret).await {
             Ok(v) => Some(v),
             Err(e) => {
                 return redirect_with(&return_path, "error", &format!("Hash failed: {e}"))
@@ -8084,7 +8075,7 @@ async fn clients_update(
         .map(str::trim)
         .filter(|v| !v.is_empty())
     {
-        Some(secret) => match simple_idm_core::auth::password::hash_password(secret) {
+        Some(secret) => match simple_idm_core::auth::password::hash_password_async(secret).await {
             Ok(v) => Some(v),
             Err(e) => {
                 return redirect_with(&return_path, "error", &format!("Hash failed: {e}"))

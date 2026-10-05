@@ -721,12 +721,34 @@ SQLX_OFFLINE=true cargo build --workspace
 
 ## Vývoj
 
+Při nasazení bezpečnostních oprav projdi [změny nasazení](docs/SECURITY_UPGRADE.md)
+a [bezpečnostní audit](docs/security_best_practices_report.md).
+
 Kontrola:
 
 ```bash
-cargo check --workspace --all-targets
-cargo test --workspace
+SQLX_OFFLINE=true cargo check --locked --workspace --all-targets
+SQLX_OFFLINE=true cargo test --locked --workspace
 ```
+
+PostgreSQL integrační testy se spouštějí **lokálně u vývojáře** pomocí Docker
+Compose. CI používá uložená SQLx offline metadata a nepotřebuje přístup k externí
+databázi. Databázové testy označené `#[ignore]` spusť samostatně:
+
+```bash
+# Vyžaduje Docker s Compose a sqlx-cli (viz požadavky).
+bash scripts/test-postgres.sh
+# Nebo: just test-postgres
+```
+
+Skript vytvoří samostatný Compose projekt podle `docker-compose.test.yml`, počká
+na PostgreSQL, aplikuje migrace a spustí databázové testy v `simple-idm-core`.
+Databáze poslouchá pouze na loopbacku na automaticky přiděleném portu. Data jsou
+v dočasném souborovém systému kontejneru a odstraní se při ukončení skriptu,
+i při selhání testu. Vývojové databáze ani volume z `docker-compose.yml` se
+nedotýká. Přihlašovací údaje jsou lokální testovací hodnoty. Historické soubory
+v kořenovém `tests/` nejsou Cargo test targets tohoto virtuálního workspace;
+tento příkaz je nespouští.
 
 Start serveru:
 

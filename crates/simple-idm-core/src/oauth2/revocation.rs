@@ -116,7 +116,11 @@ pub async fn handle_revoke(
 
     // Verify client secret
     match &client.client_secret_hash {
-        Some(hash) if crate::auth::verify_password(&client_secret, hash).unwrap_or(false) => {
+        Some(hash)
+            if crate::auth::verify_password_async(&client_secret, hash)
+                .await
+                .unwrap_or(false) =>
+        {
             // OK
         }
         _ => {

@@ -219,22 +219,17 @@ async fn fetch(args: FetchArgs) -> anyhow::Result<()> {
         .await
         .with_context(|| format!("create output directory {}", output_dir.display()))?;
 
-    let staging_dir = output_dir.join(format!(".runtime-assets-staging-{}", std::process::id()));
-    if fs::try_exists(&staging_dir).await? {
-        fs::remove_dir_all(&staging_dir).await?;
-    }
-    fs::create_dir_all(&staging_dir).await?;
+    validate_private_output(&output_dir)?;
+    let staging = tempfile::Builder::new()
+        .prefix(".runtime-assets-")
+        .tempdir_in(&output_dir)?;
+    let staging_dir = staging.path();
 
-    let result = fetch_all_to_staging(&client, &args.common.upstream, &token, &staging_dir, &files)
+    let result = fetch_all_to_staging(&client, &args.common.upstream, &token, staging_dir, &files)
         .await
-        .and_then(|_| commit_staged_files(&staging_dir, &output_dir, &files));
+        .and_then(|_| commit_staged_files(staging_dir, &output_dir, &files));
 
-    if let Err(err) = fs::remove_dir_all(&staging_dir).await {
-        warn!(
-            "failed to remove staging directory {}: {err}",
-            staging_dir.display()
-        );
-    }
+    staging.close()?;
     result?;
 
     info!("runtime assets ready: {} files", files.len());
@@ -548,18 +543,8 @@ fn commit_staged_files(
 ) -> anyhow::Result<()> {
     for file in files {
         let relative = safe_relative_target(&file.target)?;
-        let staged = staging_dir.join(relative);
         let target = output_dir.join(relative);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::rename(&staged, &target).with_context(|| {
-            format!(
-                "move staged file {} to {}",
-                staged.display(),
-                target.display()
-            )
-        })?;
+        commit_one(staging_dir, output_dir, relative)?;
         info!(
             "stored {} mode={} path={}",
             file.source,
@@ -992,5 +977,86 @@ YyRIHN8wfdVoOw==
             assert_eq!(mode, 0o440);
         }
         server.abort();
+    }
+}
+
+fn validate_private_output(path: &Path) -> anyhow::Result<()> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        anyhow::bail!("Output must be a real private directory");
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.uid() != rustix::process::getuid().as_raw() {
+            anyhow::bail!("Output directory must belong to the current user");
+        }
+        // Protect staging and output from other local users throughout the fetch.
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn commit_one(staging: &Path, output: &Path, relative: &Path) -> anyhow::Result<()> {
+    use rustix::fs::{Mode, OFlags, mkdirat, open, openat, renameat};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut destination = open(output, flags, Mode::empty())?;
+    let components: Vec<_> = relative.components().collect();
+    for part in &components[..components.len() - 1] {
+        let name = part.as_os_str();
+        match mkdirat(&destination, name, Mode::from_raw_mode(0o700)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+            Err(error) => return Err(error.into()),
+        }
+        destination = openat(&destination, name, flags, Mode::empty())?;
+    }
+    let source = open(staging, flags, Mode::empty())?;
+    // Parent descriptors are held open; no symlink is followed at the target.
+    renameat(
+        &source,
+        relative,
+        &destination,
+        components.last().unwrap().as_os_str(),
+    )?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn commit_one(staging: &Path, output: &Path, relative: &Path) -> anyhow::Result<()> {
+    let mut parent = output.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    for part in &components[..components.len() - 1] {
+        parent.push(part.as_os_str());
+        if parent.exists() && std::fs::symlink_metadata(&parent)?.file_type().is_symlink() {
+            anyhow::bail!("Output parent must not be a symlink");
+        }
+        std::fs::create_dir_all(&parent)?;
+    }
+    std::fs::rename(
+        staging.join(relative),
+        parent.join(components.last().unwrap().as_os_str()),
+    )?;
+    Ok(())
+}
+
+#[cfg(all(test, unix))]
+mod filesystem_security_tests {
+    use super::*;
+    #[test]
+    fn publishing_never_follows_output_parent_symlinks() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let output = root.path().join("output");
+        let staging = root.path().join("staging");
+        let external = root.path().join("external");
+        for path in [&output, &staging, &external] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::fs::create_dir(staging.join("ssl")).unwrap();
+        std::fs::write(staging.join("ssl/key.pem"), "test asset").unwrap();
+        symlink(&external, output.join("ssl")).unwrap();
+        assert!(commit_one(&staging, &output, Path::new("ssl/key.pem")).is_err());
+        assert!(!external.join("key.pem").exists());
     }
 }

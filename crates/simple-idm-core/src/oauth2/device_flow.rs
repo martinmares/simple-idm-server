@@ -41,6 +41,7 @@ pub struct DeviceAuthorizationResponse {
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
 pub struct DeviceTokenRequest {
+    pub client_secret: Option<String>,
     pub grant_type: String,
     pub device_code: String,
     pub client_id: String,
@@ -299,6 +300,13 @@ pub async fn handle_device_authorization(
     );
     let expires_at = Utc::now() + Duration::seconds(state.device_flow_config.expiry_seconds);
     let scope = req.scope.unwrap_or_else(|| client.scope.clone());
+    if !super::utils::scope_allowed(&client.scope, &scope) {
+        return Json(ErrorResponse {
+            error: "invalid_scope".into(),
+            error_description: "Requested scope is not registered for this client".into(),
+        })
+        .into_response();
+    }
 
     // Ulož do databáze
     if sqlx::query(
@@ -542,6 +550,43 @@ pub async fn handle_device_token_internal(
         }
     };
 
+    let credentials_valid = match (
+        req.client_secret.as_deref(),
+        client.client_secret_hash.as_deref(),
+    ) {
+        (Some(secret), Some(hash)) => crate::auth::verify_password_async(secret, hash)
+            .await
+            .unwrap_or(false),
+        _ => false,
+    };
+    if req.client_id != client.client_id || (!client.is_public && !credentials_valid) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "invalid_client".into(),
+                error_description: "Invalid device client credentials".into(),
+            }),
+        )
+            .into_response();
+    }
+    if !client
+        .grant_types
+        .iter()
+        .any(|grant| grant == "urn:ietf:params:oauth:grant-type:device_code")
+        || !super::utils::scope_allowed(&client.scope, &device_code.scope)
+        || !super::utils::user_client_allowed(&state.db_pool, client.id, user_id)
+            .await
+            .unwrap_or(false)
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_grant".into(),
+                error_description: "Device authorization no longer allowed".into(),
+            }),
+        )
+            .into_response();
+    }
     // Načti uživatele
     let user =
         match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
@@ -586,16 +631,31 @@ pub async fn handle_device_token_internal(
             .into_response();
     }
 
+    macro_rules! authorization_data {
+        ($value:expr) => {
+            match $value {
+                Ok(value) => value,
+                Err(_) => {
+                    return Json(ErrorResponse {
+                        error: "server_error".into(),
+                        error_description: "Failed to load authorization data".into(),
+                    })
+                    .into_response()
+                }
+            }
+        };
+    }
     let user_group_names = match client.groups_claim_mode.as_str() {
         "none" => vec![],
         "direct" => {
-            get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
-                .await
-                .unwrap_or_default()
+            authorization_data!(
+                get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+                    .await
+            )
         }
-        _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
-            .await
-            .unwrap_or_default(),
+        _ => authorization_data!(
+            get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await
+        ),
     };
 
     // Apply client group filtering patterns (if any)
@@ -622,29 +682,37 @@ pub async fn handle_device_token_internal(
         }
         Err(e) => {
             tracing::error!("Failed to fetch client group patterns: {:?}", e);
-            user_group_names
+            return Json(ErrorResponse {
+                error: "server_error".into(),
+                error_description: "Failed to load authorization filters".into(),
+            })
+            .into_response();
         }
     };
 
     // Vytvoř custom claims
     let mut custom_claims = if client.include_claim_maps {
-        let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
+        let user_group_ids =
+            authorization_data!(get_effective_user_groups(&state.db_pool, user.id).await);
+        authorization_data!(
+            build_custom_claims(
+                &state.db_pool,
+                client.id,
+                &user_group_ids,
+                &filtered_group_names,
+            )
             .await
-            .unwrap_or_default();
-        build_custom_claims(
-            &state.db_pool,
-            client.id,
-            &user_group_ids,
-            &filtered_group_names,
         )
-        .await
-        .unwrap_or_default()
     } else {
         std::collections::HashMap::new()
     };
 
     // Tenant is authoritative server metadata, never a group claim-map override.
     custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));
+    custom_claims.insert(
+        "credential_version".into(),
+        serde_json::json!(user.credential_version),
+    );
 
     // Log JWT claims and groups for debugging
     tracing::debug!(
@@ -683,7 +751,11 @@ pub async fn handle_device_token_internal(
     };
 
     // Vytvoř ID token (pokud scope obsahuje "openid")
-    let id_token = if device_code.scope.contains("openid") {
+    let id_token = if device_code
+        .scope
+        .split_whitespace()
+        .any(|scope| scope == "openid")
+    {
         match state.jwt_service.create_id_token(
             user.id,
             client.client_id.clone(),
@@ -713,11 +785,52 @@ pub async fn handle_device_token_internal(
         None
     };
 
-    // Smaž použitý device code
-    let _ = sqlx::query("DELETE FROM device_codes WHERE device_code = $1")
-        .bind(&req.device_code)
-        .execute(&state.db_pool)
-        .await;
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    if sqlx::query(
+        "SELECT id FROM users WHERE id = $1 AND is_active AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(user.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .ok()
+    .flatten()
+    .is_none()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid_grant".into(),
+                error_description: "Account no longer active".into(),
+            }),
+        )
+            .into_response();
+    }
+    match sqlx::query(
+        "DELETE FROM device_codes WHERE device_code = $1 AND expires_at > NOW() AND is_authorized",
+    )
+    .bind(&req.device_code)
+    .execute(&mut *tx)
+    .await
+    {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid_grant".into(),
+                    error_description: "Device code is no longer valid".into(),
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+    if tx.commit().await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
 
     Json(DeviceTokenResponse {
         access_token,
@@ -793,6 +906,7 @@ mod browser_tests {
     }
     fn pending(user: Uuid, client: Uuid, code: &str) -> PendingAuthorization {
         PendingAuthorization {
+            credential_version: 0,
             user_id: user,
             client_id: client,
             redirect_uri: format!("{DEVICE_LOGIN_PREFIX}{code}"),

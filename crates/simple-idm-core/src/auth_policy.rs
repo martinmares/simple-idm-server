@@ -342,13 +342,13 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        sqlx::query(
-            "UPDATE authentication_sessions SET amr = ARRAY['federated'] WHERE session_token = $1",
-        )
-        .bind(&suffix)
-        .execute(&pool)
-        .await
-        .unwrap();
+        assert!(
+            crate::oauth2::authorization_code::get_auth_session_from_cookie(&pool, &headers)
+                .await
+                .is_none()
+        );
+        sqlx::query("INSERT INTO authentication_sessions (session_token, user_id, expires_at, amr, credential_version) SELECT $1, id, NOW() + INTERVAL '1 hour', ARRAY['federated'], credential_version FROM users WHERE id = $2")
+            .bind(&suffix).bind(user).execute(&pool).await.unwrap();
         assert!(
             crate::oauth2::authorization_code::get_auth_session_from_cookie(&pool, &headers)
                 .await

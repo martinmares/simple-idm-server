@@ -392,7 +392,7 @@ pub fn password_reset_page(token: &str, error: Option<&str>) -> String {
   <input type="hidden" name="token" value="{token}">
   <div class="mb-3">
     <label class="form-label" for="password">New password</label>
-    <input class="form-control" type="password" id="password" name="password" required autocomplete="new-password" placeholder="Create a strong password">
+    <input class="form-control" type="password" id="password" name="password" minlength="12" maxlength="1024" required autocomplete="new-password" placeholder="Create a strong password">
   </div>
   <div class="mb-3">
     <label class="form-label" for="password_confirm">Confirm password</label>

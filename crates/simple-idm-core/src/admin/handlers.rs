@@ -1,5 +1,5 @@
 use crate::audit;
-use crate::auth::password::hash_password;
+use crate::auth::password::hash_password_async;
 use crate::db::{DbPool, models::OAuthClient};
 use crate::password_reset::{PasswordResetTokenInfo, create_reset_token_for_user};
 use crate::secret_crypto::encrypt_secret;
@@ -411,7 +411,7 @@ pub async fn create_user(
     }
 
     // Hash password
-    let password_hash = match hash_password(&req.password) {
+    let password_hash = match crate::auth::password::hash_user_password_async(&req.password).await {
         Ok(hash) => hash,
         Err(e) => {
             tracing::error!("Failed to hash password: {:?}", e);
@@ -666,7 +666,7 @@ pub async fn update_user(
     }
 
     let password_hash = if let Some(password) = &req.password {
-        match hash_password(password) {
+        match crate::auth::password::hash_user_password_async(password).await {
             Ok(hash) => Some(hash),
             Err(e) => {
                 tracing::error!("Failed to hash password: {:?}", e);
@@ -1353,7 +1353,7 @@ pub async fn create_oauth_client(
             }
             Some(secret) => {
                 // Hash secret
-                match hash_password(secret) {
+                match hash_password_async(secret).await {
                     Ok(hash) => Some(hash),
                     Err(e) => {
                         tracing::error!("Failed to hash client secret: {:?}", e);
@@ -1632,7 +1632,7 @@ pub async fn update_oauth_client(
         Some(None) // Explicitly set to NULL
     } else if let Some(secret) = &req.client_secret {
         // Secret provided: hash it
-        match hash_password(secret) {
+        match hash_password_async(secret).await {
             Ok(hash) => Some(Some(hash)),
             Err(e) => {
                 tracing::error!("Failed to hash client secret: {:?}", e);

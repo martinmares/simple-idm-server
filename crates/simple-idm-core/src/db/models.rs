@@ -5,6 +5,7 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct User {
+    pub credential_version: i64,
     pub id: Uuid,
     pub tenant_id: Uuid,
     pub username: String,
@@ -175,6 +176,7 @@ pub struct DeviceCode {
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct AuthenticationSession {
+    pub credential_version: i64,
     pub id: Uuid,
     pub session_token: String,
     pub user_id: Uuid,

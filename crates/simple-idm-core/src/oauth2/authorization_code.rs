@@ -1,7 +1,7 @@
 use crate::audit;
 use crate::auth::{
     build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
-    get_user_group_names, verify_password,
+    get_user_group_names, verify_password_async,
 };
 use crate::client_group_filters::apply_client_group_filters;
 use crate::db::models::{
@@ -9,7 +9,7 @@ use crate::db::models::{
     UsedRefreshToken, User,
 };
 use crate::mfa::{self, MfaPolicy, NewMfaTransaction};
-use crate::secret_crypto::decrypt_secret;
+use crate::secret_crypto::{decrypt_secret, encrypt_secret};
 use axum::http::header::SET_COOKIE;
 use axum::{
     Form, Json,
@@ -18,8 +18,6 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use chrono::{Duration, Utc};
 use qrcode::{QrCode, render::svg};
 use rand::RngExt;
@@ -45,6 +43,9 @@ use simple_idm_ad_auth::verify_ldap_password;
 #[derive(Debug, Deserialize, Serialize)]
 struct FederatedStatePayload {
     csrf: String,
+    upstream_nonce: String,
+    upstream_verifier: String,
+    issued_at: i64,
     client_id: String,
     redirect_uri: String,
     tenant: Option<String>,
@@ -69,16 +70,18 @@ struct IdentityProviderRow {
     hd_domain: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug)]
 struct OidcDiscoveryResponse {
     authorization_endpoint: String,
     token_endpoint: String,
     userinfo_endpoint: Option<String>,
+    metadata: openidconnect::core::CoreProviderMetadata,
 }
 
 #[derive(Debug, Deserialize)]
 struct OidcTokenResponse {
     access_token: String,
+    id_token: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -134,6 +137,7 @@ pub struct MfaCodeRequest {
 
 #[derive(Debug, Clone)]
 pub(super) struct PendingAuthorization {
+    pub credential_version: i64,
     pub user_id: Uuid,
     pub client_id: Uuid,
     pub redirect_uri: String,
@@ -205,13 +209,17 @@ pub(crate) async fn get_auth_session_from_cookie(
     .ok()??;
 
     // Re-evaluate tenant/domain policy after settings or the user's email change.
-    let auth_mode = sqlx::query_scalar::<_, String>(
-        "SELECT auth_mode FROM users WHERE id = $1 AND is_active = true AND deleted_at IS NULL",
+    let user = sqlx::query_as::<_, User>(
+        "SELECT * FROM users WHERE id = $1 AND is_active AND deleted_at IS NULL",
     )
     .bind(session.user_id)
     .fetch_optional(db_pool)
     .await
     .ok()??;
+    if user.credential_version != session.credential_version {
+        return None;
+    }
+    let auth_mode = user.auth_mode;
     let policy = crate::auth_policy::for_user(db_pool, session.user_id)
         .await
         .ok()?;
@@ -297,78 +305,67 @@ pub async fn handle_authorize(
         return Html(html).into_response();
     }
 
+    if super::device_flow::device_login_code(redirect_uri).is_none()
+        && !super::utils::authorization_allowed(
+            &client,
+            params
+                .get("scope")
+                .map(String::as_str)
+                .unwrap_or(&client.scope),
+            params.get("code_challenge").map(String::as_str),
+            params.get("code_challenge_method").map(String::as_str),
+        )
+    {
+        return Html(templates::error_page(
+            "invalid_request",
+            "Scope, grant or S256 PKCE configuration is not allowed",
+        ))
+        .into_response();
+    }
     // SSO: Check for existing authentication session
     if let Some(auth_session) = get_auth_session_from_cookie(&state.db_pool, &headers).await {
+        if !super::utils::user_client_allowed(&state.db_pool, client.id, auth_session.user_id)
+            .await
+            .unwrap_or(false)
+        {
+            return Html(templates::error_page(
+                "access_denied",
+                "Account is not authorized for this client",
+            ))
+            .into_response();
+        }
         if let Some(code) = super::device_flow::device_login_code(redirect_uri) {
             return Redirect::to(&super::device_flow::device_confirmation_url(code))
                 .into_response();
         }
-        // User is already authenticated - auto-generate authorization code
-        tracing::debug!(
-            "SSO: Found valid session for user {}, auto-authorizing",
-            auth_session.user_id
-        );
-
-        // Generate authorization code
-        let code: String = rand::rng()
-            .sample_iter(rand::distr::Alphanumeric)
-            .take(32)
-            .map(char::from)
-            .collect();
-
-        let expires_at = Utc::now() + Duration::minutes(10);
-        let scope = params
-            .get("scope")
-            .map(|s| s.as_str())
-            .unwrap_or(&client.scope);
-        let nonce = params.get("nonce").map(|s| s.as_str()).and_then(non_empty);
-
-        // Normalize PKCE fields
-        let code_challenge = params
-            .get("code_challenge")
-            .map(|s| s.as_str())
-            .and_then(non_empty);
-        let code_challenge_method = params
-            .get("code_challenge_method")
-            .map(|s| s.as_str())
-            .and_then(non_empty);
-
-        // Store authorization code
-        if let Err(e) = sqlx::query(
-            r#"
-            INSERT INTO authorization_codes
-            (code, client_id, user_id, redirect_uri, scope, code_challenge,
-             code_challenge_method, nonce, amr, acr, expires_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-            "#,
+        let completion = complete_user_authorization(
+            &state,
+            PendingAuthorization {
+                credential_version: auth_session.credential_version,
+                user_id: auth_session.user_id,
+                client_id: client.id,
+                redirect_uri: redirect_uri.clone(),
+                scope: params
+                    .get("scope")
+                    .cloned()
+                    .unwrap_or_else(|| client.scope.clone()),
+                state: params.get("state").cloned(),
+                code_challenge: params.get("code_challenge").cloned(),
+                code_challenge_method: params.get("code_challenge_method").cloned(),
+                nonce: params.get("nonce").cloned(),
+            },
+            auth_session.amr,
+            auth_session.acr,
         )
-        .bind(&code)
-        .bind(client.id)
-        .bind(auth_session.user_id)
-        .bind(redirect_uri)
-        .bind(scope)
-        .bind(code_challenge)
-        .bind(code_challenge_method)
-        .bind(nonce)
-        .bind(&auth_session.amr)
-        .bind(auth_session.acr.as_deref())
-        .bind(expires_at)
-        .execute(&state.db_pool)
-        .await
-        {
-            tracing::error!("Failed to store authorization code for SSO: {:?}", e);
-            let html = templates::error_page("server_error", "Failed to create authorization code");
-            return Html(html).into_response();
-        }
-
-        // Redirect with authorization code (SSO successful)
-        let mut redirect_url = redirect_uri.clone();
-        redirect_url.push_str(&format!("?code={}", code));
-        if let Some(state) = params.get("state") {
-            redirect_url.push_str(&format!("&state={}", state));
-        }
-
-        return Redirect::to(&redirect_url).into_response();
+        .await;
+        return match completion {
+            Ok(completion) => authorization_completion_response(&state, &headers, completion),
+            Err(_) => Html(templates::error_page(
+                "access_denied",
+                "Authentication changed; sign in again",
+            ))
+            .into_response(),
+        };
     }
 
     // A hint selects a provider only; the callback must still verify the linked identity.
@@ -500,128 +497,74 @@ fn matches_loopback_wildcard(pattern: &str, redirect_uri: &str) -> bool {
 }
 
 /// Helper: Create authentication session for SSO
-async fn create_auth_session(
-    db_pool: &sqlx::PgPool,
-    user_id: Uuid,
-    client_id: Option<Uuid>,
-    session_expiry_seconds: i64,
-    amr: &[String],
-    acr: Option<&str>,
-) -> Result<String, sqlx::Error> {
-    // Generate random session token
-    let session_token: String = rand::rng()
-        .sample_iter(rand::distr::Alphanumeric)
-        .take(64)
-        .map(char::from)
-        .collect();
-
-    let expires_at = Utc::now() + Duration::seconds(session_expiry_seconds);
-
-    // Store session in database
-    sqlx::query(
-        r#"
-        INSERT INTO authentication_sessions
-        (session_token, user_id, client_id, expires_at, amr, acr)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        "#,
-    )
-    .bind(&session_token)
-    .bind(user_id)
-    .bind(client_id)
-    .bind(expires_at)
-    .bind(amr)
-    .bind(acr)
-    .execute(db_pool)
-    .await?;
-
-    Ok(session_token)
-}
-
 pub(super) async fn complete_user_authorization(
     state: &OAuth2State,
     pending: PendingAuthorization,
     amr: Vec<String>,
     acr: Option<String>,
 ) -> Result<AuthorizationCompletion, String> {
-    if let Some(code) = super::device_flow::device_login_code(&pending.redirect_uri) {
-        let client = super::device_flow::pending_device_client(&state.db_pool, code).await?;
-        if client.id != pending.client_id
-            || !super::device_flow::device_user_allowed(state, client.id, pending.user_id).await?
-        {
-            return Err("Device sign-in is not allowed for this account".into());
-        }
-        let session_token = create_auth_session(
-            &state.db_pool,
-            pending.user_id,
-            Some(client.id),
-            state.auth_session_expiry,
-            &amr,
-            acr.as_deref(),
-        )
+    let device = super::device_flow::device_login_code(&pending.redirect_uri);
+    let client = sqlx::query_as::<_, OAuthClient>("SELECT * FROM oauth_clients WHERE id = $1")
+        .bind(pending.client_id)
+        .fetch_one(&state.db_pool)
         .await
-        .map_err(|err| format!("Failed to create authentication session: {err}"))?;
-        return Ok(AuthorizationCompletion {
-            redirect_url: super::device_flow::device_confirmation_url(code),
-            session_token: Some(session_token),
-        });
-    }
-    let code: String = rand::rng()
-        .sample_iter(rand::distr::Alphanumeric)
-        .take(32)
-        .map(char::from)
-        .collect();
-    let expires_at = Utc::now() + Duration::minutes(10);
-
-    sqlx::query(
-        r#"
-        INSERT INTO authorization_codes
-          (code, client_id, user_id, redirect_uri, scope, code_challenge,
-           code_challenge_method, nonce, amr, acr, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
-        "#,
-    )
-    .bind(&code)
-    .bind(pending.client_id)
-    .bind(pending.user_id)
-    .bind(&pending.redirect_uri)
-    .bind(&pending.scope)
-    .bind(pending.code_challenge.as_deref())
-    .bind(pending.code_challenge_method.as_deref())
-    .bind(pending.nonce.as_deref())
-    .bind(&amr)
-    .bind(acr.as_deref())
-    .bind(expires_at)
-    .execute(&state.db_pool)
-    .await
-    .map_err(|err| format!("Failed to create authorization code: {err}"))?;
-
-    let session_token = match create_auth_session(
-        &state.db_pool,
-        pending.user_id,
-        Some(pending.client_id),
-        state.auth_session_expiry,
-        &amr,
-        acr.as_deref(),
-    )
-    .await
+        .map_err(|_| "Cannot validate client")?;
+    if !super::utils::user_client_allowed(&state.db_pool, client.id, pending.user_id)
+        .await
+        .map_err(|_| "Cannot validate account")?
     {
-        Ok(token) => Some(token),
-        Err(err) => {
-            tracing::warn!(user_id = %pending.user_id, "Failed to create authentication session: {err}");
-            None
-        }
-    };
-
-    let mut redirect = Url::parse(&pending.redirect_uri)
-        .map_err(|_| "Invalid redirect URI in authorization transaction".to_string())?;
-    redirect.query_pairs_mut().append_pair("code", &code);
-    if let Some(value) = pending.state {
-        redirect.query_pairs_mut().append_pair("state", &value);
+        return Err("Account is not authorized for this client".into());
     }
-
+    if let Some(device_code) = device {
+        if super::device_flow::pending_device_client(&state.db_pool, device_code)
+            .await?
+            .id
+            != client.id
+        {
+            return Err("Device client mismatch".into());
+        }
+    } else if !super::utils::authorization_allowed(
+        &client,
+        &pending.scope,
+        pending.code_challenge.as_deref(),
+        pending.code_challenge_method.as_deref(),
+    ) {
+        return Err("Authorization request is not allowed".into());
+    }
+    let mut tx = state
+        .db_pool
+        .begin()
+        .await
+        .map_err(|_| "Cannot start authorization")?;
+    let version = sqlx::query_scalar::<_, i64>("SELECT credential_version FROM users WHERE id = $1 AND is_active AND deleted_at IS NULL FOR UPDATE")
+        .bind(pending.user_id).fetch_optional(&mut *tx).await.map_err(|_| "Cannot validate credentials")?;
+    if version != Some(pending.credential_version) {
+        return Err("Credentials changed; sign in again".into());
+    }
+    let session = Uuid::new_v4().to_string();
+    sqlx::query("INSERT INTO authentication_sessions (session_token,user_id,client_id,expires_at,amr,acr,credential_version) VALUES ($1,$2,$3,$4,$5,$6,$7)")
+        .bind(&session).bind(pending.user_id).bind(client.id).bind(Utc::now()+Duration::seconds(state.auth_session_expiry)).bind(&amr).bind(&acr).bind(pending.credential_version)
+        .execute(&mut *tx).await.map_err(|_| "Cannot create session")?;
+    let redirect_url = if let Some(device_code) = device {
+        super::device_flow::device_confirmation_url(device_code)
+    } else {
+        let code = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO authorization_codes (code,client_id,user_id,redirect_uri,scope,code_challenge,code_challenge_method,nonce,amr,acr,expires_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)")
+            .bind(&code).bind(client.id).bind(pending.user_id).bind(&pending.redirect_uri).bind(&pending.scope).bind(&pending.code_challenge).bind(&pending.code_challenge_method).bind(&pending.nonce).bind(&amr).bind(&acr).bind(Utc::now()+Duration::minutes(10))
+            .execute(&mut *tx).await.map_err(|_| "Cannot create authorization code")?;
+        let mut redirect = Url::parse(&pending.redirect_uri).map_err(|_| "Invalid redirect URI")?;
+        redirect.query_pairs_mut().append_pair("code", &code);
+        if let Some(value) = &pending.state {
+            redirect.query_pairs_mut().append_pair("state", value);
+        }
+        redirect.to_string()
+    };
+    tx.commit()
+        .await
+        .map_err(|_| "Cannot commit authorization")?;
     Ok(AuthorizationCompletion {
-        redirect_url: redirect.into(),
-        session_token,
+        redirect_url,
+        session_token: Some(session),
     })
 }
 
@@ -650,29 +593,56 @@ async fn resolve_identity_provider_for_client(
     .await
 }
 
+fn identity_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())
+}
+
 async fn resolve_discovery(idp: &IdentityProviderRow) -> Result<OidcDiscoveryResponse, String> {
-    if let (Some(auth), Some(token)) = (&idp.auth_url, &idp.token_url) {
-        return Ok(OidcDiscoveryResponse {
-            authorization_endpoint: auth.clone(),
-            token_endpoint: token.clone(),
-            userinfo_endpoint: None,
-        });
+    use openidconnect::{IssuerUrl, core::CoreProviderMetadata};
+    simple_idm_common::validate_identity_url(&idp.issuer)?;
+    let http = openidconnect::reqwest::Client::builder()
+        .redirect(openidconnect::reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|error| error.to_string())?;
+    let metadata = CoreProviderMetadata::discover_async(
+        IssuerUrl::new(idp.issuer.clone()).map_err(|error| error.to_string())?,
+        &http,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let authorization_endpoint = idp
+        .auth_url
+        .clone()
+        .unwrap_or_else(|| metadata.authorization_endpoint().as_str().to_owned());
+    let token_endpoint = idp
+        .token_url
+        .clone()
+        .or_else(|| metadata.token_endpoint().map(|url| url.as_str().to_owned()))
+        .ok_or("Missing token endpoint")?;
+    let userinfo_endpoint = metadata
+        .userinfo_endpoint()
+        .map(|url| url.as_str().to_owned());
+    for url in [
+        &authorization_endpoint,
+        &token_endpoint,
+        metadata.jwks_uri().as_str(),
+    ] {
+        simple_idm_common::validate_identity_url(url)?;
     }
-    let discovery_url = format!(
-        "{}/.well-known/openid-configuration",
-        idp.issuer.trim_end_matches('/')
-    );
-    let resp = reqwest::Client::new()
-        .get(discovery_url)
-        .send()
-        .await
-        .map_err(|e| format!("OIDC discovery request failed: {e}"))?;
-    let resp = resp
-        .error_for_status()
-        .map_err(|e| format!("OIDC discovery non-success response: {e}"))?;
-    resp.json::<OidcDiscoveryResponse>()
-        .await
-        .map_err(|e| format!("OIDC discovery parse failed: {e}"))
+    if let Some(url) = &userinfo_endpoint {
+        simple_idm_common::validate_identity_url(url)?;
+    }
+    Ok(OidcDiscoveryResponse {
+        authorization_endpoint,
+        token_endpoint,
+        userinfo_endpoint,
+        metadata,
+    })
 }
 
 fn build_federated_csrf_cookie(token: Option<&str>, secure: bool) -> String {
@@ -770,7 +740,13 @@ pub async fn handle_federated_start(
         .map(char::from)
         .collect();
 
+    let (upstream_challenge, upstream_verifier) =
+        openidconnect::PkceCodeChallenge::new_random_sha256();
+    let upstream_nonce = openidconnect::Nonce::new_random();
     let payload = FederatedStatePayload {
+        upstream_nonce: upstream_nonce.secret().to_owned(),
+        upstream_verifier: upstream_verifier.secret().to_owned(),
+        issued_at: Utc::now().timestamp(),
         csrf: csrf.clone(),
         client_id: client_id.to_string(),
         redirect_uri: redirect_uri.to_string(),
@@ -799,9 +775,12 @@ pub async fn handle_federated_start(
             .cloned()
             .filter(|v| !v.trim().is_empty()),
     };
-    let state_token = match serde_json::to_vec(&payload) {
-        Ok(v) => URL_SAFE_NO_PAD.encode(v),
-        Err(_) => {
+    let state_token = match serde_json::to_string(&payload)
+        .ok()
+        .and_then(|json| encrypt_secret(&json).ok())
+    {
+        Some(v) => v,
+        None => {
             return Html(templates::error_page(
                 "server_error",
                 "Failed to prepare federated state",
@@ -838,7 +817,10 @@ pub async fn handle_federated_start(
         .append_pair("client_id", &idp.client_id)
         .append_pair("redirect_uri", &callback)
         .append_pair("scope", &scope)
-        .append_pair("state", &state_token);
+        .append_pair("state", &state_token)
+        .append_pair("nonce", upstream_nonce.secret())
+        .append_pair("code_challenge", upstream_challenge.as_str())
+        .append_pair("code_challenge_method", "S256");
     if let Some(hint) = params
         .get("login_hint")
         .map(|value| value.trim())
@@ -883,10 +865,9 @@ pub async fn handle_federated_callback(
         }
     };
 
-    let payload: FederatedStatePayload = match URL_SAFE_NO_PAD
-        .decode(state_token)
+    let payload: FederatedStatePayload = match decrypt_secret(state_token)
         .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+        .and_then(|json| serde_json::from_str(&json).ok())
     {
         Some(v) => v,
         None => {
@@ -899,7 +880,11 @@ pub async fn handle_federated_callback(
     };
 
     let cookie_csrf = cookie_value(&headers, "federated_csrf").unwrap_or_default();
-    if cookie_csrf.is_empty() || cookie_csrf != payload.csrf {
+    if cookie_csrf.is_empty()
+        || cookie_csrf != payload.csrf
+        || Utc::now().timestamp() - payload.issued_at > 600
+        || payload.issued_at > Utc::now().timestamp()
+    {
         return Html(templates::error_page(
             "invalid_request",
             "CSRF verification failed",
@@ -971,8 +956,18 @@ pub async fn handle_federated_callback(
         }
     };
 
+    let http_client = match identity_http_client() {
+        Ok(client) => client,
+        Err(_) => {
+            return Html(templates::error_page(
+                "server_error",
+                "Cannot initialize upstream HTTP client",
+            ))
+            .into_response();
+        }
+    };
     let token_resp = {
-        let resp = match reqwest::Client::new()
+        let resp = match http_client
             .post(&discovery.token_endpoint)
             .form(&[
                 ("grant_type", "authorization_code"),
@@ -980,6 +975,7 @@ pub async fn handle_federated_callback(
                 ("redirect_uri", callback.as_str()),
                 ("client_id", idp.client_id.as_str()),
                 ("client_secret", client_secret.as_str()),
+                ("code_verifier", payload.upstream_verifier.as_str()),
             ])
             .send()
             .await
@@ -1015,6 +1011,31 @@ pub async fn handle_federated_callback(
         }
     };
 
+    let oidc_client = openidconnect::core::CoreClient::from_provider_metadata(
+        discovery.metadata.clone(),
+        openidconnect::ClientId::new(idp.client_id.clone()),
+        None,
+    );
+    let verified_subject = token_resp
+        .id_token
+        .parse::<openidconnect::core::CoreIdToken>()
+        .ok()
+        .and_then(|token| {
+            token
+                .claims(
+                    &oidc_client.id_token_verifier(),
+                    &openidconnect::Nonce::new(payload.upstream_nonce.clone()),
+                )
+                .ok()
+                .map(|claims| claims.subject().as_str().to_owned())
+        });
+    let Some(verified_subject) = verified_subject else {
+        return Html(templates::error_page(
+            "access_denied",
+            "Upstream ID token verification failed",
+        ))
+        .into_response();
+    };
     let userinfo_endpoint = match discovery.userinfo_endpoint {
         Some(v) => v,
         None => {
@@ -1026,7 +1047,7 @@ pub async fn handle_federated_callback(
         }
     };
     let userinfo = {
-        let resp = match reqwest::Client::new()
+        let resp = match http_client
             .get(&userinfo_endpoint)
             .bearer_auth(&token_resp.access_token)
             .send()
@@ -1063,6 +1084,13 @@ pub async fn handle_federated_callback(
         }
     };
 
+    if userinfo.sub != verified_subject {
+        return Html(templates::error_page(
+            "access_denied",
+            "Upstream subject mismatch",
+        ))
+        .into_response();
+    }
     let user = match sqlx::query_as::<_, User>(
         r#"
         SELECT u.*
@@ -1120,6 +1148,7 @@ pub async fn handle_federated_callback(
     let completion = match complete_user_authorization(
         state.as_ref(),
         PendingAuthorization {
+            credential_version: user.credential_version,
             user_id: user.id,
             client_id: local_client.id,
             redirect_uri: payload.redirect_uri,
@@ -1382,6 +1411,7 @@ pub async fn handle_login(
 
     // Normalize empty PKCE fields (Grafana can submit empty values)
     let pending = PendingAuthorization {
+        credential_version: user.credential_version,
         user_id: user.id,
         client_id: client.id,
         redirect_uri: req.redirect_uri.clone(),
@@ -1433,6 +1463,7 @@ pub async fn handle_login(
 
         if let Some(stage) = stage {
             let transaction = NewMfaTransaction {
+                credential_version: user.credential_version,
                 tenant_id: user.tenant_id,
                 user_id: user.id,
                 client_id: client.id,
@@ -1631,8 +1662,12 @@ pub async fn handle_mfa(
         };
         match mfa::verify_totp(&state.db_pool, &authenticator, submitted).await {
             Ok(true) => {
-                match mfa::activate_totp_and_generate_recovery_codes(&state.db_pool, &authenticator)
-                    .await
+                match mfa::activate_totp_and_generate_recovery_codes(
+                    &state.db_pool,
+                    &authenticator,
+                    transaction.credential_version,
+                )
+                .await
                 {
                     Ok(codes) => (
                         true,
@@ -1811,6 +1846,7 @@ async fn render_mfa_transaction_page(
 
 fn pending_from_mfa_transaction(transaction: mfa::MfaLoginTransaction) -> PendingAuthorization {
     PendingAuthorization {
+        credential_version: transaction.credential_version,
         user_id: transaction.user_id,
         client_id: transaction.client_id,
         redirect_uri: transaction.redirect_uri,
@@ -2135,7 +2171,7 @@ async fn verify_user_password(state: &OAuth2State, user: &User, password: &str) 
         }
     }
     match user.password_hash.as_deref() {
-        Some(hash) => verify_password(password, hash).unwrap_or(false),
+        Some(hash) => verify_password_async(password, hash).await.unwrap_or(false),
         None => false,
     }
 }
@@ -2184,6 +2220,7 @@ async fn handle_device_code_token(state: Arc<OAuth2State>, req: TokenRequest) ->
             }
         },
         client_id: req.client_id.unwrap_or_default(),
+        client_secret: req.client_secret,
     };
 
     handle_device_token_internal(state, device_req).await
@@ -2307,17 +2344,38 @@ fn generate_refresh_token() -> String {
         .collect()
 }
 
+fn oauth_token_error(error: ErrorResponse) -> Response {
+    let status = match error.error.as_str() {
+        "invalid_client" => StatusCode::UNAUTHORIZED,
+        "server_error" => StatusCode::INTERNAL_SERVER_ERROR,
+        _ => StatusCode::BAD_REQUEST,
+    };
+    let mut response = (status, Json(error)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+    response
+        .headers_mut()
+        .insert(header::PRAGMA, "no-cache".parse().unwrap());
+    if status == StatusCode::UNAUTHORIZED {
+        response.headers_mut().insert(
+            header::WWW_AUTHENTICATE,
+            "Basic realm=\"oauth2/token\"".parse().unwrap(),
+        );
+    }
+    response
+}
+
 async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequest) -> Response {
     cleanup_refresh_tokens(&state.db_pool).await;
 
     let code = match req.code {
         Some(c) => c,
         None => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_request".to_string(),
                 error_description: "Missing code parameter".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
@@ -2331,18 +2389,16 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     {
         Ok(Some(ac)) => ac,
         Ok(None) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_grant".to_string(),
                 error_description: "Invalid authorization code".to_string(),
-            })
-            .into_response();
+            });
         }
         Err(_) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Database error".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
@@ -2353,11 +2409,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
             .execute(&state.db_pool)
             .await;
 
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "invalid_grant".to_string(),
             error_description: "Authorization code expired".to_string(),
-        })
-        .into_response();
+        });
     }
 
     // Ověř klienta
@@ -2370,38 +2425,34 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_client".to_string(),
                 error_description: "Client not found".to_string(),
-            })
-            .into_response();
+            });
         }
         Err(_) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Database error".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
     let req_client_id = match req.client_id {
         Some(id) => id,
         None => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_request".to_string(),
                 error_description: "Missing client_id".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
     if req_client_id != client.client_id {
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "invalid_client".to_string(),
             error_description: "Client ID mismatch".to_string(),
-        })
-        .into_response();
+        });
     }
 
     // Validate redirect_uri (REQUIRED by OAuth2 RFC 6749 section 4.1.3)
@@ -2409,58 +2460,45 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     let req_redirect_uri = match req.redirect_uri {
         Some(uri) => uri,
         None => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_request".to_string(),
                 error_description: "Missing redirect_uri parameter (required by OAuth2 spec)"
                     .to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
     if req_redirect_uri != auth_code.redirect_uri {
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "invalid_grant".to_string(),
             error_description: "Redirect URI mismatch".to_string(),
-        })
-        .into_response();
+        });
     }
 
-    // Validace client credentials
-    // Pro PKCE public clients (code_verifier present) přeskočíme client_secret validaci
-    let has_pkce = req.code_verifier.is_some();
-
-    if !has_pkce {
-        // Confidential client - vyžaduje client_secret
-        let client_secret = match req.client_secret {
-            Some(secret) if !secret.is_empty() => secret,
-            _ => {
-                return Json(ErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: "Missing client_secret".to_string(),
-                })
-                .into_response();
-            }
-        };
-
-        // Verify client secret for confidential clients
-        if !client.is_public {
-            if let Some(ref hash) = client.client_secret_hash {
-                if !verify_password(&client_secret, hash).unwrap_or(false) {
-                    return Json(ErrorResponse {
-                        error: "invalid_client".to_string(),
-                        error_description: "Invalid client credentials".to_string(),
-                    })
-                    .into_response();
-                }
-            } else {
-                return Json(ErrorResponse {
-                    error: "invalid_client".to_string(),
-                    error_description: "Client secret required for confidential client".to_string(),
-                })
-                .into_response();
-            }
-        }
+    // Confidential-client authentication and PKCE are independent checks.
+    let credentials_valid = match (
+        req.client_secret.as_deref(),
+        client.client_secret_hash.as_deref(),
+    ) {
+        (Some(secret), Some(hash)) => verify_password_async(secret, hash).await.unwrap_or(false),
+        _ => false,
+    };
+    if !client.is_public && !credentials_valid {
+        return oauth_token_error(ErrorResponse {
+            error: "invalid_client".into(),
+            error_description: "Invalid client credentials".into(),
+        });
+    }
+    if !super::utils::authorization_allowed(
+        &client,
+        &auth_code.scope,
+        auth_code.code_challenge.as_deref(),
+        auth_code.code_challenge_method.as_deref(),
+    ) {
+        return oauth_token_error(ErrorResponse {
+            error: "invalid_grant".into(),
+            error_description: "Authorization no longer allowed".into(),
+        });
     }
 
     // PKCE validace
@@ -2473,10 +2511,20 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
                     .as_deref()
                     .and_then(non_empty)
                 {
-                    Some("plain") => challenge == verifier,
+                    Some("plain") => false,
                     Some("S256") => {
                         use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
                         use sha2::{Digest, Sha256};
+                        if !(43..=128).contains(&verifier.len())
+                            || !verifier
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b"-._~".contains(&b))
+                        {
+                            return oauth_token_error(ErrorResponse {
+                                error: "invalid_grant".into(),
+                                error_description: "Invalid code verifier".into(),
+                            });
+                        }
                         let hash = Sha256::digest(verifier.as_bytes());
                         let encoded = URL_SAFE_NO_PAD.encode(hash);
                         challenge == encoded
@@ -2485,23 +2533,30 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
                 };
 
                 if !valid {
-                    return Json(ErrorResponse {
+                    return oauth_token_error(ErrorResponse {
                         error: "invalid_grant".to_string(),
                         error_description: "Invalid code verifier".to_string(),
-                    })
-                    .into_response();
+                    });
                 }
             }
             None => {
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "invalid_request".to_string(),
                     error_description: "Missing code_verifier".to_string(),
-                })
-                .into_response();
+                });
             }
         }
     }
 
+    if !super::utils::user_client_allowed(&state.db_pool, client.id, auth_code.user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return oauth_token_error(ErrorResponse {
+            error: "invalid_grant".into(),
+            error_description: "Account is not authorized for this client".into(),
+        });
+    }
     // Načti uživatele
     let user =
         match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
@@ -2511,18 +2566,16 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
         {
             Ok(Some(user)) => user,
             Ok(None) => {
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "invalid_grant".to_string(),
                     error_description: "User not found".to_string(),
-                })
-                .into_response();
+                });
             }
             Err(_) => {
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "server_error".to_string(),
                     error_description: "Database error".to_string(),
-                })
-                .into_response();
+                });
             }
         };
 
@@ -2532,7 +2585,7 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
+            oauth_token_error(ErrorResponse {
                 error: "invalid_grant".into(),
                 error_description: "Account or authentication policy changed; sign in again".into(),
             }),
@@ -2548,11 +2601,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
             {
                 Ok(names) => names,
                 Err(_) => {
-                    return Json(ErrorResponse {
+                    return oauth_token_error(ErrorResponse {
                         error: "server_error".to_string(),
                         error_description: "Failed to fetch direct user group names".to_string(),
-                    })
-                    .into_response();
+                    });
                 }
             }
         }
@@ -2561,11 +2613,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
             {
                 Ok(names) => names,
                 Err(_) => {
-                    return Json(ErrorResponse {
+                    return oauth_token_error(ErrorResponse {
                         error: "server_error".to_string(),
                         error_description: "Failed to fetch user group names".to_string(),
-                    })
-                    .into_response();
+                    });
                 }
             }
         }
@@ -2595,8 +2646,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
         }
         Err(e) => {
             tracing::error!("Failed to fetch client group patterns: {:?}", e);
-            // Fallback to unfiltered groups on error
-            user_group_names
+            return oauth_token_error(ErrorResponse {
+                error: "server_error".into(),
+                error_description: "Failed to load authorization filters".into(),
+            });
         }
     };
 
@@ -2605,11 +2658,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
         let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
             Ok(ids) => ids,
             Err(_) => {
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "server_error".to_string(),
                     error_description: "Failed to fetch user groups".to_string(),
-                })
-                .into_response();
+                });
             }
         };
         match build_custom_claims(
@@ -2622,11 +2674,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
         {
             Ok(claims) => claims,
             Err(_) => {
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "server_error".to_string(),
                     error_description: "Failed to build custom claims".to_string(),
-                })
-                .into_response();
+                });
             }
         }
     } else {
@@ -2635,6 +2686,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
 
     // Tenant is authoritative server metadata, never a group claim-map override.
     custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));
+    custom_claims.insert(
+        "credential_version".into(),
+        serde_json::json!(user.credential_version),
+    );
 
     // Log JWT claims and groups for debugging
     tracing::debug!(
@@ -2661,11 +2716,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     ) {
         Ok(token) => token,
         Err(_) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Failed to create access token".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
@@ -2683,11 +2737,10 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     ) {
         Ok(token) => token,
         Err(_) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Failed to create ID token".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
@@ -2695,6 +2748,50 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     let refresh_token = generate_refresh_token();
     let refresh_expires_at = Utc::now() + Duration::seconds(state.refresh_token_expiry);
 
+    let mut tx = match state.db_pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => {
+            return oauth_token_error(ErrorResponse {
+                error: "server_error".into(),
+                error_description: "Failed to begin code exchange".into(),
+            });
+        }
+    };
+    if sqlx::query(
+        "SELECT id FROM users WHERE id = $1 AND is_active AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(user.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .ok()
+    .flatten()
+    .is_none()
+    {
+        return oauth_token_error(ErrorResponse {
+            error: "invalid_grant".into(),
+            error_description: "Account is no longer active".into(),
+        });
+    }
+    // Consume exactly once and persist the replacement in the same transaction.
+    match sqlx::query("DELETE FROM authorization_codes WHERE code = $1 AND expires_at > NOW()")
+        .bind(&code)
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            return oauth_token_error(ErrorResponse {
+                error: "invalid_grant".into(),
+                error_description: "Authorization code is no longer valid".into(),
+            });
+        }
+        Err(_) => {
+            return oauth_token_error(ErrorResponse {
+                error: "server_error".into(),
+                error_description: "Failed to consume authorization code".into(),
+            });
+        }
+    }
     if sqlx::query(
         r#"
         INSERT INTO refresh_tokens (token, client_id, user_id, scope, amr, acr, expires_at)
@@ -2708,24 +2805,23 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     .bind(&auth_code.amr)
     .bind(auth_code.acr.as_deref())
     .bind(refresh_expires_at)
-    .execute(&state.db_pool)
+    .execute(&mut *tx)
     .await
     .is_err()
     {
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "server_error".to_string(),
             error_description: "Failed to create refresh token".to_string(),
-        })
-        .into_response();
+        });
     }
 
+    if tx.commit().await.is_err() {
+        return oauth_token_error(ErrorResponse {
+            error: "server_error".into(),
+            error_description: "Failed to commit code exchange".into(),
+        });
+    }
     cleanup_refresh_tokens(&state.db_pool).await;
-
-    // Smaž použitý authorization code
-    let _ = sqlx::query("DELETE FROM authorization_codes WHERE code = $1")
-        .bind(&code)
-        .execute(&state.db_pool)
-        .await;
 
     let response = TokenResponseWithRefresh {
         access_token,
@@ -2749,7 +2845,7 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
     )
     .await;
 
-    tracing::debug!("Token response: {:?}", response);
+    tracing::debug!("Authorization code exchanged successfully");
 
     Json(response).into_response()
 }
@@ -2768,11 +2864,10 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     let refresh_token_str = match req.refresh_token {
         Some(rt) => rt,
         None => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_request".to_string(),
                 error_description: "Missing refresh_token parameter".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
@@ -2802,18 +2897,16 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
                     .await;
                 }
 
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "invalid_grant".to_string(),
                     error_description: "Invalid refresh token".to_string(),
-                })
-                .into_response();
+                });
             }
             Err(_) => {
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "server_error".to_string(),
                     error_description: "Database error".to_string(),
-                })
-                .into_response();
+                });
             }
         };
 
@@ -2824,11 +2917,10 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
             .execute(&state.db_pool)
             .await;
 
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "invalid_grant".to_string(),
             error_description: "Refresh token expired".to_string(),
-        })
-        .into_response();
+        });
     }
 
     // Ověř klienta
@@ -2841,18 +2933,16 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_client".to_string(),
                 error_description: "Client not found".to_string(),
-            })
-            .into_response();
+            });
         }
         Err(_) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Database error".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
@@ -2861,30 +2951,51 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     // Verify client credentials (only for confidential clients)
     if !client.is_public {
         if client_secret.is_empty() {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_client".to_string(),
                 error_description: "Missing client_secret for confidential client".to_string(),
-            })
-            .into_response();
+            });
         }
 
         if let Some(ref hash) = client.client_secret_hash {
-            if !verify_password(&client_secret, hash).unwrap_or(false) {
-                return Json(ErrorResponse {
+            if !verify_password_async(&client_secret, hash)
+                .await
+                .unwrap_or(false)
+            {
+                return oauth_token_error(ErrorResponse {
                     error: "invalid_client".to_string(),
                     error_description: "Invalid client credentials".to_string(),
-                })
-                .into_response();
+                });
             }
         } else {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "invalid_client".to_string(),
                 error_description: "Client secret required for confidential client".to_string(),
-            })
-            .into_response();
+            });
         }
     }
 
+    if !super::utils::user_client_allowed(&state.db_pool, client.id, refresh_token.user_id)
+        .await
+        .unwrap_or(false)
+    {
+        return oauth_token_error(ErrorResponse {
+            error: "invalid_grant".into(),
+            error_description: "Account is not authorized for this client".into(),
+        });
+    }
+    if req.client_id.as_deref() != Some(client.client_id.as_str())
+        || !client
+            .grant_types
+            .iter()
+            .any(|grant| grant == "refresh_token")
+        || !super::utils::scope_allowed(&client.scope, &refresh_token.scope)
+    {
+        return oauth_token_error(ErrorResponse {
+            error: "invalid_grant".into(),
+            error_description: "Refresh authorization no longer allowed".into(),
+        });
+    }
     // Načti uživatele
     let user =
         match sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = $1 AND deleted_at IS NULL")
@@ -2894,18 +3005,16 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         {
             Ok(Some(user)) => user,
             Ok(None) => {
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "invalid_grant".to_string(),
                     error_description: "User not found".to_string(),
-                })
-                .into_response();
+                });
             }
             Err(_) => {
-                return Json(ErrorResponse {
+                return oauth_token_error(ErrorResponse {
                     error: "server_error".to_string(),
                     error_description: "Database error".to_string(),
-                })
-                .into_response();
+                });
             }
         };
 
@@ -2914,7 +3023,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ErrorResponse {
+                oauth_token_error(ErrorResponse {
                     error: "invalid_grant".into(),
                     error_description: "Account is unavailable; sign in again".into(),
                 }),
@@ -2925,7 +3034,7 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     if user.auth_mode.eq_ignore_ascii_case("local") && !policy.accepts_session(&refresh_token.amr) {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
+            oauth_token_error(ErrorResponse {
                 error: "invalid_grant".into(),
                 error_description: "Authentication policy changed; sign in again".into(),
             }),
@@ -2933,16 +3042,30 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
             .into_response();
     }
 
+    macro_rules! authorization_data {
+        ($value:expr) => {
+            match $value {
+                Ok(value) => value,
+                Err(_) => {
+                    return oauth_token_error(ErrorResponse {
+                        error: "server_error".into(),
+                        error_description: "Failed to load authorization data".into(),
+                    })
+                }
+            }
+        };
+    }
     let user_group_names = match client.groups_claim_mode.as_str() {
         "none" => vec![],
         "direct" => {
-            get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
-                .await
-                .unwrap_or_default()
+            authorization_data!(
+                get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
+                    .await
+            )
         }
-        _ => get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
-            .await
-            .unwrap_or_default(),
+        _ => authorization_data!(
+            get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await
+        ),
     };
 
     // Apply client group filtering patterns (if any)
@@ -2969,28 +3092,35 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         }
         Err(e) => {
             tracing::error!("Failed to fetch client group patterns: {:?}", e);
-            user_group_names
+            return oauth_token_error(ErrorResponse {
+                error: "server_error".into(),
+                error_description: "Failed to load authorization filters".into(),
+            });
         }
     };
 
     let mut custom_claims = if client.include_claim_maps {
-        let user_group_ids = get_effective_user_groups(&state.db_pool, user.id)
+        let user_group_ids =
+            authorization_data!(get_effective_user_groups(&state.db_pool, user.id).await);
+        authorization_data!(
+            build_custom_claims(
+                &state.db_pool,
+                client.id,
+                &user_group_ids,
+                &filtered_group_names,
+            )
             .await
-            .unwrap_or_default();
-        build_custom_claims(
-            &state.db_pool,
-            client.id,
-            &user_group_ids,
-            &filtered_group_names,
         )
-        .await
-        .unwrap_or_default()
     } else {
         std::collections::HashMap::new()
     };
 
     // Tenant is authoritative server metadata, never a group claim-map override.
     custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));
+    custom_claims.insert(
+        "credential_version".into(),
+        serde_json::json!(user.credential_version),
+    );
 
     // Log JWT claims and groups for debugging
     tracing::debug!(
@@ -3017,11 +3147,10 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     ) {
         Ok(token) => token,
         Err(_) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Failed to create access token".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
@@ -3032,14 +3161,47 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     let mut tx = match state.db_pool.begin().await {
         Ok(tx) => tx,
         Err(_) => {
-            return Json(ErrorResponse {
+            return oauth_token_error(ErrorResponse {
                 error: "server_error".to_string(),
                 error_description: "Failed to start transaction".to_string(),
-            })
-            .into_response();
+            });
         }
     };
 
+    if sqlx::query(
+        "SELECT id FROM users WHERE id = $1 AND is_active AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(user.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .ok()
+    .flatten()
+    .is_none()
+    {
+        return oauth_token_error(ErrorResponse {
+            error: "invalid_grant".into(),
+            error_description: "Account is no longer active".into(),
+        });
+    }
+    match sqlx::query("DELETE FROM refresh_tokens WHERE token = $1 AND expires_at > NOW()")
+        .bind(&refresh_token_str)
+        .execute(&mut *tx)
+        .await
+    {
+        Ok(result) if result.rows_affected() == 1 => {}
+        Ok(_) => {
+            return oauth_token_error(ErrorResponse {
+                error: "invalid_grant".into(),
+                error_description: "Refresh token is no longer valid".into(),
+            });
+        }
+        Err(_) => {
+            return oauth_token_error(ErrorResponse {
+                error: "server_error".into(),
+                error_description: "Failed to consume refresh token".into(),
+            });
+        }
+    }
     if sqlx::query(
         r#"
         INSERT INTO refresh_tokens (token, client_id, user_id, scope, amr, acr, expires_at)
@@ -3058,11 +3220,10 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     .is_err()
     {
         let _ = tx.rollback().await;
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "server_error".to_string(),
             error_description: "Failed to create refresh token".to_string(),
-        })
-        .into_response();
+        });
     }
 
     if sqlx::query(
@@ -3083,11 +3244,10 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
     .is_err()
     {
         let _ = tx.rollback().await;
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "server_error".to_string(),
             error_description: "Failed to mark refresh token as used".to_string(),
-        })
-        .into_response();
+        });
     }
 
     if sqlx::query("DELETE FROM refresh_tokens WHERE token = $1")
@@ -3097,19 +3257,17 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         .is_err()
     {
         let _ = tx.rollback().await;
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "server_error".to_string(),
             error_description: "Failed to rotate refresh token".to_string(),
-        })
-        .into_response();
+        });
     }
 
     if tx.commit().await.is_err() {
-        return Json(ErrorResponse {
+        return oauth_token_error(ErrorResponse {
             error: "server_error".to_string(),
             error_description: "Failed to commit refresh token rotation".to_string(),
-        })
-        .into_response();
+        });
     }
 
     let response = TokenResponseWithRefresh {
@@ -3159,7 +3317,7 @@ pub async fn handle_logout(
                     .execute(&state.db_pool)
                     .await;
 
-                tracing::debug!("Logout: Deleted session {}", session_token);
+                tracing::debug!("Logout: authentication session removed");
             }
         }
     }
@@ -3188,4 +3346,366 @@ pub async fn handle_logout(
         .insert(SET_COOKIE, cookie.parse().unwrap());
 
     response
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    use rsa::{
+        RsaPrivateKey, RsaPublicKey,
+        pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding},
+        rand_core::OsRng,
+    };
+
+    #[tokio::test]
+    async fn oauth_errors_use_failure_status_and_safe_json() {
+        for (error, status) in [
+            ("invalid_client", StatusCode::UNAUTHORIZED),
+            ("invalid_grant", StatusCode::BAD_REQUEST),
+            ("server_error", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let response = oauth_token_error(ErrorResponse {
+                error: error.into(),
+                error_description: "Test error".into(),
+            });
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+            if status == StatusCode::UNAUTHORIZED {
+                assert!(response.headers().contains_key(header::WWW_AUTHENTICATE));
+            }
+            assert_eq!(body(response).await["error"], error);
+        }
+    }
+
+    fn request(client: &str, code: &str, secret: Option<&str>) -> TokenRequest {
+        TokenRequest {
+            grant_type: "authorization_code".into(),
+            code: Some(code.into()),
+            redirect_uri: Some("https://app.test/callback".into()),
+            client_id: Some(client.into()),
+            client_secret: secret.map(str::to_owned),
+            code_verifier: Some("A".repeat(43)),
+            refresh_token: None,
+            device_code: None,
+        }
+    }
+    async fn body(response: Response) -> serde_json::Value {
+        serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 65_536)
+                .await
+                .unwrap(),
+        )
+        .unwrap()
+    }
+    async fn code(pool: &sqlx::PgPool, client: Uuid, user: Uuid) -> String {
+        let code = Uuid::new_v4().to_string();
+        sqlx::query("INSERT INTO authorization_codes (code,client_id,user_id,redirect_uri,scope,amr,expires_at) VALUES ($1,$2,$3,'https://app.test/callback','openid',ARRAY['pwd'],NOW()+INTERVAL '10 minutes')")
+            .bind(&code).bind(client).bind(user).execute(pool).await.unwrap();
+        code
+    }
+    #[tokio::test]
+    #[ignore = "requires disposable DATABASE_URL; run scripts/test-postgres.sh"]
+    async fn postgres_confidential_auth_code_consumption_and_revocation() {
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
+        let private = dir.path().join("private.pem");
+        let public = dir.path().join("public.pem");
+        std::fs::write(
+            &private,
+            key.to_pkcs8_pem(LineEnding::LF).unwrap().as_bytes(),
+        )
+        .unwrap();
+        std::fs::write(
+            &public,
+            RsaPublicKey::from(&key)
+                .to_public_key_pem(LineEnding::LF)
+                .unwrap()
+                .as_bytes(),
+        )
+        .unwrap();
+        let jwt = crate::auth::JwtService::new(
+            private.to_str().unwrap(),
+            public.to_str().unwrap(),
+            "https://idm.test".into(),
+            "test".into(),
+            vec![],
+        )
+        .unwrap();
+        let state = Arc::new(OAuth2State {
+            db_pool: pool.clone(),
+            jwt_service: Arc::new(jwt),
+            access_token_expiry: 3600,
+            refresh_token_expiry: 3600,
+            auth_session_expiry: 3600,
+            allow_username_login: true,
+            allowed_email_domains: vec![],
+            trust_proxy_headers: false,
+            force_secure_cookies: false,
+            passkeys: None,
+            device_flow_config: crate::config::DeviceFlowConfig {
+                expiry_seconds: 600,
+                polling_interval_seconds: 1,
+                user_code_length: 8,
+                user_code_format: "XXXX-XXXX".into(),
+                cleanup_interval_seconds: 60,
+                max_verification_attempts: 5,
+            },
+            auth_protection: crate::config::AuthProtectionConfig {
+                enabled: false,
+                failure_window_seconds: 60,
+                max_failures: 5,
+                lockout_seconds: 60,
+                clear_on_start: false,
+            },
+        });
+        let tenant = Uuid::new_v4();
+        let user = Uuid::new_v4();
+        let client = Uuid::new_v4();
+        let name = client.to_string();
+        sqlx::query("INSERT INTO tenants (id,slug,name) VALUES ($1,$2,'Security tests')")
+            .bind(tenant)
+            .bind(tenant.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO users (id,tenant_id,username,email,password_hash) VALUES ($1,$2,$3,$4,'unused')")
+            .bind(user).bind(tenant).bind(user.to_string()).bind(format!("{user}@example.test")).execute(&pool).await.unwrap();
+        let secret = "confidential+test/secret:% space";
+        let hash = crate::auth::hash_password_async(secret).await.unwrap();
+        sqlx::query("INSERT INTO oauth_clients (id,tenant_id,client_id,name,redirect_uris,grant_types,is_public,client_secret_hash,scope) VALUES ($1,$2,$3,'Security test',ARRAY['https://app.test/callback'],ARRAY['authorization_code','refresh_token'],false,$4,'openid')")
+            .bind(client).bind(tenant).bind(&name).bind(hash).execute(&pool).await.unwrap();
+        let first = code(&pool, client, user).await;
+        let rejected =
+            handle_authorization_code_token(state.clone(), request(&name, &first, None)).await;
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
+        let rejected = body(rejected).await;
+        assert_eq!(rejected["error"], "invalid_client");
+        let valid = body(
+            handle_authorization_code_token(state.clone(), request(&name, &first, Some(secret)))
+                .await,
+        )
+        .await;
+        assert!(valid["access_token"].is_string());
+        assert!(valid["refresh_token"].is_string());
+        // Exercise the endpoint as an OIDC client does: encoded Basic secret plus S256.
+        {
+            use base64::Engine;
+            use sha2::Digest;
+            let basic_code = code(&pool, client, user).await;
+            let verifier = "A".repeat(43);
+            let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .encode(sha2::Sha256::digest(verifier.as_bytes()));
+            sqlx::query("UPDATE authorization_codes SET code_challenge=$1, code_challenge_method='S256' WHERE code=$2")
+                .bind(challenge).bind(&basic_code).execute(&pool).await.unwrap();
+            let encoded_id: String =
+                url::form_urlencoded::byte_serialize(name.as_bytes()).collect();
+            let encoded_secret: String =
+                url::form_urlencoded::byte_serialize(secret.as_bytes()).collect();
+            let basic = base64::engine::general_purpose::STANDARD
+                .encode(format!("{encoded_id}:{encoded_secret}"));
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::AUTHORIZATION,
+                format!("Basic {basic}").parse().unwrap(),
+            );
+            headers.insert(
+                header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded".parse().unwrap(),
+            );
+            let form = url::form_urlencoded::Serializer::new(String::new())
+                .append_pair("grant_type", "authorization_code")
+                .append_pair("code", &basic_code)
+                .append_pair("redirect_uri", "https://app.test/callback")
+                .append_pair("code_verifier", &verifier)
+                .finish();
+            let response = handle_token(State(state.clone()), headers, Bytes::from(form)).await;
+            assert_eq!(response.status(), StatusCode::OK);
+            assert!(body(response).await["access_token"].is_string());
+        }
+
+        let replay = body(
+            handle_authorization_code_token(state.clone(), request(&name, &first, Some(secret)))
+                .await,
+        )
+        .await;
+        assert_eq!(replay["error"], "invalid_grant");
+        let second = code(&pool, client, user).await;
+        let (left, right) = tokio::join!(
+            handle_authorization_code_token(state.clone(), request(&name, &second, Some(secret))),
+            handle_authorization_code_token(state.clone(), request(&name, &second, Some(secret)))
+        );
+        let left = body(left).await;
+        let right = body(right).await;
+        assert_ne!(
+            left["access_token"].is_string(),
+            right["access_token"].is_string()
+        );
+        let third = code(&pool, client, user).await;
+        sqlx::query("INSERT INTO authentication_sessions (session_token,user_id,expires_at) VALUES ($1,$2,NOW()+INTERVAL '1 hour')").bind(Uuid::new_v4().to_string()).bind(user).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE users SET password_hash = 'changed' WHERE id = $1")
+            .bind(user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for query in [
+            "SELECT count(*) FROM authorization_codes WHERE user_id = $1",
+            "SELECT count(*) FROM refresh_tokens WHERE user_id = $1",
+            "SELECT count(*) FROM authentication_sessions WHERE user_id = $1",
+        ] {
+            let count: i64 = sqlx::query_scalar(query)
+                .bind(user)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(count, 0, "All grants must be revoked");
+        }
+        let revoked = body(
+            handle_authorization_code_token(state.clone(), request(&name, &third, Some(secret)))
+                .await,
+        )
+        .await;
+        assert_eq!(revoked["error"], "invalid_grant");
+        assert!(
+            complete_user_authorization(
+                &state,
+                PendingAuthorization {
+                    credential_version: 0,
+                    user_id: user,
+                    client_id: client,
+                    redirect_uri: "https://app.test/callback".into(),
+                    scope: "openid".into(),
+                    state: None,
+                    code_challenge: None,
+                    code_challenge_method: None,
+                    nonce: None
+                },
+                vec!["pwd".into()],
+                None
+            )
+            .await
+            .is_err()
+        );
+        let fourth = code(&pool, client, user).await;
+        let authenticator = Uuid::new_v4();
+        sqlx::query("INSERT INTO user_authenticators (id,tenant_id,user_id,kind,secret_encrypted,status) VALUES ($1,$2,$3,'totp','unused','active')").bind(authenticator).bind(tenant).bind(user).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE user_authenticators SET status = 'revoked' WHERE id = $1")
+            .bind(authenticator)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let revoked = body(
+            handle_authorization_code_token(state.clone(), request(&name, &fourth, Some(secret)))
+                .await,
+        )
+        .await;
+        assert_eq!(revoked["error"], "invalid_grant");
+        // A stale enrollment must not activate a new factor after credential revocation.
+        let pending_authenticator = sqlx::query_as::<_, crate::db::models::UserAuthenticator>(
+            "INSERT INTO user_authenticators (tenant_id,user_id,kind,secret_encrypted,status) VALUES ($1,$2,'totp','unused','pending') RETURNING *",
+        ).bind(tenant).bind(user).fetch_one(&pool).await.unwrap();
+        assert!(
+            mfa::activate_totp_and_generate_recovery_codes(&pool, &pending_authenticator, 0)
+                .await
+                .is_err()
+        );
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM user_authenticators WHERE id = $1")
+                .bind(pending_authenticator.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "pending");
+        // Admin access depends on the designated default-tenant client and current DB role.
+        let admin_user = Uuid::new_v4();
+        let admin_client = Uuid::new_v4();
+        let admin_name = admin_client.to_string();
+        sqlx::query(
+            "INSERT INTO users (id,username,email,password_hash) VALUES ($1,$2,$3,'unused')",
+        )
+        .bind(admin_user)
+        .bind(admin_user.to_string())
+        .bind(format!("{admin_user}@example.test"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO oauth_clients (id,client_id,name,redirect_uris,grant_types,is_public,scope) VALUES ($1,$2,'Admin test','{}',ARRAY['authorization_code'],true,'openid admin:*')")
+            .bind(admin_client).bind(&admin_name).execute(&pool).await.unwrap();
+        let admin = crate::admin::middleware::AdminAuth {
+            admin_root_token: None,
+            allow_legacy_admin_group: false,
+            allow_admin_substring_claim: true,
+            oauth_client_ids: vec![admin_name.clone()],
+            jwt_service: state.jwt_service.clone(),
+            db_pool: pool.clone(),
+        };
+        let mut claims = std::collections::HashMap::new();
+        claims.insert("credential_version".into(), serde_json::json!(0));
+        claims.insert("admin_fake".into(), serde_json::json!(true));
+        let admin_token = state
+            .jwt_service
+            .create_access_token(
+                admin_user,
+                admin_name.clone(),
+                None,
+                None,
+                Some("admin:*".into()),
+                vec!["simple-idm:role:admin".into()],
+                claims.clone(),
+                vec!["pwd".into()],
+                None,
+                3600,
+            )
+            .unwrap();
+        assert!(!admin.validate_token(&admin_token).await);
+        let foreign_group = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO groups (id,tenant_id,name) VALUES ($1,$2,'simple-idm:role:admin')",
+        )
+        .bind(foreign_group)
+        .bind(tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO user_groups (user_id,group_id) VALUES ($1,$2)")
+            .bind(admin_user)
+            .bind(foreign_group)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!admin.validate_token(&admin_token).await);
+        let actual_group: Uuid = sqlx::query_scalar("SELECT id FROM groups WHERE tenant_id = '11111111-1111-1111-1111-111111111111' AND name = 'simple-idm:role:admin' AND deleted_at IS NULL").fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_groups (user_id,group_id) VALUES ($1,$2)")
+            .bind(admin_user)
+            .bind(actual_group)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(admin.validate_token(&admin_token).await);
+        let wrong_audience = state
+            .jwt_service
+            .create_access_token(
+                admin_user,
+                "unregistered-admin-audience".into(),
+                None,
+                None,
+                Some("admin:*".into()),
+                vec!["simple-idm:role:admin".into()],
+                claims,
+                vec!["pwd".into()],
+                None,
+                3600,
+            )
+            .unwrap();
+        assert!(!admin.validate_token(&wrong_audience).await);
+        sqlx::query("UPDATE users SET password_hash = 'changed' WHERE id = $1")
+            .bind(admin_user)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!admin.validate_token(&admin_token).await);
+    }
 }

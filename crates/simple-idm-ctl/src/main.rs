@@ -73,22 +73,51 @@ fn load_sessions() -> Result<SessionsConfig> {
 }
 
 fn save_sessions(config: &SessionsConfig) -> Result<()> {
+    use std::io::Write;
     let path = sessions_file_path()?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("Missing session directory"))?;
+    let mut directory = fs::DirBuilder::new();
+    directory.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        directory.mode(0o700);
     }
-    let content = serde_json::to_string_pretty(config)?;
-    fs::write(&path, content)?;
-
+    if let Err(error) = directory.create(parent) {
+        if error.kind() != std::io::ErrorKind::AlreadyExists {
+            return Err(error.into());
+        }
+    }
+    let metadata = fs::symlink_metadata(parent)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(anyhow!("Session directory must be a real directory"));
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&path)?.permissions();
-        perms.set_mode(0o600);
-        fs::set_permissions(&path, perms)?;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
     }
-
-    Ok(())
+    let temporary = parent.join(format!(".sessions-{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary)?;
+        file.write_all(serde_json::to_string_pretty(config)?.as_bytes())?;
+        file.sync_all()?;
+        fs::rename(&temporary, &path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn get_active_session() -> Result<Option<Session>> {
@@ -867,6 +896,7 @@ async fn handle_login(
         .add_scope(Scope::new("profile".to_string()))
         .add_scope(Scope::new("email".to_string()))
         .add_scope(Scope::new("groups".to_string()))
+        .add_scope(Scope::new("admin:*".to_string()))
         .set_pkce_challenge(pkce_challenge)
         .url();
     append_login_hints(&mut auth_url, tenant, user);
@@ -1022,6 +1052,7 @@ async fn handle_device_login(
         .add_scope(Scope::new("profile".to_string()))
         .add_scope(Scope::new("email".to_string()))
         .add_scope(Scope::new("groups".to_string()))
+        .add_scope(Scope::new("admin:*".to_string()))
         .request_async(&oidc_http_client)
         .await
         .context("Failed to request device code")?;

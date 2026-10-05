@@ -24,6 +24,7 @@ pub struct AdminAuth {
     pub admin_root_token: Option<String>,
     pub allow_legacy_admin_group: bool,
     pub allow_admin_substring_claim: bool,
+    pub oauth_client_ids: Vec<String>,
     pub jwt_service: Arc<JwtService>,
     pub db_pool: DbPool,
 }
@@ -34,9 +35,77 @@ impl AdminAuth {
             admin_root_token: config.admin.root_token.clone(),
             allow_legacy_admin_group: config.admin.allow_legacy_admin_group,
             allow_admin_substring_claim: config.admin.allow_admin_substring_claim,
+            oauth_client_ids: std::env::var("ADMIN_OAUTH_CLIENT_IDS")
+                .unwrap_or_else(|_| "cli-tools".into())
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect(),
             jwt_service,
             db_pool,
         }
+    }
+    pub async fn validate_token(&self, token: &str) -> bool {
+        if self
+            .admin_root_token
+            .as_ref()
+            .is_some_and(|root| !root.is_empty() && token == root)
+        {
+            return true;
+        }
+        let claims =
+            match self
+                .jwt_service
+                .verify_access_token(token, &self.oauth_client_ids, &["admin:*"])
+            {
+                Ok(claims) => claims,
+                Err(_) => return false,
+            };
+        let default_tenant = uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").unwrap();
+        let subject = match uuid::Uuid::parse_str(&claims.sub) {
+            Ok(id) => id,
+            Err(_) => return false,
+        };
+        let valid_client: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM oauth_clients c JOIN tenants t ON t.id = c.tenant_id WHERE c.client_id = ANY($1) AND c.client_id = ANY($2) AND c.tenant_id = $3 AND c.is_active AND c.deleted_at IS NULL AND t.is_active AND t.deleted_at IS NULL AND 'admin:*' = ANY(string_to_array(c.scope, ' ')))")
+            .bind(&claims.aud).bind(&self.oauth_client_ids).bind(default_tenant).fetch_one(&self.db_pool).await.unwrap_or(false);
+        if !valid_client {
+            return false;
+        }
+        // Only a registered confidential admin client can act without a user.
+        let m2m: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM oauth_clients WHERE id = $1 AND client_id = ANY($2) AND tenant_id = $3 AND is_active AND deleted_at IS NULL AND NOT is_public AND 'client_credentials' = ANY(grant_types))")
+            .bind(subject).bind(&claims.aud).bind(default_tenant).fetch_one(&self.db_pool).await.unwrap_or(false);
+        if m2m {
+            return true;
+        }
+        let Some(version) = claims
+            .custom_claims
+            .get("credential_version")
+            .and_then(serde_json::Value::as_i64)
+        else {
+            return false;
+        };
+        let user = match sqlx::query_as::<_, crate::db::models::User>("SELECT * FROM users WHERE id = $1 AND tenant_id = $2 AND is_active AND deleted_at IS NULL AND credential_version = $3")
+            .bind(subject).bind(default_tenant).bind(version).fetch_optional(&self.db_pool).await {
+            Ok(Some(user)) => user, _ => return false,
+        };
+        if !crate::auth_policy::accepts_authentication(&self.db_pool, &user, &claims.amr)
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let groups = match crate::auth::get_effective_user_groups(&self.db_pool, subject).await {
+            Ok(groups) => groups,
+            Err(_) => return false,
+        };
+        let names = if self.allow_legacy_admin_group {
+            vec!["simple-idm:role:admin", "admin"]
+        } else {
+            vec!["simple-idm:role:admin"]
+        };
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM groups WHERE id = ANY($1) AND tenant_id = $2 AND name = ANY($3) AND deleted_at IS NULL AND NOT is_virtual)")
+            .bind(groups).bind(default_tenant).bind(names).fetch_one(&self.db_pool).await.unwrap_or(false)
     }
 }
 
@@ -80,87 +149,16 @@ pub async fn admin_auth_middleware(
 
     let token = &auth_header[7..]; // Skip "Bearer "
 
-    // Strategy 1: Check if it's the root token (development)
-    if let Some(ref root_token) = admin_auth.admin_root_token {
-        if token == root_token {
-            // Root token valid - allow request
-            return Ok(next.run(request).await);
-        }
+    if admin_auth.validate_token(token).await {
+        Ok(next.run(request).await)
+    } else {
+        Err((
+            StatusCode::UNAUTHORIZED,
+            Json(ErrorResponse {
+                error: "unauthorized".into(),
+                error_description: "Invalid administrator credentials".into(),
+            }),
+        )
+            .into_response())
     }
-
-    // Strategy 2: Verify JWT token and check for admin permissions
-    let active_audiences = match load_active_client_ids(&admin_auth.db_pool).await {
-        Ok(list) if !list.is_empty() => list,
-        _ => {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "unauthorized".to_string(),
-                    error_description: "No active audiences available".to_string(),
-                }),
-            )
-                .into_response());
-        }
-    };
-
-    match admin_auth
-        .jwt_service
-        .verify_access_token(token, &active_audiences, &[])
-    {
-        Ok(claims) => {
-            // Check if token has admin permissions
-            // 1. Check groups for "simple-idm:role:admin" group (naming convention)
-            if claims.groups.contains(&"simple-idm:role:admin".to_string()) {
-                return Ok(next.run(request).await);
-            }
-
-            // 2. Optional backward compatibility for old "admin" group
-            if admin_auth.allow_legacy_admin_group && claims.groups.contains(&"admin".to_string()) {
-                tracing::warn!(
-                    "User has deprecated 'admin' group - please migrate to 'simple-idm:role:admin'"
-                );
-                return Ok(next.run(request).await);
-            }
-
-            // 3. Optional legacy fallback: admin substring in custom claim key
-            if admin_auth.allow_admin_substring_claim {
-                for key in claims.custom_claims.keys() {
-                    if key.starts_with("admin") || key.contains("admin") {
-                        return Ok(next.run(request).await);
-                    }
-                }
-            }
-
-            // No admin permissions found
-            Err((
-                StatusCode::FORBIDDEN,
-                Json(ErrorResponse {
-                    error: "forbidden".to_string(),
-                    error_description:
-                        "Insufficient permissions - admin group or admin claims required"
-                            .to_string(),
-                }),
-            )
-                .into_response())
-        }
-        Err(_) => {
-            // Invalid JWT token
-            Err((
-                StatusCode::UNAUTHORIZED,
-                Json(ErrorResponse {
-                    error: "unauthorized".to_string(),
-                    error_description: "Invalid or expired token".to_string(),
-                }),
-            )
-                .into_response())
-        }
-    }
-}
-
-async fn load_active_client_ids(db_pool: &DbPool) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar::<_, String>(
-        "SELECT client_id FROM oauth_clients WHERE is_active = true AND deleted_at IS NULL",
-    )
-    .fetch_all(db_pool)
-    .await
 }

@@ -31,3 +31,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Test workspace
         run: cargo test --locked --workspace --all-targets
+      - name: Install dependency audit tool
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Audit dependencies with reviewed exceptions
+        run: python3 scripts/audit-dependencies.py

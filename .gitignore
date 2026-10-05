@@ -4,6 +4,7 @@ dist/
 
 # Environment
 .env
+internal/
 
 # Keys
 keys/*.pem

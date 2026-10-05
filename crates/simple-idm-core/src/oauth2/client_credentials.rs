@@ -1,6 +1,6 @@
 use super::throttle;
 use super::utils::{ClientLookupError, resolve_oauth_client};
-use crate::auth::{JwtService, verify_password};
+use crate::auth::{JwtService, verify_password_async};
 use crate::config::AuthProtectionConfig;
 use crate::config::DeviceFlowConfig;
 use crate::db::DbPool;
@@ -184,7 +184,11 @@ pub async fn handle_client_credentials(
 
     // Ověř client secret (client_credentials flow vyžaduje vždy secret)
     match &client.client_secret_hash {
-        Some(hash) if verify_password(&req.client_secret, hash).unwrap_or(false) => {
+        Some(hash)
+            if verify_password_async(&req.client_secret, hash)
+                .await
+                .unwrap_or(false) =>
+        {
             // OK
         }
         _ => {
@@ -238,6 +242,13 @@ pub async fn handle_client_credentials(
 
     // Pro M2M flow nemáme uživatele, takže použijeme client_id jako subject
     let scope = req.scope.unwrap_or_else(|| client.scope.clone());
+    if !super::utils::scope_allowed(&client.scope, &scope) {
+        return Json(ErrorResponse {
+            error: "invalid_scope".into(),
+            error_description: "Requested scope is not registered for this client".into(),
+        })
+        .into_response();
+    }
 
     // Log JWT token issuance for M2M
     tracing::debug!(

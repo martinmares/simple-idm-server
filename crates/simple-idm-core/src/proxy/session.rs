@@ -22,6 +22,10 @@ pub struct Session {
 }
 
 impl Session {
+    pub fn absolute_expired(&self, maximum_age: i64) -> bool {
+        Utc::now() >= self.issued_at + Duration::seconds(maximum_age)
+    }
+
     pub fn is_expired(&self) -> bool {
         Utc::now() > self.expires_at
     }
@@ -61,7 +65,7 @@ impl SessionStore {
 
     pub async fn create_session(&self, token_response: &TokenResponse, config: &Config) -> String {
         let session_id = generate_session_id();
-        let expires_at = Utc::now() + Duration::seconds(config.session_max_age);
+        let expires_at = Utc::now() + Duration::seconds(config.session_max_age.min(300));
 
         let session = Session {
             session_id: session_id.clone(),
@@ -144,11 +148,19 @@ impl MemoryStore {
 
     pub fn store_flow_state(&self, flow_state: &FlowState) {
         self.flow_states
+            .retain(|_, state| Utc::now() - state.created_at < Duration::minutes(10));
+        if self.flow_states.len() >= 10_000 {
+            return;
+        }
+        self.flow_states
             .insert(flow_state.state.clone(), flow_state.clone());
     }
 
     pub fn get_flow_state(&self, state: &str) -> Option<FlowState> {
-        self.flow_states.get(state).map(|entry| entry.clone())
+        self.flow_states
+            .remove(state)
+            .map(|(_, entry)| entry)
+            .filter(|entry| Utc::now() - entry.created_at < Duration::minutes(10))
     }
 
     pub fn refresh_session(
@@ -158,8 +170,14 @@ impl MemoryStore {
         config: &Config,
     ) -> Option<Session> {
         let mut entry = self.sessions.get_mut(session_id)?;
-        entry.issued_at = Utc::now();
-        entry.expires_at = Utc::now() + Duration::seconds(config.session_max_age);
+        let deadline = entry.issued_at + Duration::seconds(config.session_max_age);
+        if refresh.subject != entry.subject || Utc::now() >= deadline {
+            return None;
+        }
+        entry.expires_at = (Utc::now() + Duration::seconds(300)).min(deadline);
+        entry.username = refresh.username.clone();
+        entry.email = refresh.email.clone();
+        entry.groups = refresh.groups.clone();
         if refresh.refresh_token.is_some() {
             entry.refresh_token = refresh.refresh_token.clone();
         }
@@ -187,14 +205,10 @@ impl SqliteStore {
         }
 
         let db_path = path.to_path_buf();
-        let db_url = format!(
-            "sqlite://{}",
-            db_path
-                .to_str()
-                .ok_or_else(|| anyhow::anyhow!("Invalid sqlite path"))?
-        );
-
-        let pool = SqlitePool::connect(&db_url).await?;
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        let pool = SqlitePool::connect_with(options).await?;
 
         sqlx::query(
             r#"
@@ -333,9 +347,8 @@ impl SqliteStore {
     pub async fn get_flow_state(&self, state: &str) -> Option<FlowState> {
         let row = sqlx::query(
             r#"
-            SELECT state, nonce, pkce_verifier, redirect_url, created_at
-            FROM flow_states
-            WHERE state = ?
+            DELETE FROM flow_states WHERE state = ? AND created_at > unixepoch() - 600
+            RETURNING state, nonce, pkce_verifier, redirect_url, created_at
             "#,
         )
         .bind(state)
@@ -360,24 +373,18 @@ impl SqliteStore {
         refresh: &RefreshResult,
         config: &Config,
     ) -> Option<Session> {
-        let issued_at = Utc::now();
-        let expires_at = issued_at + Duration::seconds(config.session_max_age);
-        let issued_ts = issued_at.timestamp();
-        let expires_ts = expires_at.timestamp();
-
-        let _ = sqlx::query(
-            r#"
-            UPDATE sessions
-            SET issued_at = ?, expires_at = ?, refresh_token = COALESCE(?, refresh_token)
-            WHERE session_id = ?
-            "#,
-        )
-        .bind(issued_ts)
-        .bind(expires_ts)
-        .bind(&refresh.refresh_token)
-        .bind(session_id)
-        .execute(&self.pool)
-        .await;
+        let old = self.get(session_id).await?;
+        let deadline = old.issued_at + Duration::seconds(config.session_max_age);
+        if refresh.subject != old.subject || Utc::now() >= deadline {
+            return None;
+        }
+        let expires = (Utc::now() + Duration::seconds(300)).min(deadline);
+        let result = sqlx::query("UPDATE sessions SET expires_at = ?, refresh_token = COALESCE(?, refresh_token), username = ?, email = ?, groups = ? WHERE session_id = ? AND subject = ?")
+            .bind(expires.timestamp()).bind(&refresh.refresh_token).bind(&refresh.username).bind(&refresh.email)
+            .bind(serde_json::to_string(&refresh.groups).ok()?).bind(session_id).bind(&refresh.subject).execute(&self.pool).await.ok()?;
+        if result.rows_affected() != 1 {
+            return None;
+        }
 
         self.get(session_id).await
     }
@@ -387,4 +394,52 @@ fn generate_session_id() -> String {
     use rand::RngExt;
     let random_bytes: Vec<u8> = (0..32).map(|_| rand::rng().random()).collect();
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&random_bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[tokio::test]
+    async fn refresh_replaces_claims_and_preserves_absolute_deadline() {
+        let dir = tempfile::tempdir().unwrap();
+        for backend in [SessionBackend::Memory, SessionBackend::Sqlite] {
+            let config = Config {
+                session_backend: backend,
+                session_sqlite_path: Some(dir.path().join("sessions.db")),
+                ..Config::default()
+            };
+            let store = SessionStore::new(&config).await.unwrap();
+            let token = TokenResponse {
+                subject: "user-1".into(),
+                username: "old".into(),
+                email: None,
+                groups: vec!["old-role".into()],
+                issued_at: Utc::now(),
+                refresh_token: Some("test-refresh".into()),
+            };
+            let id = store.create_session(&token, &config).await;
+            let initial = store.get(&id).await.unwrap();
+            let mut refresh = RefreshResult {
+                subject: "user-1".into(),
+                username: "new".into(),
+                email: None,
+                groups: vec![],
+                refresh_token: None,
+            };
+            let updated = store.refresh_session(&id, &refresh, &config).await.unwrap();
+            assert_eq!(updated.username, "new");
+            assert!(updated.groups.is_empty());
+            assert_eq!(updated.issued_at.timestamp(), initial.issued_at.timestamp());
+            assert!(
+                updated.expires_at <= initial.issued_at + Duration::seconds(config.session_max_age)
+            );
+            refresh.subject = "different-user".into();
+            assert!(
+                store
+                    .refresh_session(&id, &refresh, &config)
+                    .await
+                    .is_none()
+            );
+        }
+    }
 }

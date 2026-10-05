@@ -7,4 +7,4 @@ pub use claims::{
     get_user_group_names,
 };
 pub use jwt::JwtService;
-pub use password::{hash_password, verify_password};
+pub use password::{hash_password, hash_password_async, verify_password, verify_password_async};

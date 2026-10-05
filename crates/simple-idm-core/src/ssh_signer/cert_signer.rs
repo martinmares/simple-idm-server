@@ -9,6 +9,7 @@ pub struct CertSigner {
     default_ttl_seconds: u64,
     max_ttl_seconds: u64,
     clock_skew_seconds: u64,
+    extensions: Vec<&'static str>,
 }
 
 pub struct SignRequest {
@@ -45,7 +46,22 @@ impl CertSigner {
             default_ttl_seconds,
             max_ttl_seconds,
             clock_skew_seconds,
+            extensions: vec!["permit-pty"],
         })
+    }
+
+    pub fn with_extensions(mut self, config: &super::config::SshSignerConfig) -> Self {
+        for (enabled, extension) in [
+            (config.permit_port_forwarding, "permit-port-forwarding"),
+            (config.permit_agent_forwarding, "permit-agent-forwarding"),
+            (config.permit_x11_forwarding, "permit-X11-forwarding"),
+            (config.permit_user_rc, "permit-user-rc"),
+        ] {
+            if enabled {
+                self.extensions.push(extension);
+            }
+        }
+        self
     }
 
     pub fn sign_certificate(&self, req: SignRequest) -> Result<SignedCert, String> {
@@ -131,13 +147,38 @@ impl CertSigner {
             .arg(&validity)
             .arg("-z")
             .arg(&serial);
-        if bastion {
-            command.args(["-O", "clear", "-O", "permit-pty"]);
+        command.args(["-O", "clear"]);
+        let extensions: &[&str] = if bastion {
+            &["permit-pty"]
+        } else {
+            &self.extensions
+        };
+        for extension in extensions {
+            command.args(["-O", extension]);
         }
-        let output = command
+        let mut child = command
             .arg(&pubkey_path)
-            .output()
-            .map_err(|e| format!("Failed to execute ssh-keygen: {}", e))?;
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|error| format!("Failed to execute ssh-keygen: {error}"))?;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while child
+            .try_wait()
+            .map_err(|error| error.to_string())?
+            .is_none()
+        {
+            if std::time::Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("ssh-keygen exceeded signing timeout".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let output = child
+            .wait_with_output()
+            .map_err(|error| error.to_string())?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -164,6 +205,9 @@ impl CertSigner {
     }
 
     fn validate_public_key(&self, pubkey: &str) -> Result<(), String> {
+        if pubkey.len() > 16_384 || pubkey.trim_end().contains(['\r', '\n', '\0']) {
+            return Err("A single public key record of at most 16 KiB is required".into());
+        }
         // Basic validation: must start with ssh-rsa, ssh-ed25519, ecdsa-sha2-*, etc.
         let valid_prefixes = [
             "ssh-rsa",
@@ -175,7 +219,7 @@ impl CertSigner {
 
         let has_valid_prefix = valid_prefixes
             .iter()
-            .any(|prefix| pubkey.starts_with(prefix));
+            .any(|prefix| pubkey.split_whitespace().next() == Some(*prefix));
 
         if !has_valid_prefix {
             return Err("Invalid public key format (unsupported key type)".to_string());
@@ -187,6 +231,60 @@ impl CertSigner {
             return Err("Invalid public key format (missing key data)".to_string());
         }
 
+        use base64::Engine;
+        let data = base64::engine::general_purpose::STANDARD
+            .decode(parts[1])
+            .map_err(|_| "Invalid SSH key encoding")?;
+        let mut remaining = data.as_slice();
+        fn field<'a>(data: &mut &'a [u8]) -> Result<&'a [u8], String> {
+            if data.len() < 4 {
+                return Err("Truncated SSH key".into());
+            }
+            let length = u32::from_be_bytes(data[..4].try_into().unwrap()) as usize;
+            *data = &data[4..];
+            if length > data.len() {
+                return Err("Truncated SSH key field".into());
+            }
+            let value = &data[..length];
+            *data = &data[length..];
+            Ok(value)
+        }
+        if field(&mut remaining)? != parts[0].as_bytes() {
+            return Err("SSH key type mismatch".into());
+        }
+        match parts[0] {
+            "ssh-ed25519" => {
+                if field(&mut remaining)?.len() != 32 {
+                    return Err("Invalid Ed25519 key length".into());
+                }
+            }
+            "ssh-rsa" => {
+                if field(&mut remaining)?.is_empty() || field(&mut remaining)?.len() < 256 {
+                    return Err("RSA public key must be at least 2048 bits".into());
+                }
+            }
+            curve_type => {
+                let curve = curve_type
+                    .strip_prefix("ecdsa-sha2-")
+                    .ok_or("Invalid key type")?;
+                if field(&mut remaining)? != curve.as_bytes() {
+                    return Err("ECDSA curve mismatch".into());
+                }
+                let point = field(&mut remaining)?;
+                let size = match curve {
+                    "nistp256" => 65,
+                    "nistp384" => 97,
+                    "nistp521" => 133,
+                    _ => return Err("Unsupported curve".into()),
+                };
+                if point.len() != size || point[0] != 4 {
+                    return Err("Invalid ECDSA point".into());
+                }
+            }
+        }
+        if !remaining.is_empty() {
+            return Err("Unexpected SSH key data".into());
+        }
         Ok(())
     }
 }
@@ -237,6 +335,52 @@ mod tests {
         assert!(!text.contains("permit-port-forwarding"));
         assert!(!text.contains("permit-agent-forwarding"));
         assert!(!text.contains("permit-X11-forwarding"));
+        let direct = signer
+            .sign_certificate(SignRequest {
+                public_key: fs::read_to_string(user.with_extension("pub")).unwrap(),
+                principals: vec!["alice".into()],
+                ttl_seconds: None,
+            })
+            .unwrap();
+        let direct_path = dir.path().join("direct.pub");
+        fs::write(&direct_path, direct.certificate).unwrap();
+        let inspect = Command::new("ssh-keygen")
+            .args(["-L", "-f"])
+            .arg(&direct_path)
+            .output()
+            .unwrap();
+        let text = String::from_utf8(inspect.stdout).unwrap();
+        for forbidden in [
+            "permit-port-forwarding",
+            "permit-agent-forwarding",
+            "permit-X11-forwarding",
+            "permit-user-rc",
+        ] {
+            assert!(!text.contains(forbidden));
+        }
+        let config = super::super::config::SshSignerConfig {
+            permit_agent_forwarding: true,
+            ..Default::default()
+        };
+        let enabled = signer
+            .with_extensions(&config)
+            .sign_certificate(SignRequest {
+                public_key: fs::read_to_string(user.with_extension("pub")).unwrap(),
+                principals: vec!["alice".into()],
+                ttl_seconds: None,
+            })
+            .unwrap();
+        fs::write(&direct_path, enabled.certificate).unwrap();
+        let inspect = Command::new("ssh-keygen")
+            .args(["-L", "-f"])
+            .arg(&direct_path)
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8(inspect.stdout)
+                .unwrap()
+                .contains("permit-agent-forwarding")
+        );
     }
 
     #[test]
@@ -251,25 +395,25 @@ mod tests {
         )
         .ok();
 
-        // Ed25519 example
-        let valid_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeKeyDataHere user@host";
-        assert!(
-            signer
-                .as_ref()
-                .unwrap()
-                .validate_public_key(valid_key)
-                .is_ok()
-        );
-
-        // RSA example
-        let rsa_key = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABgQC... user@host";
-        assert!(
-            signer
-                .as_ref()
-                .unwrap()
-                .validate_public_key(rsa_key)
-                .is_ok()
-        );
+        let dir = tempfile::tempdir().unwrap();
+        for kind in ["ed25519", "rsa"] {
+            let key = dir.path().join(kind);
+            assert!(
+                Command::new("ssh-keygen")
+                    .args(["-q", "-t", kind, "-N", "", "-f"])
+                    .arg(&key)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            assert!(
+                signer
+                    .as_ref()
+                    .unwrap()
+                    .validate_public_key(&fs::read_to_string(key.with_extension("pub")).unwrap())
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

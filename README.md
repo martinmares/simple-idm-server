@@ -793,12 +793,35 @@ SQLX_OFFLINE=true cargo build --workspace
 
 ## Development
 
+When upgrading to the security fixes, review [deployment changes](docs/SECURITY_UPGRADE.md)
+and the [security audit](docs/security_best_practices_report.md).
+
 Run checks:
 
 ```bash
-cargo check --workspace --all-targets
-cargo test --workspace
+SQLX_OFFLINE=true cargo check --locked --workspace --all-targets
+SQLX_OFFLINE=true cargo test --locked --workspace
 ```
+
+PostgreSQL integration tests run **locally on the developer's machine**, using
+Docker Compose. CI runs the checks above with committed SQLx offline metadata;
+it does not connect to an external database. Tests marked `#[ignore]` that require
+PostgreSQL are run separately:
+
+```bash
+# Requires Docker with Compose and sqlx-cli (see prerequisites).
+bash scripts/test-postgres.sh
+# Alternatively: just test-postgres
+```
+
+The script starts a separate Compose project from `docker-compose.test.yml`,
+waits for PostgreSQL, applies migrations, and runs the database tests in
+`simple-idm-core`. PostgreSQL listens only on loopback at an automatically
+assigned port. Its data lives in a temporary container filesystem and is removed
+when the script exits, including when a test fails. It does not use the database
+or volume from the development `docker-compose.yml`. Test credentials are local
+fixtures. The legacy files in the root `tests/` directory are not Cargo test
+targets in this virtual workspace and are not covered by this command.
 
 Run server:
 

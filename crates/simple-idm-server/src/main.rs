@@ -600,7 +600,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             security_headers_state,
             security_headers::security_headers_middleware,
         ))
-        .layer(TraceLayer::new_for_http());
+        .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn_with_state(
+            config.security.trust_proxy_headers,
+            trusted_proxy_headers,
+        ));
 
     // Spusť server
     let addr = format!("{}:{}", config.server.host, config.server.port);
@@ -660,4 +664,43 @@ fn redact_database_url(url: &str) -> String {
     } else {
         url.to_string()
     }
+}
+
+async fn trusted_proxy_headers(
+    axum::extract::State(trust): axum::extract::State<bool>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    mut request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let trusted = trust
+        && std::env::var("TRUSTED_PROXY_IPS")
+            .unwrap_or_else(|_| "127.0.0.1,::1".into())
+            .split(',')
+            .filter_map(|value| value.trim().parse::<std::net::IpAddr>().ok())
+            .any(|ip| ip == peer.ip());
+    let client = if trusted {
+        request
+            .headers()
+            .get("x-forwarded-for")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .and_then(|value| value.trim().parse::<std::net::IpAddr>().ok())
+            .unwrap_or(peer.ip())
+    } else {
+        peer.ip()
+    };
+    for name in ["x-forwarded-for", "x-real-ip", "forwarded"] {
+        request.headers_mut().remove(name);
+    }
+    if !trusted {
+        for name in ["x-forwarded-proto", "x-forwarded-host"] {
+            request.headers_mut().remove(name);
+        }
+    }
+    let address = axum::http::HeaderValue::from_str(&client.to_string()).unwrap();
+    request
+        .headers_mut()
+        .insert("x-forwarded-for", address.clone());
+    request.headers_mut().insert("x-real-ip", address);
+    next.run(request).await
 }

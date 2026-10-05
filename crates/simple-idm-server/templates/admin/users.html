@@ -339,7 +339,7 @@
             </div>
             <div class="col-md-6">
               <label class="form-label">Password</label>
-              <input class="form-control" name="password" type="password" autocomplete="new-password" placeholder="required for local auth">
+              <input class="form-control" name="password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" placeholder="required for local auth">
             </div>
             <div class="col-md-3">
               <label class="form-label">First name</label>
@@ -600,7 +600,7 @@
               <div class="col-md-12">
                 <label class="form-label">New password (optional)</label>
                 <div class="input-group">
-                  <input class="form-control user-password-input" id="user-password-{{ r.id }}" type="password" name="password" autocomplete="new-password" placeholder="Leave empty to keep current password">
+                  <input class="form-control user-password-input" id="user-password-{{ r.id }}" type="password" name="password" minlength="12" maxlength="1024" autocomplete="new-password" placeholder="Leave empty to keep current password">
                   <button class="btn btn-outline-secondary user-password-generate" type="button" data-target="user-password-{{ r.id }}" title="Generate password">
                     <i class="ti ti-wand"></i>
                   </button>

@@ -14,7 +14,7 @@ pub struct Config {
     pub public_base_url: String,
     #[serde(default)]
     pub upstream_url: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_protected_prefixes")]
     pub protected_prefixes: Vec<String>,
     #[serde(default)]
     pub public_prefixes: Vec<String>,
@@ -61,6 +61,10 @@ pub enum ProxyMode {
 pub enum SessionBackend {
     Memory,
     Sqlite,
+}
+
+fn default_protected_prefixes() -> Vec<String> {
+    vec!["/".into()]
 }
 
 fn default_upstream_timeout_secs() -> u64 {
@@ -152,6 +156,10 @@ impl Config {
             anyhow::bail!("cookie_secret must be at least 32 characters");
         }
 
+        simple_idm_common::validate_identity_url(&self.public_base_url)
+            .map_err(anyhow::Error::msg)?;
+        simple_idm_common::validate_identity_url(&self.oidc_issuer).map_err(anyhow::Error::msg)?;
+
         // Validate URLs
         if !self.public_base_url.starts_with("http://")
             && !self.public_base_url.starts_with("https://")
@@ -168,6 +176,26 @@ impl Config {
             anyhow::bail!("session_sqlite_path is required when session_backend is sqlite");
         }
 
+        if self.session_max_age <= 0 {
+            anyhow::bail!("session_max_age must be positive");
+        }
+        if self.protected_prefixes.is_empty() {
+            anyhow::bail!(
+                "protected_prefixes must not be empty; use explicit public_prefixes for public paths"
+            );
+        }
+        for prefix in self.protected_prefixes.iter().chain(&self.public_prefixes) {
+            if !prefix.starts_with('/')
+                || prefix.contains(['%', '?', '#', '\\'])
+                || prefix.contains("//")
+                || prefix.split('/').any(|part| part == "." || part == "..")
+            {
+                anyhow::bail!("Path prefixes must be canonical absolute paths");
+            }
+        }
+        if self.public_prefixes.iter().any(|prefix| prefix == "/") {
+            anyhow::bail!("public_prefixes must not expose the entire proxy");
+        }
         if self.mode == ProxyMode::ReverseProxy {
             let Some(upstream_url) = self.upstream_url.as_ref() else {
                 anyhow::bail!("upstream_url is required when mode is reverse_proxy");
@@ -254,5 +282,25 @@ mod tests {
         config.upstream_url = Some("http://127.0.0.1:3000".to_string());
 
         config.validate().unwrap();
+    }
+}
+
+#[cfg(test)]
+mod security_tests {
+    use super::*;
+    #[test]
+    fn omitted_protection_keeps_secure_default_and_empty_is_rejected() {
+        let mut serialized = toml::Value::try_from(Config::default()).unwrap();
+        serialized
+            .as_table_mut()
+            .unwrap()
+            .remove("protected_prefixes");
+        let config: Config = serialized.try_into().unwrap();
+        assert_eq!(config.protected_prefixes, vec!["/"]);
+        let config = Config {
+            protected_prefixes: vec![],
+            ..config
+        };
+        assert!(config.validate().is_err());
     }
 }

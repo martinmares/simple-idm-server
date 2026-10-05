@@ -141,7 +141,11 @@ pub async fn handle_introspect(
 
     // Verify client secret
     match &client.client_secret_hash {
-        Some(hash) if crate::auth::verify_password(&client_secret, hash).unwrap_or(false) => {
+        Some(hash)
+            if crate::auth::verify_password_async(&client_secret, hash)
+                .await
+                .unwrap_or(false) =>
+        {
             // OK
         }
         _ => {
@@ -172,9 +176,18 @@ pub async fn handle_introspect(
         .jwt_service
         .verify_access_token(&req.token, &active_audiences, &[])
     {
+        let subject = uuid::Uuid::parse_str(&claims.sub).ok();
+        let version = claims
+            .custom_claims
+            .get("credential_version")
+            .and_then(serde_json::Value::as_i64);
+        let user_current: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND credential_version = $2 AND is_active AND deleted_at IS NULL)")
+            .bind(subject).bind(version).fetch_one(&state.db_pool).await.unwrap_or(false);
+        let client_current: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM oauth_clients WHERE id = $1 AND client_id = ANY($2) AND is_active AND deleted_at IS NULL AND NOT is_public AND 'client_credentials' = ANY(grant_types))")
+            .bind(subject).bind(&claims.aud).fetch_one(&state.db_pool).await.unwrap_or(false);
         let response = IntrospectionResponse {
-            active: true,
-            scope: None,
+            active: user_current || client_current,
+            scope: claims.scope.clone(),
             client_id: claims.aud.first().cloned(),
             username: claims.preferred_username.clone(),
             sub: Some(claims.sub),

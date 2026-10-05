@@ -62,3 +62,7 @@ release-version version:
 # Check all crate versions before building or releasing.
 check-version:
     bash scripts/release.sh check
+
+# Run database integration tests locally in an isolated Compose project.
+test-postgres:
+    bash scripts/test-postgres.sh

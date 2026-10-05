@@ -191,6 +191,7 @@ pub async fn login_start(
                     })) =>
         {
             PasskeyPending {
+                credential_version: user.credential_version,
                 tenant_id: user.tenant_id,
                 user_id: user.id,
                 client_id: client.id,
@@ -274,6 +275,7 @@ pub async fn login_finish(
     };
     let user_id = pending.user_id;
     let oidc = OidcPending {
+        credential_version: pending.credential_version,
         user_id,
         client_id: pending.client_id,
         redirect_uri: pending.redirect_uri,

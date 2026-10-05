@@ -33,7 +33,7 @@
       <div class="col-md-3"><input class="form-control" name="redirect_uris" placeholder="uri1, uri2"></div>
       <div class="col-md-3"><input class="form-control" name="client_secret" type="password" placeholder="secret for confidential clients" autocomplete="new-password"></div>
       <div class="col-md-12">
-        <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. For CLI/public localhost clients, wildcard port is allowed only for client_id=cli-tools.</div>
+        <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. Public clients may use a wildcard port for loopback callback URLs.</div>
       </div>
       <div class="col-md-6">
         <label class="form-label">Grant types</label>
@@ -46,13 +46,8 @@
       </div>
       <div class="col-md-4">
         <label class="form-label">Scope</label>
-        <div class="d-flex flex-wrap gap-2">
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" checked><span class="form-check-label">openid</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_profile" value="on" checked><span class="form-check-label">profile</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_email" value="on" checked><span class="form-check-label">email</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_groups" value="on" checked><span class="form-check-label">groups</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_offline_access" value="on"><span class="form-check-label">offline_access</span></label>
-        </div>
+        <input class="form-control" name="scope" value="openid profile email groups" placeholder="openid profile email groups bastion:connect">
+        <div class="form-text">Space-separated scopes, including any custom application scopes.</div>
       </div>
       <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_public" type="checkbox" checked><label class="form-check-label">public</label></div>
       <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked><label class="form-check-label">active</label></div>
@@ -149,18 +144,13 @@
               </div>
               <div class="col-md-6">
                 <label class="form-label">Scope</label>
-                <div class="d-flex flex-wrap gap-2">
-                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" {% if r.has_scope("openid") %}checked{% endif %}><span class="form-check-label">openid</span></label>
-                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_profile" value="on" {% if r.has_scope("profile") %}checked{% endif %}><span class="form-check-label">profile</span></label>
-                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_email" value="on" {% if r.has_scope("email") %}checked{% endif %}><span class="form-check-label">email</span></label>
-                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_groups" value="on" {% if r.has_scope("groups") %}checked{% endif %}><span class="form-check-label">groups</span></label>
-                  <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_offline_access" value="on" {% if r.has_scope("offline_access") %}checked{% endif %}><span class="form-check-label">offline_access</span></label>
-                </div>
+                <input class="form-control" name="scope" value="{{ r.scope }}" placeholder="openid profile email groups bastion:connect">
+                <div class="form-text">Space-separated scopes, including any custom application scopes.</div>
               </div>
               <div class="col-md-12">
                 <label class="form-label">Redirect URIs (comma separated)</label>
                 <input class="form-control" name="redirect_uris" value="{{ r.redirect_uris | join(", ") }}">
-                <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. For CLI/public localhost clients, wildcard port is allowed only for client_id=cli-tools.</div>
+                <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. Public clients may use a wildcard port for loopback callback URLs.</div>
               </div>
               <div class="col-md-12">
                 <label class="form-label">Grant types</label>

@@ -23,7 +23,12 @@ pub async fn request_certificate(
     public_key: &str,
     ttl_seconds: Option<u64>,
 ) -> Result<CertificateInfo, String> {
-    let http_client = reqwest::Client::new();
+    simple_idm_common::validate_identity_url(signer_url)?;
+    let http_client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|error| error.to_string())?;
 
     let sign_request = SignRequest {
         public_key: public_key.to_string(),

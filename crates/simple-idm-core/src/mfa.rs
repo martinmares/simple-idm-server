@@ -1,4 +1,4 @@
-use crate::auth::{hash_password, verify_password};
+use crate::auth::{hash_password_async, verify_password_async};
 use crate::db::models::UserAuthenticator;
 use crate::secret_crypto::{decrypt_secret, encrypt_secret};
 use anyhow::{Context, Result, anyhow};
@@ -32,6 +32,7 @@ impl MfaPolicy {
 
 #[derive(Debug, Clone, FromRow)]
 pub struct MfaLoginTransaction {
+    pub credential_version: i64,
     pub token_hash: String,
     pub tenant_id: Uuid,
     pub user_id: Uuid,
@@ -50,6 +51,7 @@ pub struct MfaLoginTransaction {
 
 #[derive(Debug, Clone)]
 pub struct NewMfaTransaction<'a> {
+    pub credential_version: i64,
     pub tenant_id: Uuid,
     pub user_id: Uuid,
     pub client_id: Uuid,
@@ -96,8 +98,8 @@ pub async fn create_login_transaction(
         r#"
         INSERT INTO mfa_login_transactions
           (token_hash, tenant_id, user_id, client_id, redirect_uri, scope, state,
-           code_challenge, code_challenge_method, nonce, stage, expires_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           code_challenge, code_challenge_method, nonce, stage, expires_at, credential_version)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
         "#,
     )
     .bind(token_hash)
@@ -112,6 +114,7 @@ pub async fn create_login_transaction(
     .bind(input.nonce)
     .bind(input.stage)
     .bind(expires_at)
+    .bind(input.credential_version)
     .execute(pool)
     .await?;
 
@@ -123,6 +126,8 @@ pub async fn load_login_transaction(pool: &PgPool, token: &str) -> Result<MfaLog
         r#"
         SELECT * FROM mfa_login_transactions
         WHERE token_hash = $1 AND expires_at > NOW() AND attempts < $2
+          AND credential_version = (SELECT credential_version FROM users
+              WHERE id = mfa_login_transactions.user_id AND is_active AND deleted_at IS NULL)
         "#,
     )
     .bind(transaction_token_hash(token))
@@ -146,6 +151,8 @@ pub async fn consume_login_transaction(pool: &PgPool, token: &str) -> Result<Mfa
         r#"
         DELETE FROM mfa_login_transactions
         WHERE token_hash = $1 AND expires_at > NOW() AND attempts < $2
+          AND credential_version = (SELECT credential_version FROM users
+              WHERE id = mfa_login_transactions.user_id AND is_active AND deleted_at IS NULL)
         RETURNING *
         "#,
     )
@@ -299,8 +306,18 @@ pub async fn verify_totp(
 pub async fn activate_totp_and_generate_recovery_codes(
     pool: &PgPool,
     authenticator: &UserAuthenticator,
+    expected_credential_version: i64,
 ) -> Result<Vec<String>> {
     let mut tx = pool.begin().await?;
+    let current_version = sqlx::query_scalar::<_, i64>(
+        "SELECT credential_version FROM users WHERE id = $1 AND is_active AND deleted_at IS NULL FOR UPDATE",
+    )
+    .bind(authenticator.user_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if current_version != Some(expected_credential_version) {
+        return Err(anyhow!("Credentials changed during TOTP enrollment"));
+    }
     let activated = sqlx::query(
         r#"
         UPDATE user_authenticators
@@ -321,7 +338,9 @@ pub async fn activate_totp_and_generate_recovery_codes(
 
     let codes = generate_recovery_codes();
     for code in &codes {
-        let hash = hash_password(code).map_err(|err| anyhow!(err.to_string()))?;
+        let hash = hash_password_async(code)
+            .await
+            .map_err(|err| anyhow!(err.to_string()))?;
         sqlx::query(
             r#"
             INSERT INTO user_recovery_codes
@@ -378,7 +397,10 @@ pub async fn consume_recovery_code(pool: &PgPool, user_id: Uuid, code: &str) -> 
     .await?;
 
     for (id, hash) in rows {
-        if verify_password(&code.trim().to_ascii_uppercase(), &hash).unwrap_or(false) {
+        if verify_password_async(&code.trim().to_ascii_uppercase(), &hash)
+            .await
+            .unwrap_or(false)
+        {
             let result = sqlx::query(
                 "UPDATE user_recovery_codes SET used_at = NOW() WHERE id = $1 AND used_at IS NULL",
             )
@@ -397,13 +419,13 @@ pub async fn consume_recovery_code(pool: &PgPool, user_id: Uuid, code: &str) -> 
 /// and, when MFA is required, starts a fresh enrollment.
 pub async fn admin_reset_user_mfa(pool: &PgPool, user_id: Uuid) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    let local_user = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM users WHERE id = $1 AND auth_mode = 'local' AND deleted_at IS NULL)",
+    let local_user = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM users WHERE id = $1 AND auth_mode = 'local' AND deleted_at IS NULL FOR UPDATE",
     )
     .bind(user_id)
-    .fetch_one(&mut *tx)
+    .fetch_optional(&mut *tx)
     .await?;
-    if !local_user {
+    if local_user.is_none() {
         return Ok(false);
     }
 

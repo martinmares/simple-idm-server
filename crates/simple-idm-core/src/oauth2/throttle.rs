@@ -1,10 +1,13 @@
 use crate::config::AuthProtectionConfig;
 use crate::db::DbPool;
 use axum::http::HeaderMap;
-use chrono::{Duration, Utc};
+use chrono::Utc;
 use sqlx::Row;
 
 pub fn extract_client_ip(headers: &HeaderMap, trust_proxy_headers: bool) -> Option<String> {
+    if !trust_proxy_headers {
+        return None;
+    }
     if trust_proxy_headers {
         if let Some(ip) = headers
             .get("x-forwarded-for")
@@ -58,60 +61,21 @@ pub async fn register_failure(
         return Ok(());
     }
 
-    let now = Utc::now();
-    let row = sqlx::query(
-        r#"
-        SELECT failures, window_started_at
-        FROM auth_throttle
-        WHERE endpoint = $1 AND identity_key = $2
-        "#,
-    )
-    .bind(endpoint)
-    .bind(identity_key)
-    .fetch_optional(db_pool)
-    .await?;
-
-    let (mut failures, mut window_started_at) = if let Some(row) = row {
-        (
-            row.try_get::<i32, _>("failures")?,
-            row.try_get::<chrono::DateTime<Utc>, _>("window_started_at")?,
-        )
-    } else {
-        (0, now)
-    };
-
-    if now - window_started_at > Duration::seconds(cfg.failure_window_seconds) {
-        failures = 0;
-        window_started_at = now;
-    }
-
-    failures += 1;
-    let locked_until = if failures >= cfg.max_failures {
-        Some(now + Duration::seconds(cfg.lockout_seconds))
-    } else {
-        None
-    };
-
-    sqlx::query(
-        r#"
+    sqlx::query(r#"
         INSERT INTO auth_throttle (endpoint, identity_key, failures, window_started_at, last_failed_at, locked_until)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (endpoint, identity_key)
-        DO UPDATE SET
-            failures = EXCLUDED.failures,
-            window_started_at = EXCLUDED.window_started_at,
-            last_failed_at = EXCLUDED.last_failed_at,
-            locked_until = EXCLUDED.locked_until
-        "#,
-    )
-    .bind(endpoint)
-    .bind(identity_key)
-    .bind(failures)
-    .bind(window_started_at)
-    .bind(now)
-    .bind(locked_until)
-    .execute(db_pool)
-    .await?;
+        VALUES ($1, $2, 1, NOW(), NOW(), CASE WHEN $4 <= 1 THEN NOW() + make_interval(secs => $5) ELSE NULL END)
+        ON CONFLICT (endpoint, identity_key) DO UPDATE SET
+            failures = CASE WHEN auth_throttle.window_started_at < NOW() - make_interval(secs => $3)
+                THEN 1 ELSE auth_throttle.failures + 1 END,
+            window_started_at = CASE WHEN auth_throttle.window_started_at < NOW() - make_interval(secs => $3)
+                THEN NOW() ELSE auth_throttle.window_started_at END,
+            last_failed_at = NOW(),
+            locked_until = CASE WHEN (CASE WHEN auth_throttle.window_started_at < NOW() - make_interval(secs => $3)
+                THEN 1 ELSE auth_throttle.failures + 1 END) >= $4
+                THEN NOW() + make_interval(secs => $5) ELSE auth_throttle.locked_until END
+    "#)
+    .bind(endpoint).bind(identity_key).bind(cfg.failure_window_seconds as f64)
+    .bind(cfg.max_failures).bind(cfg.lockout_seconds as f64).execute(db_pool).await?;
 
     Ok(())
 }
@@ -127,4 +91,51 @@ pub async fn clear_failures(
         .execute(db_pool)
         .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn forwarded_addresses_are_ignored_without_proxy_trust() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-real-ip", "198.51.100.1".parse().unwrap());
+        headers.insert("x-forwarded-for", "198.51.100.2".parse().unwrap());
+        assert_eq!(extract_client_ip(&headers, false), None);
+    }
+    #[tokio::test]
+    #[ignore = "requires disposable DATABASE_URL; run scripts/test-postgres.sh"]
+    async fn postgres_concurrent_failures_are_counted_atomically() {
+        let pool = sqlx::PgPool::connect(&std::env::var("DATABASE_URL").unwrap())
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let key = uuid::Uuid::new_v4().to_string();
+        let cfg = AuthProtectionConfig {
+            enabled: true,
+            failure_window_seconds: 300,
+            max_failures: 5,
+            lockout_seconds: 300,
+            clear_on_start: false,
+        };
+        let mut tasks = Vec::new();
+        for _ in 0..20 {
+            let pool = pool.clone();
+            let key = key.clone();
+            let cfg = cfg.clone();
+            tasks.push(tokio::spawn(async move {
+                register_failure(&pool, "regression", &key, &cfg)
+                    .await
+                    .unwrap();
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let count: i32 = sqlx::query_scalar("SELECT failures FROM auth_throttle WHERE endpoint = 'regression' AND identity_key = $1").bind(&key).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 20);
+        assert!(is_locked(&pool, "regression", &key).await.unwrap());
+        clear_failures(&pool, "regression", &key).await.unwrap();
+        assert!(!is_locked(&pool, "regression", &key).await.unwrap());
+    }
 }

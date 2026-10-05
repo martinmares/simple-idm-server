@@ -122,6 +122,12 @@ impl JwtService {
         acr: Option<String>,
         expiry_seconds: i64,
     ) -> Result<String, JwtError> {
+        if custom_claims.keys().any(|name| {
+            !matches!(name.as_str(), "tenant_id" | "credential_version")
+                && super::claims::is_reserved_claim(name)
+        }) {
+            return Err(JwtError::EncodeError("Reserved JWT claim name".into()));
+        }
         let now = Utc::now();
         let exp = now + Duration::seconds(expiry_seconds);
 
@@ -142,6 +148,7 @@ impl JwtService {
         };
 
         let mut header = Header::new(Algorithm::RS256);
+        header.typ = Some("at+jwt".into());
         header.kid = Some(self.key_id.clone());
         encode(&header, &claims, &self.encoding_key)
             .map_err(|e| JwtError::EncodeError(e.to_string()))
@@ -161,6 +168,12 @@ impl JwtService {
         acr: Option<String>,
         expiry_seconds: i64,
     ) -> Result<String, JwtError> {
+        if custom_claims.keys().any(|name| {
+            !matches!(name.as_str(), "tenant_id" | "credential_version")
+                && super::claims::is_reserved_claim(name)
+        }) {
+            return Err(JwtError::EncodeError("Reserved JWT claim name".into()));
+        }
         let now = Utc::now();
         let exp = now + Duration::seconds(expiry_seconds);
 
@@ -223,6 +236,14 @@ impl JwtService {
         expected_audiences: &[String],
         required_scopes: &[&str],
     ) -> Result<Claims, JwtError> {
+        if decode_header(token)
+            .map_err(|_| JwtError::InvalidToken)?
+            .typ
+            .as_deref()
+            != Some("at+jwt")
+        {
+            return Err(JwtError::InvalidToken);
+        }
         let claims = self.decode_token_without_audience_validation(token)?;
 
         if claims.aud.is_empty()
@@ -375,6 +396,25 @@ mod tests {
                 .is_err()
         );
 
+        let id_token = service
+            .create_id_token(
+                user_id,
+                "test-client".into(),
+                None,
+                None,
+                vec![],
+                std::collections::HashMap::new(),
+                None,
+                vec!["pwd".into()],
+                None,
+                3600,
+            )
+            .unwrap();
+        assert!(
+            service
+                .verify_access_token(&id_token, &["test-client".into()], &[])
+                .is_err()
+        );
         let jwks = service.get_jwks().expect("jwks should generate");
         assert_eq!(jwks.keys.len(), 2);
         let kids: Vec<String> = jwks.keys.into_iter().filter_map(|k| k.kid).collect();

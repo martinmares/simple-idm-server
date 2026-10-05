@@ -169,6 +169,7 @@ struct RoleMapping {
 struct AppState {
     config: Arc<Config>,
     sessions: Arc<SessionStore>,
+    login_attempts: Arc<DashMap<String, (u32, std::time::Instant)>>,
 }
 
 #[derive(Debug, Clone)]
@@ -252,6 +253,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         config: config.clone(),
         sessions: Arc::new(SessionStore::default()),
+        login_attempts: Arc::new(DashMap::new()),
     };
 
     let app = Router::new()
@@ -317,6 +319,26 @@ async fn handle_login(State(state): State<AppState>, Form(form): Form<LoginForm>
         ));
     }
 
+    if username.len() > 255 || password.len() > 1024 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let key = username.to_lowercase();
+    state
+        .login_attempts
+        .retain(|_, (_, started)| started.elapsed() < std::time::Duration::from_secs(300));
+    if state.login_attempts.len() >= 10_000 && !state.login_attempts.contains_key(&key) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    {
+        let mut attempts = state
+            .login_attempts
+            .entry(key.clone())
+            .or_insert((0, std::time::Instant::now()));
+        if attempts.0 >= 5 {
+            return StatusCode::TOO_MANY_REQUESTS.into_response();
+        }
+        attempts.0 += 1;
+    }
     let ldap_user = match authenticate_and_fetch_user(&state.config.ldap, username, password).await
     {
         Ok(user) => user,
@@ -331,6 +353,7 @@ async fn handle_login(State(state): State<AppState>, Form(form): Form<LoginForm>
         }
     };
 
+    state.login_attempts.remove(&key);
     let mapped = map_roles(&state.config, &ldap_user.roles);
     if state.config.authz.require_mapped_group && mapped.groups.is_empty() && mapped.role.is_none()
     {
@@ -411,7 +434,7 @@ fn login_error_message(err: &anyhow::Error) -> &'static str {
 async fn handle_logout(State(state): State<AppState>, headers: HeaderMap) -> impl IntoResponse {
     if let Some(session_id) = extract_session_cookie(&headers, &state.config.cookie_name) {
         state.sessions.delete(&session_id);
-        tracing::info!("session deleted: {}", session_id);
+        tracing::info!("Session removed");
     }
 
     let cookie = clear_session_cookie(&state.config);

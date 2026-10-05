@@ -83,6 +83,23 @@ pub async fn handle_userinfo(
         .verify_access_token(token, &active_audiences, &["openid"])
     {
         Ok(claims) => {
+            let subject = uuid::Uuid::parse_str(&claims.sub).ok();
+            let version = claims
+                .custom_claims
+                .get("credential_version")
+                .and_then(serde_json::Value::as_i64);
+            let current: bool = sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM users WHERE id = $1 AND credential_version = $2 AND is_active AND deleted_at IS NULL)")
+                .bind(subject).bind(version).fetch_one(&state.db_pool).await.unwrap_or(false);
+            if !current {
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(ErrorResponse {
+                        error: "invalid_token".into(),
+                        error_description: "Authentication is no longer valid".into(),
+                    }),
+                )
+                    .into_response();
+            }
             let scope = claims.scope.as_deref().unwrap_or("");
             let email = if has_scope(scope, "email") {
                 claims.email

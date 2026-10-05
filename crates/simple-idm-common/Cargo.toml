@@ -8,3 +8,4 @@ license.workspace = true
 axum = "0.8"
 base64 = "0.23"
 rust-embed = "8.12"
+url = "2.5"
