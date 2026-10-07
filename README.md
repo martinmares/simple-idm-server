@@ -30,7 +30,7 @@ The repository is a Cargo workspace with multiple binaries and shared core crate
 - `simple-idm-oauth2-proxy` - OIDC auth adapter for trusted headers, nginx `auth_request`, and single-upstream reverse proxy mode
 - `simple-idm-ad-proxy` - AD/LDAP login adapter for nginx `auth_request` and trusted headers
 - `simple-idm-oidc-metadata-proxy` - read-only OIDC discovery/JWKS proxy for exposing trusted token metadata across network boundaries
-- `simple-idm-token-proxy` - localhost bearer-token proxy and authenticated runtime asset fetcher
+- `simple-idm-token-proxy` - localhost bearer-token proxy and authenticated runtime asset fetcher, with configurable environment-to-`X-*` header mappings ([configuration](docs/TOKEN_PROXY.md))
 - `simple-idm-ssh-login` - SSH certificate login client
 - `simple-idm-ssh-signer` - SSH certificate signer service
 - `simple-idm-core` - shared server/core library

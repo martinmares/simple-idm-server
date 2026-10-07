@@ -1,3 +1,7 @@
+mod env_headers;
+
+use env_headers::{EnvHeader, ManagedHeaders, read_process_env};
+
 use std::{
     net::SocketAddr,
     path::{Component, Path, PathBuf},
@@ -80,6 +84,15 @@ struct CommonArgs {
         default_value_t = false
     )]
     insecure_upstream_tls: bool,
+
+    /// Map an environment variable to an X-* header; repeat or use a comma-separated list.
+    #[arg(
+        long = "env-header",
+        env = "SIMPLE_IDM_TOKEN_PROXY_ENV_HEADERS",
+        value_delimiter = ',',
+        value_name = "ENV_NAME=X-Header"
+    )]
+    env_headers: Vec<EnvHeader>,
 }
 
 #[derive(Args, Debug)]
@@ -107,6 +120,14 @@ struct ServeArgs {
         default_value = "CUSTOMER_RELEASE_ID"
     )]
     customer_release_id_env_name: String,
+
+    /// Disable automatic release headers; explicitly mapped headers still apply.
+    #[arg(
+        long,
+        env = "SIMPLE_IDM_TOKEN_PROXY_NO_RELEASE_HEADERS",
+        default_value_t = false
+    )]
+    no_release_headers: bool,
 
     #[command(flatten)]
     common: CommonArgs,
@@ -142,8 +163,7 @@ struct AppState {
     client: reqwest::Client,
     upstream: Url,
     token_file: Arc<PathBuf>,
-    release_id: Option<HeaderValue>,
-    customer_release_id: Option<HeaderValue>,
+    headers: ManagedHeaders,
 }
 
 #[tokio::main]
@@ -160,32 +180,13 @@ async fn main() -> anyhow::Result<()> {
 async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     validate_token_file(&args.common.token_file)?;
     let client = build_client(&args.common)?;
-    if args.release_id_env_name.is_empty()
-        || args.customer_release_id_env_name.is_empty()
-        || args.release_id_env_name == args.customer_release_id_env_name
-    {
-        anyhow::bail!("release ID environment variable names must be nonempty and distinct");
-    }
-    let release_id = release_header(
-        std::env::var(&args.release_id_env_name).ok(),
-        &args.release_id_env_name,
-    )?;
-    let customer_release_id = release_header(
-        std::env::var(&args.customer_release_id_env_name)
-            .ok()
-            .filter(|value| !value.is_empty()),
-        &args.customer_release_id_env_name,
-    )?;
-    if customer_release_id.is_some() && release_id.is_none() {
-        anyhow::bail!("CUSTOMER_RELEASE_ID requires RELEASE_ID");
-    }
+    let headers = serve_headers(&args, &mut read_process_env)?;
 
     let state = AppState {
         client,
         upstream: args.common.upstream.clone(),
         token_file: Arc::new(args.common.token_file.clone()),
-        release_id,
-        customer_release_id,
+        headers,
     };
 
     info!("starting simple-idm-token-proxy");
@@ -203,6 +204,42 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn serve_headers(
+    args: &ServeArgs,
+    read_env: &mut impl FnMut(&str) -> anyhow::Result<Option<String>>,
+) -> anyhow::Result<ManagedHeaders> {
+    let mut headers = ManagedHeaders::resolve(&args.common.env_headers, read_env)?;
+    if args.no_release_headers {
+        return Ok(headers);
+    }
+    if args.release_id_env_name.is_empty()
+        || args.customer_release_id_env_name.is_empty()
+        || args.release_id_env_name == args.customer_release_id_env_name
+    {
+        anyhow::bail!("release ID environment variable names must be nonempty and distinct");
+    }
+    for (header, env_name, optional_empty) in [
+        (CONFIG_RELEASE_HEADER, &args.release_id_env_name, false),
+        (
+            CONFIG_CUSTOMER_RELEASE_HEADER,
+            &args.customer_release_id_env_name,
+            true,
+        ),
+    ] {
+        let header = HeaderName::from_static(header);
+        if !headers.names.contains(&header) {
+            let value = read_env(env_name)?.filter(|value| !optional_empty || !value.is_empty());
+            headers.insert(header, release_header(value, env_name)?);
+        }
+    }
+    if headers.values.contains_key(CONFIG_CUSTOMER_RELEASE_HEADER)
+        && !headers.values.contains_key(CONFIG_RELEASE_HEADER)
+    {
+        anyhow::bail!("CUSTOMER_RELEASE_ID requires RELEASE_ID");
+    }
+    Ok(headers)
+}
+
 async fn fetch(args: FetchArgs) -> anyhow::Result<()> {
     validate_token_file(&args.common.token_file)?;
     let files: Vec<FetchFile> =
@@ -213,6 +250,7 @@ async fn fetch(args: FetchArgs) -> anyhow::Result<()> {
     }
 
     let client = build_client(&args.common)?;
+    let headers = ManagedHeaders::resolve(&args.common.env_headers, &mut read_process_env)?;
     let token = read_token(&args.common.token_file).await?;
     let output_dir = absolute_output_dir(&args.output_dir)?;
     fs::create_dir_all(&output_dir)
@@ -225,9 +263,16 @@ async fn fetch(args: FetchArgs) -> anyhow::Result<()> {
         .tempdir_in(&output_dir)?;
     let staging_dir = staging.path();
 
-    let result = fetch_all_to_staging(&client, &args.common.upstream, &token, staging_dir, &files)
-        .await
-        .and_then(|_| commit_staged_files(staging_dir, &output_dir, &files));
+    let result = fetch_all_to_staging(
+        &client,
+        &args.common.upstream,
+        &token,
+        &headers.values,
+        staging_dir,
+        &files,
+    )
+    .await
+    .and_then(|_| commit_staged_files(staging_dir, &output_dir, &files));
 
     staging.close()?;
     result?;
@@ -325,16 +370,11 @@ async fn proxy_inner(
         .bearer_auth(token);
 
     for (name, value) in &headers {
-        if should_forward_request_header(name) {
+        if should_forward_request_header(name) && !state.headers.names.contains(name) {
             request = request.header(name, value);
         }
     }
-    if let Some(value) = &state.release_id {
-        request = request.header(CONFIG_RELEASE_HEADER, value);
-    }
-    if let Some(value) = &state.customer_release_id {
-        request = request.header(CONFIG_CUSTOMER_RELEASE_HEADER, value);
-    }
+    request = request.headers(state.headers.values.clone());
 
     if !body.is_empty() {
         request = request.body(body);
@@ -343,9 +383,8 @@ async fn proxy_inner(
     let upstream_response = request.send().await?;
     let status = upstream_response.status();
     debug!(
-        release_id = ?state.release_id.as_ref().and_then(|value| value.to_str().ok()),
-        customer_release_id = ?state.customer_release_id.as_ref().and_then(|value| value.to_str().ok()),
-        "forwarded release context headers"
+        header_names = ?state.headers.values.keys().map(HeaderName::as_str).collect::<Vec<_>>(),
+        "forwarded managed headers"
     );
     info!(
         "proxy {} {} -> {}",
@@ -463,6 +502,7 @@ async fn fetch_all_to_staging(
     client: &reqwest::Client,
     upstream: &Url,
     token: &str,
+    headers: &HeaderMap,
     staging_dir: &Path,
     files: &[FetchFile],
 ) -> anyhow::Result<()> {
@@ -473,6 +513,7 @@ async fn fetch_all_to_staging(
         let response = client
             .get(url.clone())
             .bearer_auth(token)
+            .headers(headers.clone())
             .send()
             .await
             .with_context(|| format!("request {}", url.path()))?;
@@ -690,6 +731,7 @@ YyRIHN8wfdVoOw==
             timeout_seconds: 5,
             ca_file: Some(path),
             insecure_upstream_tls: false,
+            env_headers: Vec::new(),
         };
 
         assert!(build_client(&args).is_err());
@@ -703,6 +745,7 @@ YyRIHN8wfdVoOw==
             timeout_seconds: 5,
             ca_file: Some(PathBuf::from("/tmp/ca.pem")),
             insecure_upstream_tls: true,
+            env_headers: Vec::new(),
         };
 
         let error = build_client(&args).unwrap_err();
@@ -800,6 +843,207 @@ YyRIHN8wfdVoOw==
         assert_eq!(args.customer_release_id_env_name, "APP_CUSTOMER_RELEASE_ID");
     }
 
+    fn serve_args(extra: &[&str]) -> ServeArgs {
+        let mut args = vec![
+            "simple-idm-token-proxy",
+            "serve",
+            "--upstream",
+            "http://127.0.0.1:9998",
+            "--token-file",
+            "/tmp/token",
+        ];
+        args.extend_from_slice(extra);
+        let Command::Serve(args) = Cli::try_parse_from(args).unwrap().command else {
+            panic!("expected serve")
+        };
+        args
+    }
+
+    #[test]
+    fn env_header_cli_is_shared_and_rejects_bad_mapping() {
+        let args = serve_args(&[
+            "--env-header",
+            "APP_TENANT=X-Tenant,APP_ENV=X-Environment",
+            "--env-header",
+            "APP_NAME=X-Application",
+        ]);
+        assert_eq!(args.common.env_headers.len(), 3);
+        let cli = Cli::try_parse_from([
+            "simple-idm-token-proxy",
+            "fetch",
+            "--upstream",
+            "http://127.0.0.1:9998",
+            "--token-file",
+            "/tmp/token",
+            "--output-dir",
+            "/tmp/assets",
+            "--files-json",
+            "[]",
+            "--env-header",
+            "APP_TENANT=X-Tenant",
+        ])
+        .unwrap();
+        let Command::Fetch(args) = cli.command else {
+            panic!("expected fetch")
+        };
+        assert_eq!(args.common.env_headers[0].header, "x-tenant");
+        assert!(
+            Cli::try_parse_from([
+                "simple-idm-token-proxy",
+                "serve",
+                "--upstream",
+                "http://127.0.0.1:9998",
+                "--token-file",
+                "/tmp/token",
+                "--env-header",
+                "APP=Authorization"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn custom_mappings_override_defaults_and_keep_release_compatibility() {
+        let args = serve_args(&["--env-header", "CUSTOM_RELEASE=X-Config-Release-ID"]);
+        let headers = serve_headers(&args, &mut |name| {
+            Ok(match name {
+                "CUSTOM_RELEASE" => Some("external/release/longer-format".into()),
+                "RELEASE_ID" => Some("invalid legacy value".into()),
+                "CUSTOMER_RELEASE_ID" => Some("customer-1".into()),
+                _ => None,
+            })
+        })
+        .unwrap();
+        assert_eq!(
+            headers.values[CONFIG_RELEASE_HEADER],
+            "external/release/longer-format"
+        );
+        assert_eq!(headers.values[CONFIG_CUSTOMER_RELEASE_HEADER], "customer-1");
+        let args = serve_args(&[]);
+        assert!(
+            serve_headers(&args, &mut |name| Ok(
+                (name == "CUSTOMER_RELEASE_ID").then(|| "customer-1".into())
+            ))
+            .is_err()
+        );
+        assert!(
+            serve_headers(&args, &mut |name| Ok(
+                (name == "RELEASE_ID").then(String::new)
+            ))
+            .is_err()
+        );
+        let args = serve_args(&[
+            "--no-release-headers",
+            "--env-header",
+            "MY_RELEASE=X-Release",
+        ]);
+        let headers = serve_headers(&args, &mut |name| {
+            Ok(Some(
+                if name == "MY_RELEASE" {
+                    "my/release"
+                } else {
+                    "invalid legacy value"
+                }
+                .into(),
+            ))
+        })
+        .unwrap();
+        assert_eq!(headers.values.len(), 1);
+        assert_eq!(headers.values["x-release"], "my/release");
+    }
+
+    #[tokio::test]
+    async fn mapped_headers_strip_spoofing_and_follow_token_rotation_and_fetch() {
+        let app = Router::new().route("/config/echo", get(|headers: HeaderMap| async move {
+            assert_eq!(headers.get_all("x-tenant").iter().count(), 1);
+            assert_eq!(headers["x-tenant"], "tenant / with spaces");
+            assert!(headers.get("x-optional").is_none());
+            assert!(headers.get("x-empty").is_none());
+            assert_eq!(headers["accept"], "application/json");
+            axum::Json(serde_json::json!({"authorization": headers[header::AUTHORIZATION].to_str().unwrap()}))
+        })).route("/config/file", get(|headers: HeaderMap| async move {
+            assert_eq!(headers["x-tenant"], "tenant / with spaces");
+            assert_eq!(headers[header::AUTHORIZATION], "Bearer rotated-token");
+            "asset"
+        }));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream =
+            Url::parse(&format!("http://{}/config", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let args = serve_args(&[
+            "--env-header",
+            "TENANT=X-Tenant,MISSING=X-Optional,EMPTY=X-Empty",
+            "--no-release-headers",
+        ]);
+        let managed = serve_headers(&args, &mut |name| {
+            Ok(match name {
+                "TENANT" => Some("tenant / with spaces".into()),
+                "EMPTY" => Some(String::new()),
+                _ => None,
+            })
+        })
+        .unwrap();
+        let root = tempdir().unwrap();
+        let token_file = root.path().join("token");
+        fs::write(&token_file, "first-token\n").await.unwrap();
+        let client = reqwest::Client::new();
+        let state = AppState {
+            client: client.clone(),
+            upstream: upstream.clone(),
+            token_file: Arc::new(token_file.clone()),
+            headers: managed.clone(),
+        };
+        for token in ["first-token", "rotated-token"] {
+            fs::write(&token_file, token).await.unwrap();
+            let mut headers = HeaderMap::new();
+            headers.append("x-tenant", HeaderValue::from_static("spoofed"));
+            headers.append("x-tenant", HeaderValue::from_static("also-spoofed"));
+            headers.insert("x-optional", HeaderValue::from_static("spoofed"));
+            headers.insert("x-empty", HeaderValue::from_static("spoofed"));
+            headers.insert(
+                header::AUTHORIZATION,
+                HeaderValue::from_static("Bearer spoofed"),
+            );
+            headers.insert(header::ACCEPT, HeaderValue::from_static("application/json"));
+            let response = proxy_inner(
+                state.clone(),
+                Method::GET,
+                "/echo".parse().unwrap(),
+                headers,
+                Bytes::new(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["authorization"], format!("Bearer {token}"));
+        }
+        let files = [FetchFile {
+            source: "/file".into(),
+            target: "file.txt".into(),
+            mode: "0440".into(),
+            sha256: String::new(),
+        }];
+        fetch_all_to_staging(
+            &client,
+            &upstream,
+            "rotated-token",
+            &managed.values,
+            root.path(),
+            &files,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            fs::read(root.path().join("file.txt")).await.unwrap(),
+            b"asset"
+        );
+        server.abort();
+    }
+
     #[tokio::test]
     async fn proxy_overrides_client_release_header() {
         let app = Router::new()
@@ -842,12 +1086,22 @@ YyRIHN8wfdVoOw==
             client: reqwest::Client::new(),
             upstream: Url::parse(&format!("http://{address}/config")).unwrap(),
             token_file: Arc::new(token_file),
-            release_id: release_header(Some("2026.09.10.02".to_string()), "RELEASE_ID").unwrap(),
-            customer_release_id: release_header(
-                Some("TSM-Core_RE61_SP_04.01".to_string()),
-                "CUSTOMER_RELEASE_ID",
-            )
-            .unwrap(),
+            headers: {
+                let mut headers = ManagedHeaders::default();
+                headers.insert(
+                    HeaderName::from_static(CONFIG_RELEASE_HEADER),
+                    release_header(Some("2026.09.10.02".to_string()), "RELEASE_ID").unwrap(),
+                );
+                headers.insert(
+                    HeaderName::from_static(CONFIG_CUSTOMER_RELEASE_HEADER),
+                    release_header(
+                        Some("TSM-Core_RE61_SP_04.01".to_string()),
+                        "CUSTOMER_RELEASE_ID",
+                    )
+                    .unwrap(),
+                );
+                headers
+            },
         };
         let mut headers = HeaderMap::new();
         headers.insert(CONFIG_RELEASE_HEADER, HeaderValue::from_static("spoofed"));
@@ -866,7 +1120,10 @@ YyRIHN8wfdVoOw==
         .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let mut dev_state = state;
-        dev_state.customer_release_id = None;
+        dev_state
+            .headers
+            .values
+            .remove(CONFIG_CUSTOMER_RELEASE_HEADER);
         let mut dev_headers = HeaderMap::new();
         dev_headers.insert(
             CONFIG_CUSTOMER_RELEASE_HEADER,
@@ -955,6 +1212,7 @@ YyRIHN8wfdVoOw==
                 timeout_seconds: 5,
                 ca_file: None,
                 insecure_upstream_tls: false,
+                env_headers: Vec::new(),
             },
             output_dir: output_dir.clone(),
             files_json: files,
