@@ -1,6 +1,15 @@
 {% extends "admin/base.html" %}
 {% block content %}
 <style>
+  .membership-effective-list ul {
+    list-style: none;
+    padding-left: 1.3rem;
+    margin: .4rem 0;
+    border-left: 1px solid var(--tblr-border-color);
+  }
+  .membership-effective-list li { padding: .3rem 0 .3rem .4rem; font-size: .85rem; }
+  .membership-effective-list a { text-decoration: none; }
+
   .membership-shell {
     display: grid;
     gap: 1rem;
@@ -178,6 +187,28 @@
           </div>
         </div>
 
+        <details class="mb-3" open>
+          <summary>Effective membership and sources ({{ effective_user_groups.len() }})</summary>
+          <div class="membership-effective-list mt-2">
+          {% for source in selected_user_groups %}
+            <div class="mb-3">
+              <strong><a href="/admin/ui/groups#group-{{ source.id }}">{{ source.name }}</a></strong>
+              <span class="badge {% if source.is_virtual %}bg-azure-lt{% else %}bg-secondary-lt{% endif %}">{% if source.is_virtual %}virtual bundle{% else %}regular group{% endif %}</span>
+              <ul>
+              {% for g in effective_user_groups %}
+                {% if g.inherited_from(source) %}
+                <li><a href="/admin/ui/groups#group-{{ g.id }}">{{ g.name }}</a>
+                  <span class="badge bg-secondary-lt ms-2">{% if g.is_virtual %}virtual bundle{% else %}regular group{% endif %}</span>
+                  {% if g.direct %}<span class="small text-secondary ms-1">also assigned directly</span>{% endif %}
+                </li>
+                {% endif %}
+              {% endfor %}
+              </ul>
+            </div>
+          {% endfor %}
+          </div>
+        </details>
+        <h4>Direct assignments</h4>
         <div class="table-responsive">
           <form method="post"
                 action="/admin/ui/memberships/users/{{ u.id }}/groups/remove"

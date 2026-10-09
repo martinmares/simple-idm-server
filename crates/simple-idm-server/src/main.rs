@@ -528,6 +528,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "/oauth2/passkey/finish",
             post(oauth2::passkey_routes::login_finish),
         )
+        .route("/account/login", get(oauth2::account_routes::login))
         .route(
             "/account/security",
             get(oauth2::passkey_routes::security_page),

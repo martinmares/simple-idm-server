@@ -15,6 +15,8 @@ export GOOGLE_IMPORT_TEST_DATABASE_URL="$DATABASE_URL"
 export DOMAIN_POLICY_TEST_DATABASE_URL="$DATABASE_URL"
 export DEVICE_SSO_TEST_DATABASE_URL="$DATABASE_URL"
 export USER_ARCHIVE_TEST_DATABASE_URL="$DATABASE_URL"
+# Test-only encryption key for TOTP enrollment in the disposable database.
+export IDP_SECRETS_MASTER_KEY="0123456789abcdef0123456789abcdef"
 export SQLX_OFFLINE=true
 
 cargo sqlx migrate run --source migrations

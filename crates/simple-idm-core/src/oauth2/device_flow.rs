@@ -1,9 +1,5 @@
-use crate::auth::{
-    build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
-    get_user_group_names,
-};
-use crate::client_group_filters::apply_client_group_filters;
-use crate::db::models::{DeviceCode, OAuthClient, OAuthClientGroupPattern, User};
+use crate::auth::claims::user_authorization_claims;
+use crate::db::models::{DeviceCode, OAuthClient, User};
 use axum::{
     Form, Json,
     extract::{Query, State},
@@ -645,67 +641,8 @@ pub async fn handle_device_token_internal(
             }
         };
     }
-    let user_group_names = match client.groups_claim_mode.as_str() {
-        "none" => vec![],
-        "direct" => {
-            authorization_data!(
-                get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
-                    .await
-            )
-        }
-        _ => authorization_data!(
-            get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await
-        ),
-    };
-
-    // Apply client group filtering patterns (if any)
-    let filtered_group_names = match sqlx::query_as!(
-        OAuthClientGroupPattern,
-        r#"
-        SELECT id, client_id, pattern, is_include, priority, created_at
-        FROM oauth_client_group_patterns
-        WHERE client_id = $1
-          AND deleted_at IS NULL
-        ORDER BY priority ASC
-        "#,
-        client.id
-    )
-    .fetch_all(&state.db_pool)
-    .await
-    {
-        Ok(patterns) => {
-            if patterns.is_empty() {
-                user_group_names
-            } else {
-                apply_client_group_filters(&user_group_names, &patterns)
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch client group patterns: {:?}", e);
-            return Json(ErrorResponse {
-                error: "server_error".into(),
-                error_description: "Failed to load authorization filters".into(),
-            })
-            .into_response();
-        }
-    };
-
-    // Vytvoř custom claims
-    let mut custom_claims = if client.include_claim_maps {
-        let user_group_ids =
-            authorization_data!(get_effective_user_groups(&state.db_pool, user.id).await);
-        authorization_data!(
-            build_custom_claims(
-                &state.db_pool,
-                client.id,
-                &user_group_ids,
-                &filtered_group_names,
-            )
-            .await
-        )
-    } else {
-        std::collections::HashMap::new()
-    };
+    let (filtered_group_names, mut custom_claims) =
+        authorization_data!(user_authorization_claims(&state.db_pool, user.id, &client).await);
 
     // Tenant is authoritative server metadata, never a group claim-map override.
     custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));

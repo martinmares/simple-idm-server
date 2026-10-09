@@ -73,12 +73,7 @@
           <span class="form-check-label">include claim maps</span>
         </label>
       </div>
-      <div class="col-md-3 d-flex align-items-end">
-        <label class="form-check form-switch m-0">
-          <input class="form-check-input" name="ignore_virtual_groups" type="checkbox">
-          <span class="form-check-label">ignore virtual groups</span>
-        </label>
-      </div>
+      <div class="col-md-12 text-secondary small">Virtual bundles are never published in groups. They remain available to claim mapping.</div>
       <div class="col-md-12"><button class="btn btn-primary" type="submit">Create</button></div>
     </form>
   </div>
@@ -109,7 +104,7 @@
           <span class="text-muted">groups:</span>
           <span class="badge bg-blue-lt">{{ r.groups_claim_mode }}</span>
           {% if r.include_claim_maps %}<span class="badge bg-green-lt">claim maps</span>{% else %}<span class="badge bg-secondary-lt">no claim maps</span>{% endif %}
-          {% if r.ignore_virtual_groups %}<span class="badge bg-yellow-lt">ignore virtual</span>{% endif %}
+          <span class="badge bg-secondary-lt">physical groups only</span>{% if !r.ignore_virtual_groups %}<span class="badge bg-yellow-lt" title="Legacy setting is ignored. Check application rules that used virtual group names.">legacy export setting</span>{% endif %}
         </div>
         <div class="d-flex gap-2">
           <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#client-edit-{{ r.id }}">
@@ -191,12 +186,7 @@
                   <span class="form-check-label">include claim maps</span>
                 </label>
               </div>
-              <div class="col-md-4 d-flex align-items-end">
-                <label class="form-check form-switch m-0">
-                  <input class="form-check-input" type="checkbox" name="ignore_virtual_groups" {% if r.ignore_virtual_groups %}checked{% endif %}>
-                  <span class="form-check-label">ignore virtual groups</span>
-                </label>
-              </div>
+              <div class="col-md-12 text-secondary small">Virtual bundles are never published in groups. They remain available to claim mapping.</div>
               <div class="col-md-12 d-flex justify-content-end mt-2">
                 <div class="d-flex gap-3">
                   <label class="form-check form-switch m-0">

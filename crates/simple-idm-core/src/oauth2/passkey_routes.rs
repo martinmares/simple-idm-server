@@ -325,13 +325,24 @@ pub async fn login_finish(
 }
 
 pub async fn security_page(State(state): State<Arc<OAuth2State>>, headers: HeaderMap) -> Response {
-    if service(&state).is_err() {
-        return error(StatusCode::NOT_FOUND, "Passkeys are not enabled");
-    }
     let (session, user) = match local_session(&state, &headers, false).await {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) if response.status() == StatusCode::UNAUTHORIZED => {
+            return super::account_routes::sign_in_redirect("/account/security");
+        }
+        Err(response) => {
+            let status = response.status();
+            return (status, Html(tabler_standalone_page(
+                "Account security", "Simple IDM", "Account security",
+                "Manage authentication for your account.",
+                "<div class=\"alert alert-warning\">Passkeys are not available for this account.</div><a href=\"/account/mfa\" class=\"btn btn-primary w-100\">Manage two-factor authentication</a>",
+                "Protected by Simple IDM", "",
+            ))).into_response();
+        }
     };
+    if service(&state).is_err() {
+        return axum::response::Redirect::to("/account/mfa").into_response();
+    }
     let fresh = Utc::now() - session.created_at <= Duration::minutes(FRESH_SESSION_MINUTES);
     let mfa_link = match mfa::user_mfa_policy(&state.db_pool, user.id).await {
         Ok(MfaPolicy::Optional | MfaPolicy::Required) => {

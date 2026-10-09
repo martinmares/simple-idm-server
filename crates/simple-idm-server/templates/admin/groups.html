@@ -1,207 +1,57 @@
 {% extends "admin/base.html" %}
 {% block content %}
-<style>
-  .group-tree-root-drop {
-    border: 1px dashed color-mix(in srgb, var(--tblr-border-color) 70%, transparent);
-    border-radius: var(--tblr-border-radius);
-    background: color-mix(in srgb, var(--tblr-bg-surface) 92%, var(--tblr-secondary) 8%);
-    transition: border-color .15s ease, background-color .15s ease;
-  }
-  .group-tree-root-drop.drag-over {
-    border-color: var(--tblr-primary);
-    background: color-mix(in srgb, var(--tblr-bg-surface) 85%, var(--tblr-primary) 15%);
-  }
-  .group-tree-row {
-    border: 1px solid color-mix(in srgb, var(--tblr-border-color) 72%, transparent);
-    border-radius: var(--tblr-border-radius);
-    background: color-mix(in srgb, var(--tblr-bg-surface) 94%, transparent);
-    transition: border-color .15s ease, background-color .15s ease, transform .15s ease;
-  }
-  .group-tree-row .group-row-inner {
-    display: grid;
-    grid-template-columns: minmax(280px, 1fr) auto;
-    align-items: center;
-    gap: 1rem;
-    min-height: 34px;
-  }
-  .group-tree-row .group-meta {
-    min-width: 0;
-    line-height: 1.15;
-  }
-  .group-tree-row .group-tree-lead {
-    display: flex;
-    align-items: center;
-    min-width: 0;
-  }
-  .group-tree-row .group-branch {
-    display: inline-block;
-    flex: 0 0 auto;
-    height: 18px;
-    margin-right: .45rem;
-    position: relative;
-    opacity: .7;
-  }
-  .group-tree-row .group-branch::before {
-    content: "";
-    position: absolute;
-    inset: 0;
-    background-image:
-      repeating-linear-gradient(
-        to right,
-        transparent 0,
-        transparent 17px,
-        color-mix(in srgb, var(--tblr-border-color) 78%, transparent) 17px,
-        color-mix(in srgb, var(--tblr-border-color) 78%, transparent) 18px
-      );
-  }
-  .group-tree-row .group-branch::after {
-    content: "";
-    position: absolute;
-    right: 0;
-    top: 9px;
-    width: 14px;
-    border-top: 1px solid color-mix(in srgb, var(--tblr-border-color) 78%, transparent);
-  }
-  .group-tree-row .group-sub-marker {
-    display: inline-flex;
-    align-items: center;
-    color: var(--tblr-secondary);
-    font-size: .8rem;
-    letter-spacing: -.02em;
-    margin-right: .35rem;
-    flex: 0 0 auto;
-    opacity: .9;
-  }
-  .group-tree-row .group-title {
-    font-weight: 600;
-    line-height: 1.1;
-  }
-  .group-tree-row .group-summary {
-    display: flex;
-    align-items: center;
-    flex-wrap: wrap;
-    gap: .45rem;
-    min-width: 0;
-  }
-  .group-tree-row .group-description {
-    font-size: .75rem;
-    color: var(--tblr-secondary);
-    min-width: 0;
-  }
-  .group-tree-row .group-badges {
-    display: flex;
-    flex-wrap: wrap;
-    gap: .35rem;
-  }
-  .group-tree-row .group-actions {
-    display: flex;
-    align-items: center;
-    gap: .4rem;
-    flex-wrap: nowrap;
-    justify-content: flex-end;
-    min-width: 0;
-  }
-  .group-tree-row .btn-sm {
-    padding-top: .3rem;
-    padding-bottom: .3rem;
-  }
-  .group-tree-row .btn-delete {
-    min-width: 78px;
-  }
-  .group-tree-row.drag-over {
-    border-color: var(--tblr-primary);
-    background: color-mix(in srgb, var(--tblr-bg-surface) 88%, var(--tblr-primary) 12%);
-    transform: translateY(-1px);
-  }
-  .group-drag-handle {
-    cursor: grab;
-    color: var(--tblr-secondary);
-    flex: 0 0 auto;
-  }
-  .group-drag-handle:active {
-    cursor: grabbing;
-  }
-  @media (max-width: 1200px) {
-    .group-tree-row .group-row-inner {
-      grid-template-columns: 1fr;
-      align-items: start;
-    }
-    .group-tree-row .group-actions {
-      justify-content: flex-start;
-      flex-wrap: wrap;
-    }
-    .group-tree-row .form-control-sm,
-    .group-tree-row .group-actions .desc-input {
-      width: auto;
-      flex: 1 1 180px;
-    }
-  }
-</style>
-
 <div class="card mb-3">
   <div class="card-header"><h3 class="card-title">Create group</h3></div>
   <div class="card-body">
     <form method="post" action="/admin/ui/groups/create" class="row g-2">
       <div class="col-md-3"><input class="form-control" name="name" placeholder="name" required></div>
       <div class="col-md-6"><input class="form-control" name="description" placeholder="description"></div>
-      <div class="col-md-2 form-check mt-2"><input class="form-check-input" name="is_virtual" type="checkbox"> <label class="form-check-label">virtual</label></div>
+      <div class="col-md-2 form-check mt-2"><input class="form-check-input" name="is_virtual" id="create-group-virtual" type="checkbox"> <label class="form-check-label" for="create-group-virtual">Virtual bundle</label></div>
       <div class="col-md-1"><button class="btn btn-primary w-100" type="submit">Create</button></div>
     </form>
   </div>
 </div>
 
 <div class="card mb-3">
-  <div class="card-header">
-    <h3 class="card-title mb-0">Groups tree</h3>
-  </div>
+  <div class="card-header"><h3 class="card-title">Groups and bundles</h3></div>
   <div class="card-body">
-    <div class="group-tree-root-drop p-3 mb-3 text-secondary small" data-parent-group-id="">
-      Drop here to move a group to <strong>root</strong>.
-    </div>
-
-    <div class="d-flex flex-column gap-2">
-      {% for r in tree_rows %}
-      <div class="group-tree-row px-3 py-2"
-           draggable="true"
-           data-group-id="{{ r.id }}"
-           data-parent-group-id="{% if let Some(parent_id) = r.parent_id %}{{ parent_id }}{% endif %}">
-        <div class="group-row-inner" style="padding-left: {{ r.indent_px() }}px;">
-          <div class="d-flex align-items-start gap-2 min-w-0">
-            <span class="group-drag-handle pt-1" title="Drag to change parent">
-              <i class="ti ti-grip-vertical"></i>
-            </span>
-            <div class="group-meta min-w-0">
-              <div class="group-tree-lead">
-                {% if r.depth > 0 %}
-                <span class="group-branch" style="width: {{ r.branch_px() }}px;"></span>
-                <span class="group-sub-marker">↳</span>
-                {% endif %}
-                <div class="group-summary">
-                  <span class="group-title">{{ r.name }}</span>
-                  {% if let Some(d) = r.description %}
-                  <span class="group-description">({{ d }})</span>
-                  {% endif %}
-                  <span class="group-badges">
-                    {% if r.depth == 0 %}
-                    <span class="badge bg-secondary-lt">root</span>
-                    {% endif %}
-                    {% if r.is_virtual %}
-                    <span class="badge bg-azure-lt">virtual</span>
-                    {% endif %}
-                  </span>
-                </div>
-              </div>
-            </div>
+    <p class="text-secondary">Virtual groups bundle permissions from their member groups. The same group can belong to several bundles. Bundles can contain regular groups and other bundles. Membership flows only to descendants. Virtual names are never published in groups, but can grant custom claims.</p>
+    <div class="d-flex flex-column gap-3">
+    {% for r in rows %}
+      <div class="border rounded p-3 group-card" id="group-{{ r.id }}" data-group-id="{{ r.id }}" data-group-name="{{ r.name }}" data-virtual="{{ r.is_virtual }}">
+        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
+          <div><strong>{{ r.name }}</strong> <span class="badge {% if r.is_virtual %}bg-azure-lt{% else %}bg-secondary-lt{% endif %}">{% if r.is_virtual %}virtual bundle{% else %}regular group{% endif %}</span>
+            <div class="small text-secondary mt-1">Group UUID: <code>{{ r.id }}</code></div>
+            {% if let Some(d) = r.description %}<div class="text-secondary small mt-1">{{ d }}</div>{% endif %}
           </div>
-          <div class="group-actions">
+          <div class="d-flex gap-2">
+            {% if r.is_virtual || !r.members.is_empty() || !r.archived_members.is_empty() %}<button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#group-members-{{ r.id }}">{% if r.is_virtual %}Members{% else %}Repair legacy members{% endif %} ({{ r.members.len() }})</button>{% endif %}
             <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#group-edit-{{ r.id }}">Edit</button>
-            <form method="post" action="/admin/ui/groups/{{ r.id }}/deactivate" data-confirm="Safe delete group '{{ r.name }}'?" data-confirm-action="Safe delete">
-              <button class="btn btn-sm btn-outline-danger btn-delete" type="submit">Delete</button>
-            </form>
+            <form method="post" action="/admin/ui/groups/{{ r.id }}/deactivate" data-confirm="Safe delete group '{{ r.name }}'?" data-confirm-action="Safe delete"><button class="btn btn-sm btn-outline-danger" type="submit">Delete</button></form>
           </div>
         </div>
+        {% if !r.is_virtual && (!r.members.is_empty() || !r.archived_members.is_empty()) %}<div class="alert alert-warning mt-2">Legacy regular group with members. Existing inheritance is preserved. Remove member references or explicitly convert it to a virtual bundle; conversion removes its name from groups.</div>{% endif %}
+        {% if r.is_virtual || !r.members.is_empty() || !r.archived_members.is_empty() %}
+        <div class="group-edges d-none">{% for member in r.members %}<span data-child-id="{{ member.id }}"></span>{% endfor %}</div>
+        <div class="group-tree mt-2"></div>
+        {% if r.members.is_empty() %}<div class="small text-secondary mt-2">Empty bundle. Its claim mappings can still grant claims.</div>{% endif %}
+        {% endif %}
+        {% if !r.archived_members.is_empty() %}
+        <div class="border rounded p-2 small text-secondary mt-2">
+          <div class="mb-1">Archived member groups</div>
+          {% for member in r.archived_members %}<span class="me-2" title="Group UUID: {{ member.id }}">{{ member.name }} <span class="badge bg-secondary-lt">archived</span></span>{% endfor %}
+          <div class="mt-1">These memberships are inactive. They remain linked until you uncheck them in Members.</div>
+        </div>
+        {% endif %}
+        {% if !r.claim_maps.is_empty() %}<div class="small mt-2"><strong>Claim mappings</strong> (per OAuth client):
+          {% for map in r.claim_maps %}<div><a href="/admin/ui/claims"><code>{{ map.client_id }}</code></a> → <code>{{ map.claim_name }}={{ map.value }}</code> <span class="text-secondary">{{ map.source }}</span></div>{% endfor %}
+          <div class="text-secondary">Pattern matches shown for this group alone; effective membership may match additional rules.</div>
+        </div>{% endif %}
+        {% if !r.included_in.is_empty() %}<div class="mt-2 small text-secondary">Included in:
+          {% for parent in r.included_in %}<a href="#group-{{ parent.id }}" class="badge bg-secondary-lt me-1">{{ parent.name }}</a>{% endfor %}
+        </div>{% endif %}
       </div>
-      {% endfor %}
+    {% endfor %}
     </div>
   </div>
 </div>
@@ -228,7 +78,7 @@
           <td>{% if let Some(d) = r.description %}{{ d }}{% endif %}</td>
           <td>{% if r.is_virtual %}<span class="badge bg-azure-lt">virtual</span>{% else %}<span class="badge bg-secondary-lt">regular</span>{% endif %}</td>
           <td>
-            <form method="post" action="/admin/ui/groups/{{ r.id }}/restore">
+            <form method="post" action="/admin/ui/groups/{{ r.id }}/restore" data-confirm="Restore this group? Existing memberships and claim mappings become effective again." data-confirm-action="Restore group">
               <button class="btn btn-sm btn-outline-success" type="submit">Restore</button>
             </form>
           </td>
@@ -240,7 +90,7 @@
 </div>
 {% endif %}
 
-{% for r in tree_rows %}
+{% for r in rows %}
 <div class="modal modal-blur fade" id="group-edit-{{ r.id }}" tabindex="-1" role="dialog" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered" role="document">
     <div class="modal-content">
@@ -248,7 +98,7 @@
         <h5 class="modal-title">Edit group</h5>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
-      <form method="post" action="/admin/ui/groups/{{ r.id }}/update">
+      <form method="post" action="/admin/ui/groups/{{ r.id }}/update" class="group-edit-form" data-original-virtual="{{ r.is_virtual }}">
         <div class="modal-body">
           <div class="row g-3">
             <div class="col-12">
@@ -260,10 +110,12 @@
               <textarea class="form-control" name="description" rows="3">{% if let Some(d) = r.description %}{{ d }}{% endif %}</textarea>
             </div>
             <div class="col-12">
-              <label class="form-check form-switch">
-                <input class="form-check-input" type="checkbox" name="is_virtual" {% if r.is_virtual %}checked{% endif %}>
-                <span class="form-check-label">Virtual</span>
-              </label>
+              <label class="form-label">Group type</label>
+              <select class="form-select" name="is_virtual">
+                <option value="" {% if !r.is_virtual %}selected{% endif %}>Regular group (leaf, published according to client settings)</option>
+                <option value="on" {% if r.is_virtual %}selected{% endif %}>Virtual bundle (internal, can contain groups and grant claims)</option>
+              </select>
+              <p class="small text-secondary mt-2">Changing type changes token groups. A bundle with members cannot become a regular group.</p>
             </div>
           </div>
         </div>
@@ -277,75 +129,100 @@
 </div>
 {% endfor %}
 
-<form id="group-reparent-form" method="post" style="display:none;">
-  <input type="hidden" name="parent_group_id" id="group-reparent-parent-id">
-</form>
-
+{% for r in rows %}
+{% if r.is_virtual || !r.members.is_empty() || !r.archived_members.is_empty() %}
+<div class="modal modal-blur fade" id="group-members-{{ r.id }}" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg"><div class="modal-content">
+    <div class="modal-header"><h5 class="modal-title">Member groups of {{ r.name }}</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+    <form method="post" action="/admin/ui/groups/{{ r.id }}/members">
+      <div class="modal-body">
+        <p class="text-secondary">Select the groups granted by this bundle. Saving changes only these references. Editing a shared bundle affects every parent that uses it. Unchecking removes a reference, not the group itself. Cycles are not allowed.</p>
+        {% if !r.archived_members.is_empty() %}<p class="small text-secondary">Archived groups are inactive. Leave them checked to keep their references, or uncheck to remove them.</p>{% endif %}
+        <label class="form-label" for="group-filter-{{ r.id }}">Filter groups</label>
+        <input type="search" class="form-control mb-3 group-members-filter" id="group-filter-{{ r.id }}" placeholder="Type a group name">
+        <div class="border rounded p-3" style="max-height: 50vh; overflow: auto;">
+        {% for choice in r.choices %}
+          <label class="form-check mb-2 group-member-choice">
+            <input class="form-check-input" type="checkbox" name="member_id" value="{{ choice.id }}" {% if choice.selected %}checked{% endif %} {% if !r.is_virtual && !choice.selected %}disabled{% endif %}>
+            <span class="form-check-label">{{ choice.name }} {% if choice.archived %}<span class="badge bg-secondary-lt">archived</span>{% endif %} {% if choice.is_virtual %}<span class="badge bg-azure-lt">virtual bundle</span>{% endif %}</span>
+          </label>
+        {% endfor %}
+        {% if r.choices.is_empty() %}<p class="text-secondary mb-0">Create another group first.</p>{% endif %}
+        </div>
+      </div>
+      <div class="modal-footer"><button type="button" class="btn btn-link link-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary">Save members</button></div>
+    </form>
+  </div></div>
+</div>
+{% endif %}
+{% endfor %}
+<style>
+.group-tree ul { list-style: none; padding-left: 1.3rem; margin: .4rem 0; border-left: 1px solid var(--tblr-border-color); }
+.group-tree li { padding: .3rem 0 .3rem .4rem; }
+.group-tree summary { cursor: pointer; }
+.group-tree a { text-decoration: none; }
+.group-card:target { border-color: var(--tblr-primary) !important; }
+</style>
 <script>
-  document.addEventListener('DOMContentLoaded', function () {
-    let draggedGroupId = null;
-
-    function clearDragState() {
-      document.querySelectorAll('.group-tree-row.drag-over, .group-tree-root-drop.drag-over')
-        .forEach((el) => el.classList.remove('drag-over'));
-    }
-
-    document.querySelectorAll('.group-tree-row').forEach((row) => {
-      row.addEventListener('dragstart', () => {
-        draggedGroupId = row.dataset.groupId || null;
-      });
-
-      row.addEventListener('dragend', () => {
-        draggedGroupId = null;
-        clearDragState();
-      });
-
-      row.addEventListener('dragover', (event) => {
-        if (!draggedGroupId || draggedGroupId === row.dataset.groupId) return;
-        event.preventDefault();
-        clearDragState();
-        row.classList.add('drag-over');
-      });
-
-      row.addEventListener('dragleave', () => {
-        row.classList.remove('drag-over');
-      });
-
-      row.addEventListener('drop', (event) => {
-        event.preventDefault();
-        const targetParentId = row.dataset.groupId || '';
-        if (!draggedGroupId || draggedGroupId === targetParentId) return;
-        submitReparent(draggedGroupId, targetParentId);
-      });
+document.querySelectorAll('.group-edit-form').forEach(form => {
+  const type = form.querySelector('[name="is_virtual"]');
+  const updateConfirmation = () => {
+    if ((type.value === 'on') !== (form.dataset.originalVirtual === 'true')) {
+      form.dataset.confirm = 'Change group type? This changes which names appear in token groups.';
+      form.dataset.confirmAction = 'Change type';
+    } else { delete form.dataset.confirm; delete form.dataset.confirmAction; }
+  };
+  type.addEventListener('change', updateConfirmation);
+  form.addEventListener('submit', updateConfirmation);
+});
+// Render references, never copies: each node links to the group's single editor.
+const groupCards = new Map(Array.from(document.querySelectorAll('.group-card')).map(card => [card.dataset.groupId, card]));
+function groupBranch(id, ancestors) {
+  const card = groupCards.get(id);
+  if (!card || ancestors.has(id)) return null;
+  const li = document.createElement('li');
+  const link = document.createElement('a');
+  link.href = '#group-' + id;
+  link.textContent = card.dataset.groupName;
+  link.title = 'Group UUID: ' + id;
+  const badge = document.createElement('span');
+  badge.className = 'badge bg-secondary-lt ms-2';
+  badge.textContent = card.dataset.virtual === 'true' ? 'virtual bundle' : 'regular group';
+  const children = Array.from(card.querySelectorAll(':scope > .group-edges [data-child-id]'));
+  if (children.length) {
+    const details = document.createElement('details');
+    const summary = document.createElement('summary');
+    summary.append(link, badge);
+    details.append(summary);
+    // Lazy expansion avoids expanding every path of a heavily shared graph at once.
+    details.addEventListener('toggle', () => {
+      if (!details.open || details.querySelector('ul')) return;
+      const ul = document.createElement('ul');
+      const path = new Set(ancestors); path.add(id);
+      children.forEach(child => { const branch = groupBranch(child.dataset.childId, path); if (branch) ul.append(branch); });
+      details.append(ul);
     });
-
-    document.querySelectorAll('.group-tree-root-drop').forEach((zone) => {
-      zone.addEventListener('dragover', (event) => {
-        if (!draggedGroupId) return;
-        event.preventDefault();
-        clearDragState();
-        zone.classList.add('drag-over');
-      });
-
-      zone.addEventListener('dragleave', () => {
-        zone.classList.remove('drag-over');
-      });
-
-      zone.addEventListener('drop', (event) => {
-        event.preventDefault();
-        if (!draggedGroupId) return;
-        submitReparent(draggedGroupId, '');
-      });
-    });
-
-    function submitReparent(groupId, parentId) {
-      clearDragState();
-      const form = document.getElementById('group-reparent-form');
-      const input = document.getElementById('group-reparent-parent-id');
-      form.action = `/admin/ui/groups/${groupId}/reparent`;
-      input.value = parentId;
-      form.submit();
-    }
+    li.append(details);
+  } else { li.append(link, badge); }
+  return li;
+}
+groupCards.forEach((card, id) => {
+  const container = card.querySelector(':scope > .group-tree');
+  if (!container) return;
+  const ul = document.createElement('ul');
+  card.querySelectorAll(':scope > .group-edges [data-child-id]').forEach(child => {
+    const branch = groupBranch(child.dataset.childId, new Set([id])); if (branch) ul.append(branch);
   });
+  container.append(ul);
+});
+
+document.querySelectorAll('.group-members-filter').forEach(input => {
+  input.addEventListener('input', () => {
+    const filter = input.value.trim().toLocaleLowerCase();
+    input.closest('form').querySelectorAll('.group-member-choice').forEach(choice => {
+      choice.classList.toggle('d-none', !choice.textContent.toLocaleLowerCase().includes(filter));
+    });
+  });
+});
 </script>
 {% endblock %}

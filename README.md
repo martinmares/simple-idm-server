@@ -50,7 +50,7 @@ The repository is a Cargo workspace with multiple binaries and shared core crate
 - AD/LDAP delegated password auth through `ad_ldap` identity providers
 - AD/LDAP role sync and mapping to local groups
 - nested groups and effective group expansion
-- virtual groups and configurable group claim output
+- nested virtual bundles, regular leaf groups and configurable group claim output
 - per-client claim maps and group filtering
 - Admin Web UI based on Tabler
 - CLI for login, session management, and automation
@@ -408,6 +408,28 @@ Existing domains remain unrestricted after migration. CLI flags are
 | `optional` | password only | password + TOTP or recovery code | upstream authentication |
 | `required` | browser enrollment is required | password + TOTP or recovery code | upstream authentication |
 
+Users can open **`/account/mfa`** or **`/account/security`** directly; no CLI or
+external application is needed to sign in first. Without a valid IDM browser
+session, these pages lead to `/account/login` and the standard sign-in form.
+For a new local account with required MFA, the flow is:
+
+1. Sign in with the account password.
+2. Scan the authenticator QR code (or enter the manual setup key).
+3. Confirm a current six-digit code; until then, sign-in is not complete.
+4. Save the ten recovery codes and continue to the requested settings page.
+
+After an administrator uses **Reset MFA**, the next password sign-in follows
+the same enrollment flow. Passkeys are managed separately and are not deleted
+by the authenticator reset. For an optional MFA policy, sign-in remains possible
+without a factor, and the user starts enrollment from the settings page.
+
+Account sign-in reuses the existing OAuth password/MFA/passkey handlers and
+creates only an IDM browser session: no authorization code or API token is
+issued. The reserved `simple-idm-account` client is created automatically for
+the selected tenant with empty grants/scopes; it needs no manual configuration.
+Only `/account/mfa` and `/account/security` are accepted as return destinations.
+`/account/login?tenant=<slug>` selects a tenant (the default is `default`).
+
 `optional` does not force a new enrollment. A locally managed user can sign in
 normally, open `/account/mfa` (also linked from `/account/security` when
 Passkeys are enabled), and enroll an authenticator app without changing the
@@ -712,20 +734,32 @@ ssh:role:linux-admin
 
 ## Groups and Claims
 
-Groups can be nested and are evaluated as direct/effective memberships.
+Virtual bundles can contain regular groups and other virtual bundles. Regular
+groups are leaves. Both types can be assigned to users; membership flows only
+to descendants, never to parents. Shared descendants use the same UUID.
 
 Client settings control group claim output:
 
 - `groups_claim_mode = none`
 - `groups_claim_mode = direct`
 - `groups_claim_mode = effective`
-- `ignore_virtual_groups = true|false`
+- Virtual group names are always excluded from `groups`. The old
+  `ignore_virtual_groups` API field is deprecated, accepted but ignored, and
+  returned as `true`. Its old stored value is retained for migration auditing.
 
 Claim maps allow per-client custom claims:
 
 - single value
 - array value
 - group-specific claim mapping
+
+Claim mapping uses all effective internal memberships, including virtual
+bundles, for both UUID and name-pattern matching. Client group filters and
+`groups_claim_mode` control only the exported `groups`, not claim-map matching.
+Each claim map has its own client-specific UUID/pattern rules. For example,
+`admin:monitoring -> role=monitoring-admin` works for a member of its parent
+`admin:all`, but not for a user assigned only a leaf such as `grafana-admins`.
+A client using `groups_claim_mode=none` can still receive custom claims.
 
 This is useful for reducing JWT size and translating internal groups to application-specific roles.
 
@@ -863,3 +897,75 @@ is promised unless separately agreed.
 ## Author
 
 Martin Mareš
+
+## Shared virtual group bundles
+
+A virtual group is a reusable bundle of member groups. A regular group may be
+included in several bundles, using the same group UUID in every reference:
+
+```text
+admin:all      -> gitlab-admins, grafana-admins, registry:admin
+admin:selected -> gitlab-admins, grafana-admins
+```
+
+A user assigned to `admin:selected` receives only that bundle and its descendants,
+not `admin:all` or `registry:admin`. Effective groups and claims deduplicate shared
+members. Virtual names are never exported in token `groups`, but both group
+types can grant custom claims. Even an empty virtual bundle can grant its mapped claim.
+Nested bundles remain supported; self-membership and transitive cycles are rejected,
+including concurrent edits. Memberships must remain within the same tenant.
+
+In **Admin UI → Groups**, create a group with **Virtual bundle** checked, then use
+**Members** to select its member groups. Expand the member tree to inspect nested
+bundles; shared nodes link to their single editor. **Included in** shows parents,
+and **Claim mappings** shows relevant clients and direct/pattern sources.
+**Memberships** separates direct assignments from effective groups and their sources. Search filters the choices without clearing checked
+members. Saving changes only the chosen bundle; empty selection removes its contents.
+Only virtual bundles can acquire new children. Existing regular parents remain
+readable with their old inheritance and appear with a repair warning. Their
+member editor allows removing references only; conversion to virtual is explicit
+and changes their token publication. The REST API for child groups remains
+available. Changing a virtual bundle with children to regular is rejected.
+Archived nodes interrupt inheritance. Archived members are named in a neutral information block
+and remain checked in the member editor. Saving preserves their references;
+uncheck an archived member to remove its reference explicitly. Restoring a group restores its existing
+references and claim mappings; removing a reference never deletes its group.
+
+Migration `051_share_group_memberships.sql` removes the old single-parent limit;
+existing relationships are preserved. Relationships removed historically by migration
+037 cannot be reconstructed automatically and can now be added back explicitly.
+
+On the user sign-in page, password/TOTP and passkey sign-in are explained separately:
+TOTP codes are a second factor after the password; a registered passkey enables
+password-free sign-in. Enable passkeys in the tenant policy and register a passkey
+at `/account/security` before using **Continue with passkey**.
+
+
+## Group contract migration (0.13.5)
+
+Before deploying, run the read-only compatibility report against your database:
+
+```sh
+psql "$DATABASE_URL" -f scripts/group-contract-audit.sql
+```
+
+Review physical parents, clients that used virtual names, pattern maps and
+potential scalar-claim conflicts. Inspect application authorization rules too;
+IDM cannot detect all consumers of historical virtual names. Migration 052
+preserves all historical edges and stored client flags. It adds database guards
+for virtual parents, cycles, tenant boundaries and type changes. No group is
+automatically converted or deleted.
+
+**Behavior change:** name-pattern claim mapping now sees effective internal
+membership, just like UUID mapping. Previously its input was reduced by the
+client's `groups` mode, export filter and virtual-name flag. For example, a
+pattern `admin:monitoring` now matches that effective virtual membership even
+when `groups=none` or the client's export filter includes only `grafana-admins`.
+Explicitly review those maps before release; they may newly produce claims.
+`effective`, `direct`, `none` and `include_claim_maps` remain supported.
+
+Previously issued JWTs retain their original claims until expiration. UserInfo
+reflects those token claims. New authorization-code, refresh and device tokens
+use the shared resolver. Changes do not provide immediate token revocation.
+Multiple conflicting scalar claim maps retain the existing behavior; the audit
+reports potential conflicts for manual correction rather than inventing priorities.

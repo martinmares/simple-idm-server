@@ -992,6 +992,14 @@ pub async fn update_group(
             }),
         )
             .into_response(),
+        Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("23514") => (
+            StatusCode::CONFLICT,
+            Json(ErrorResponse {
+                error: "invalid_group_type".into(),
+                error_description: error.message().into(),
+            }),
+        )
+            .into_response(),
         Err(e) => {
             audit::emit_event(
                 &db_pool,
@@ -1305,7 +1313,7 @@ pub async fn create_oauth_client(
         }
     };
     let include_claim_maps = req.include_claim_maps.unwrap_or(true);
-    let ignore_virtual_groups = req.ignore_virtual_groups.unwrap_or(false);
+    let ignore_virtual_groups = true;
     let is_public = req.is_public.unwrap_or(false);
 
     if let Err(resp) = validate_redirect_uris(&req.client_id, &req.redirect_uris) {
@@ -1424,7 +1432,7 @@ pub async fn create_oauth_client(
                     is_public: client.is_public,
                     groups_claim_mode: client.groups_claim_mode,
                     include_claim_maps: client.include_claim_maps,
-                    ignore_virtual_groups: client.ignore_virtual_groups,
+                    ignore_virtual_groups: true,
                 }),
             )
                 .into_response()
@@ -1488,7 +1496,7 @@ pub async fn list_oauth_clients(
                     is_public: c.is_public,
                     groups_claim_mode: c.groups_claim_mode,
                     include_claim_maps: c.include_claim_maps,
-                    ignore_virtual_groups: c.ignore_virtual_groups,
+                    ignore_virtual_groups: true,
                 })
                 .collect();
             (StatusCode::OK, Json(clients)).into_response()
@@ -1577,6 +1585,10 @@ pub async fn update_oauth_client(
     Path(client_id): Path<Uuid>,
     Json(req): Json<UpdateOAuthClientRequest>,
 ) -> impl IntoResponse {
+    if req.ignore_virtual_groups == Some(false) {
+        tracing::warn!("ignore_virtual_groups=false is deprecated and ignored");
+    }
+
     if req.name.is_none()
         && req.client_secret.is_none()
         && req.redirect_uris.is_none()
@@ -1737,7 +1749,7 @@ pub async fn update_oauth_client(
         req.is_public,
         groups_claim_mode,
         req.include_claim_maps,
-        req.ignore_virtual_groups,
+        Some(true),
         client_id,
         default_tenant_id()
     )
@@ -1768,7 +1780,7 @@ pub async fn update_oauth_client(
                     is_public: client.is_public,
                     groups_claim_mode: client.groups_claim_mode,
                     include_claim_maps: client.include_claim_maps,
-                    ignore_virtual_groups: client.ignore_virtual_groups,
+                    ignore_virtual_groups: true,
                 }),
             )
                 .into_response()
@@ -2236,43 +2248,6 @@ pub struct GroupChildResponse {
     pub child_group_description: Option<String>,
 }
 
-// Helper function: Check if adding parent->child would create a cycle
-// Returns true if cycle would be created
-async fn would_create_cycle(
-    db_pool: &DbPool,
-    parent_id: Uuid,
-    child_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    // Strategy: Check if parent is (transitively) a child of child
-    // If yes, then adding child->parent would create a cycle
-
-    let mut visited = std::collections::HashSet::new();
-    let mut stack = vec![child_id];
-
-    while let Some(current) = stack.pop() {
-        if current == parent_id {
-            return Ok(true); // Cycle detected
-        }
-
-        if visited.contains(&current) {
-            continue;
-        }
-        visited.insert(current);
-
-        // Get all children of current group
-        let children = sqlx::query_scalar::<_, Uuid>(
-            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1",
-        )
-        .bind(current)
-        .fetch_all(db_pool)
-        .await?;
-
-        stack.extend(children);
-    }
-
-    Ok(false)
-}
-
 // Helper function: Get all transitive children (descendants) of a group
 pub async fn get_transitive_children(
     db_pool: &DbPool,
@@ -2313,82 +2288,7 @@ pub async fn add_child_group(
 ) -> impl IntoResponse {
     let child_id = req.child_group_id;
 
-    // Validate that both groups exist
-    let parent_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(parent_id)
-    .fetch_one(&db_pool)
-    .await;
-
-    let child_exists = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM groups WHERE id = $1 AND deleted_at IS NULL)",
-    )
-    .bind(child_id)
-    .fetch_one(&db_pool)
-    .await;
-
-    match (parent_exists, child_exists) {
-        (Ok(false), _) | (_, Ok(false)) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(ErrorResponse {
-                    error: "not_found".to_string(),
-                    error_description: "Parent or child group not found".to_string(),
-                }),
-            )
-                .into_response();
-        }
-        (Err(e), _) | (_, Err(e)) => {
-            tracing::error!("Failed to check group existence: {:?}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Failed to validate groups".to_string(),
-                }),
-            )
-                .into_response();
-        }
-        _ => {}
-    }
-
-    // Check for cycle
-    match would_create_cycle(&db_pool, parent_id, child_id).await {
-        Ok(true) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(ErrorResponse {
-                    error: "cycle_detected".to_string(),
-                    error_description:
-                        "Adding this relationship would create a cycle in the group hierarchy"
-                            .to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Err(e) => {
-            tracing::error!("Failed to check for cycles: {:?}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Failed to validate group hierarchy".to_string(),
-                }),
-            )
-                .into_response();
-        }
-        Ok(false) => {}
-    }
-
-    // Insert the relationship
-    let result = sqlx::query!(
-        "INSERT INTO group_groups (parent_group_id, child_group_id) VALUES ($1, $2)",
-        parent_id,
-        child_id
-    )
-    .execute(&db_pool)
-    .await;
+    let result = crate::db::groups::add_member(&db_pool, parent_id, child_id).await;
 
     match result {
         Ok(_) => {
@@ -2423,14 +2323,29 @@ pub async fn add_child_group(
                 }
             }
         }
-        Err(sqlx::Error::Database(ref db_err))
-            if db_err.constraint() == Some("group_groups_pkey") =>
-        {
+        Err(
+            error @ (crate::db::groups::MembershipError::AlreadyExists
+            | crate::db::groups::MembershipError::Cycle
+            | crate::db::groups::MembershipError::InvalidGroup
+            | crate::db::groups::MembershipError::PhysicalParent),
+        ) => {
+            let (status, code) = match error {
+                crate::db::groups::MembershipError::InvalidGroup => {
+                    (StatusCode::NOT_FOUND, "not_found")
+                }
+                crate::db::groups::MembershipError::Cycle => {
+                    (StatusCode::CONFLICT, "cycle_detected")
+                }
+                crate::db::groups::MembershipError::PhysicalParent => {
+                    (StatusCode::CONFLICT, "physical_parent")
+                }
+                _ => (StatusCode::CONFLICT, "already_exists"),
+            };
             (
-                StatusCode::CONFLICT,
+                status,
                 Json(ErrorResponse {
-                    error: "already_exists".to_string(),
-                    error_description: "This group relationship already exists".to_string(),
+                    error: code.into(),
+                    error_description: error.to_string(),
                 }),
             )
                 .into_response()

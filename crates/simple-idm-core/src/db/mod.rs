@@ -1,3 +1,4 @@
+pub mod groups;
 pub mod models;
 pub mod users;
 

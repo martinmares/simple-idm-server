@@ -226,11 +226,6 @@ pub struct GroupUpdateForm {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct GroupReparentForm {
-    parent_group_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct TenantUpdateForm {
     name: String,
     mode: String,
@@ -397,7 +392,6 @@ pub struct ClientCreateForm {
     additional_scopes: Option<String>,
     groups_claim_mode: Option<String>,
     include_claim_maps: Option<String>,
-    ignore_virtual_groups: Option<String>,
     is_public: Option<String>,
     is_active: Option<String>,
 }
@@ -426,7 +420,6 @@ pub struct ClientUpdateForm {
     additional_scopes: Option<String>,
     groups_claim_mode: Option<String>,
     include_claim_maps: Option<String>,
-    ignore_virtual_groups: Option<String>,
     is_public: Option<String>,
     is_active: Option<String>,
 }
@@ -668,29 +661,54 @@ struct UserGroupPatternRow {
 #[derive(Debug, Clone, FromRow)]
 struct GroupRow {
     id: Uuid,
+    tenant_id: Uuid,
     name: String,
     description: Option<String>,
     is_virtual: bool,
 }
 
-#[derive(Debug, Clone)]
-struct GroupTreeRow {
+struct GroupView {
+    id: Uuid,
+    tenant_id: Uuid,
+    name: String,
+    description: Option<String>,
+    is_virtual: bool,
+    members: Vec<GroupRow>,
+    archived_members: Vec<GroupRow>,
+    included_in: Vec<GroupRow>,
+    choices: Vec<GroupChoice>,
+    claim_maps: Vec<GroupClaimReference>,
+}
+
+#[derive(Clone)]
+struct GroupClaimReference {
+    client_id: String,
+    claim_name: String,
+    value: String,
+    source: String,
+}
+
+#[derive(FromRow)]
+struct EffectiveMembershipRow {
     id: Uuid,
     name: String,
-    description: Option<String>,
     is_virtual: bool,
-    depth: usize,
-    parent_id: Option<Uuid>,
+    direct: bool,
+    sources: Vec<String>,
 }
 
-impl GroupTreeRow {
-    fn indent_px(&self) -> usize {
-        self.depth * 22
+impl EffectiveMembershipRow {
+    fn inherited_from(&self, source: &UserAssignedGroupRow) -> bool {
+        self.id != source.id && self.sources.contains(&source.name)
     }
+}
 
-    fn branch_px(&self) -> usize {
-        self.depth * 10
-    }
+struct GroupChoice {
+    archived: bool,
+    id: Uuid,
+    name: String,
+    is_virtual: bool,
+    selected: bool,
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -1128,7 +1146,7 @@ struct GroupsTemplate {
     sections: Vec<NavItem>,
     message: Option<String>,
     error: Option<String>,
-    tree_rows: Vec<GroupTreeRow>,
+    rows: Vec<GroupView>,
     deleted_rows: Vec<GroupRow>,
 }
 
@@ -1166,6 +1184,7 @@ struct MembershipsTemplate {
     selected_user: Option<MembershipUserOption>,
     selected_group: Option<MembershipGroupOption>,
     selected_user_groups: Vec<UserAssignedGroupRow>,
+    effective_user_groups: Vec<EffectiveMembershipRow>,
     selected_user_patterns: Vec<UserGroupPatternRow>,
     selected_group_users: Vec<GroupAssignedUserRow>,
     available_groups: Vec<MembershipGroupOption>,
@@ -1362,7 +1381,7 @@ pub fn router(state: WebAdminState) -> Router {
         .route("/admin/ui/groups", get(groups_page))
         .route("/admin/ui/groups/create", post(groups_create))
         .route("/admin/ui/groups/{id}/update", post(groups_update))
-        .route("/admin/ui/groups/{id}/reparent", post(groups_reparent))
+        .route("/admin/ui/groups/{id}/members", post(groups_members))
         .route("/admin/ui/groups/{id}/deactivate", post(groups_deactivate))
         .route("/admin/ui/groups/{id}/restore", post(groups_restore))
         .route("/admin/ui/tenants", get(tenants_page))
@@ -2466,16 +2485,6 @@ fn parse_uuid_csv(input: Option<&str>) -> Vec<Uuid> {
         .collect()
 }
 
-fn parse_parent_group_id(input: Option<&str>) -> Result<Option<Uuid>, String> {
-    match input.map(str::trim).filter(|v| !v.is_empty()) {
-        Some(v) if v.eq_ignore_ascii_case("root") => Ok(None),
-        Some(v) => Uuid::parse_str(v)
-            .map(Some)
-            .map_err(|_| "Invalid parent_group_id".to_string()),
-        None => Ok(None),
-    }
-}
-
 fn normalize_domain(input: &str) -> Result<String, String> {
     let domain = input
         .trim()
@@ -2508,116 +2517,63 @@ fn normalize_domain(input: &str) -> Result<String, String> {
     Ok(domain)
 }
 
-async fn would_create_group_cycle(
-    db_pool: &DbPool,
-    parent_id: Uuid,
-    child_id: Uuid,
-) -> Result<bool, sqlx::Error> {
-    let mut visited = std::collections::HashSet::new();
-    let mut stack = vec![child_id];
-
-    while let Some(current) = stack.pop() {
-        if current == parent_id {
-            return Ok(true);
-        }
-        if !visited.insert(current) {
-            continue;
-        }
-        let children = sqlx::query_scalar::<_, Uuid>(
-            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1",
-        )
-        .bind(current)
-        .fetch_all(db_pool)
-        .await?;
-        stack.extend(children);
-    }
-
-    Ok(false)
-}
-
-fn build_group_tree_rows(rows: &[GroupRow], relations: &[(Uuid, Uuid)]) -> Vec<GroupTreeRow> {
-    let mut by_id: HashMap<Uuid, &GroupRow> = HashMap::new();
-    let mut children: HashMap<Uuid, Vec<Uuid>> = HashMap::new();
-    let mut parent_of: HashMap<Uuid, Uuid> = HashMap::new();
-
-    for row in rows {
-        by_id.insert(row.id, row);
-    }
-    for (parent, child) in relations {
-        children.entry(*parent).or_default().push(*child);
-        parent_of.insert(*child, *parent);
-    }
-    for ids in children.values_mut() {
-        ids.sort_by_key(|id| by_id.get(id).map(|r| r.name.clone()).unwrap_or_default());
-    }
-
-    let mut roots = rows
-        .iter()
-        .filter(|r| !parent_of.contains_key(&r.id))
-        .map(|r| r.id)
-        .collect::<Vec<_>>();
-    roots.sort_by_key(|id| by_id.get(id).map(|r| r.name.clone()).unwrap_or_default());
-
-    let mut out = Vec::new();
-    let mut visited = std::collections::HashSet::new();
-
-    fn walk(
-        current: Uuid,
-        depth: usize,
-        by_id: &HashMap<Uuid, &GroupRow>,
-        children: &HashMap<Uuid, Vec<Uuid>>,
-        parent_of: &HashMap<Uuid, Uuid>,
-        visited: &mut std::collections::HashSet<Uuid>,
-        out: &mut Vec<GroupTreeRow>,
-    ) {
-        if !visited.insert(current) {
-            return;
-        }
-        let Some(row) = by_id.get(&current) else {
-            return;
-        };
-        out.push(GroupTreeRow {
-            id: row.id,
-            name: row.name.clone(),
-            description: row.description.clone(),
-            is_virtual: row.is_virtual,
-            depth,
-            parent_id: parent_of.get(&current).copied(),
-        });
-        if let Some(kids) = children.get(&current) {
-            for child in kids {
-                walk(*child, depth + 1, by_id, children, parent_of, visited, out);
+fn build_group_views(
+    rows: &[GroupRow],
+    relations: &[(Uuid, Uuid)],
+    archived: &[GroupRow],
+) -> Vec<GroupView> {
+    rows.iter()
+        .map(|row| {
+            let members: Vec<_> = rows
+                .iter()
+                .filter(|candidate| relations.contains(&(row.id, candidate.id)))
+                .cloned()
+                .collect();
+            let included_in = rows
+                .iter()
+                .filter(|candidate| relations.contains(&(candidate.id, row.id)))
+                .cloned()
+                .collect();
+            let archived_members: Vec<_> = archived
+                .iter()
+                .filter(|candidate| {
+                    candidate.tenant_id == row.tenant_id
+                        && relations.contains(&(row.id, candidate.id))
+                })
+                .cloned()
+                .collect();
+            let mut choices: Vec<_> = rows
+                .iter()
+                .filter(|candidate| candidate.id != row.id && candidate.tenant_id == row.tenant_id)
+                .map(|candidate| GroupChoice {
+                    archived: false,
+                    id: candidate.id,
+                    name: candidate.name.clone(),
+                    is_virtual: candidate.is_virtual,
+                    selected: members.iter().any(|member| member.id == candidate.id),
+                })
+                .collect();
+            choices.extend(archived_members.iter().map(|member| GroupChoice {
+                id: member.id,
+                name: member.name.clone(),
+                is_virtual: member.is_virtual,
+                selected: true,
+                archived: true,
+            }));
+            GroupView {
+                id: row.id,
+                tenant_id: row.tenant_id,
+                name: row.name.clone(),
+                description: row.description.clone(),
+                is_virtual: row.is_virtual,
+                archived_members,
+                members,
+                included_in,
+                choices,
+                claim_maps: Vec::new(),
             }
-        }
-    }
-
-    for root in roots {
-        walk(
-            root,
-            0,
-            &by_id,
-            &children,
-            &parent_of,
-            &mut visited,
-            &mut out,
-        );
-    }
-
-    for row in rows {
-        if !visited.contains(&row.id) {
-            walk(
-                row.id,
-                0,
-                &by_id,
-                &children,
-                &parent_of,
-                &mut visited,
-                &mut out,
-            );
-        }
-    }
-
-    out
+        })
+        .collect()
 }
 
 fn users_return_path_from_referer(headers: &HeaderMap) -> String {
@@ -6054,7 +6010,7 @@ async fn groups_page(
     }
 
     let rows = match sqlx::query_as::<_, GroupRow>(
-        r#"SELECT id, name, description, is_virtual FROM groups WHERE deleted_at IS NULL ORDER BY name ASC"#,
+        r#"SELECT id, tenant_id, name, description, is_virtual FROM groups WHERE deleted_at IS NULL ORDER BY name ASC"#,
     )
     .fetch_all(&state.db_pool)
     .await
@@ -6065,15 +6021,64 @@ async fn groups_page(
         }
     };
 
-    let relations = sqlx::query_as::<_, (Uuid, Uuid)>(
+    let relations = match sqlx::query_as::<_, (Uuid, Uuid)>(
         "SELECT parent_group_id, child_group_id FROM group_groups ORDER BY parent_group_id, child_group_id",
-    )
-    .fetch_all(&state.db_pool)
-    .await
-    .unwrap_or_default();
-    let tree_rows = build_group_tree_rows(&rows, &relations);
+    ).fetch_all(&state.db_pool).await {
+        Ok(relations) => relations,
+        Err(error) => return redirect_with("/admin/ui/groups", "error", &format!("Could not load group memberships: {error}")).into_response(),
+    };
+    let archived = match sqlx::query_as::<_, GroupRow>(
+        "SELECT id, tenant_id, name, description, is_virtual FROM groups WHERE deleted_at IS NOT NULL AND EXISTS(SELECT 1 FROM group_groups gg WHERE gg.child_group_id=groups.id) ORDER BY name",
+    ).fetch_all(&state.db_pool).await {
+        Ok(rows) => rows,
+        Err(error) => return redirect_with("/admin/ui/groups", "error", &format!("Could not load archived members: {error}")).into_response(),
+    };
+    let mut rows = build_group_views(&rows, &relations, &archived);
+    let maps = match sqlx::query_as::<_, (Uuid, Option<Uuid>, Uuid, String, String, String)>(
+        "SELECT cm.id, cm.group_id, oc.tenant_id, oc.client_id, cm.claim_name, COALESCE(cm.claim_value_json, cm.claim_value, 'true') FROM claim_maps cm JOIN oauth_clients oc ON oc.id=cm.client_id WHERE cm.deleted_at IS NULL AND oc.deleted_at IS NULL ORDER BY oc.client_id, cm.claim_name",
+    ).fetch_all(&state.db_pool).await {
+        Ok(maps) => maps,
+        Err(error) => return redirect_with("/admin/ui/groups", "error", &format!("Could not load claim maps: {error}")).into_response(),
+    };
+    let patterns = match sqlx::query_as::<_, simple_idm_core::db::models::ClaimMapPattern>(
+        "SELECT id, claim_map_id, pattern, is_include, priority, created_at FROM claim_map_patterns WHERE deleted_at IS NULL ORDER BY priority",
+    ).fetch_all(&state.db_pool).await {
+        Ok(patterns) => patterns,
+        Err(error) => return redirect_with("/admin/ui/groups", "error", &format!("Could not load claim patterns: {error}")).into_response(),
+    };
+    for row in &mut rows {
+        for (map_id, group_id, tenant, client, name, value) in &maps {
+            if *tenant != row.tenant_id {
+                continue;
+            }
+            let applicable: Vec<_> = patterns
+                .iter()
+                .filter(|p| p.claim_map_id == *map_id)
+                .cloned()
+                .collect();
+            let direct = *group_id == Some(row.id);
+            let pattern_match = !applicable.is_empty()
+                && simple_idm_core::claim_map_patterns::evaluate_claim_map_patterns(
+                    &[row.name.clone()],
+                    &applicable,
+                );
+            if direct || pattern_match {
+                row.claim_maps.push(GroupClaimReference {
+                    client_id: client.clone(),
+                    claim_name: name.clone(),
+                    value: value.clone(),
+                    source: if direct {
+                        "direct UUID"
+                    } else {
+                        "pattern match"
+                    }
+                    .into(),
+                });
+            }
+        }
+    }
     let deleted_rows = sqlx::query_as::<_, GroupRow>(
-        r#"SELECT id, name, description, is_virtual FROM groups WHERE deleted_at IS NOT NULL ORDER BY updated_at DESC, name ASC LIMIT 25"#,
+        r#"SELECT id, tenant_id, name, description, is_virtual FROM groups WHERE deleted_at IS NOT NULL ORDER BY updated_at DESC, name ASC LIMIT 25"#,
     )
     .fetch_all(&state.db_pool)
     .await
@@ -6083,7 +6088,7 @@ async fn groups_page(
         sections: nav_items(AdminSection::Groups),
         message: query.message,
         error: query.error,
-        tree_rows,
+        rows,
         deleted_rows,
     })
 }
@@ -6133,99 +6138,56 @@ async fn groups_update(
 
     match result {
         Ok(_) => redirect_with("/admin/ui/groups", "message", "Group updated").into_response(),
+        Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("23514") => {
+            redirect_with("/admin/ui/groups", "error", error.message()).into_response()
+        }
         Err(e) => redirect_with("/admin/ui/groups", "error", &format!("Update failed: {e}"))
             .into_response(),
     }
 }
 
-async fn groups_reparent(
+async fn groups_members(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
     Path(id): Path<Uuid>,
-    Form(form): Form<GroupReparentForm>,
+    Form(fields): Form<Vec<(String, String)>>,
 ) -> Response {
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
-
-    let new_parent = match parse_parent_group_id(form.parent_group_id.as_deref()) {
-        Ok(v) => v,
-        Err(e) => return redirect_with("/admin/ui/groups", "error", &e).into_response(),
-    };
-
-    if let Some(parent_id) = new_parent {
-        if parent_id == id {
-            return redirect_with(
-                "/admin/ui/groups",
-                "error",
-                "Group cannot be its own parent",
-            )
-            .into_response();
-        }
-        match would_create_group_cycle(&state.db_pool, parent_id, id).await {
-            Ok(true) => {
-                return redirect_with(
-                    "/admin/ui/groups",
-                    "error",
-                    "Selected parent would create a cycle",
-                )
-                .into_response();
-            }
-            Err(e) => {
-                return redirect_with("/admin/ui/groups", "error", &format!("DB error: {e}"))
-                    .into_response();
-            }
-            Ok(false) => {}
-        }
-    }
-
-    let mut tx = match state.db_pool.begin().await {
-        Ok(v) => v,
-        Err(e) => {
-            return redirect_with("/admin/ui/groups", "error", &format!("DB error: {e}"))
+    let members: Result<Vec<_>, _> = fields
+        .iter()
+        .filter(|(key, _)| key == "member_id")
+        .map(|(_, value)| Uuid::parse_str(value))
+        .collect();
+    let members = match members {
+        Ok(members) => members,
+        Err(_) => {
+            return redirect_with("/admin/ui/groups", "error", "Invalid member group ID")
                 .into_response();
         }
     };
-
-    if let Err(e) = sqlx::query("DELETE FROM group_groups WHERE child_group_id = $1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-    {
-        return redirect_with(
-            "/admin/ui/groups",
-            "error",
-            &format!("Reparent failed: {e}"),
-        )
-        .into_response();
-    }
-
-    if let Some(parent_id) = new_parent {
-        if let Err(e) = sqlx::query(
-            "INSERT INTO group_groups (parent_group_id, child_group_id) VALUES ($1, $2)",
-        )
-        .bind(parent_id)
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        {
-            return redirect_with(
-                "/admin/ui/groups",
-                "error",
-                &format!("Reparent failed: {e}"),
+    match simple_idm_core::db::groups::set_members(&state.db_pool, id, &members).await {
+        Ok(()) => {
+            simple_idm_core::audit::emit_event(
+                &state.db_pool,
+                "group.members.update",
+                "group",
+                Some(id),
+                "success",
+                Some(json!({"member_ids": members})),
             )
-            .into_response();
+            .await;
+            redirect_with(
+                "/admin/ui/groups",
+                "message",
+                "Group members saved. Other bundles were not changed.",
+            )
+            .into_response()
         }
-    }
-
-    match tx.commit().await {
-        Ok(_) => redirect_with("/admin/ui/groups", "message", "Group moved").into_response(),
-        Err(e) => redirect_with(
-            "/admin/ui/groups",
-            "error",
-            &format!("Reparent failed: {e}"),
-        )
-        .into_response(),
+        Err(error) => {
+            redirect_with("/admin/ui/groups", "error", &error.to_string()).into_response()
+        }
     }
 }
 
@@ -7552,6 +7514,29 @@ async fn memberships_page(
         g.ordinal = idx + 1;
     }
 
+    let effective_user_groups = if let Some(user_id) = selected_user_id {
+        match sqlx::query_as::<_, EffectiveMembershipRow>(r#"
+            WITH RECURSIVE membership(id, tenant_id, source_id, source_name) AS (
+                SELECT g.id, g.tenant_id, g.id, g.name FROM user_groups ug
+                JOIN users u ON u.id=ug.user_id AND u.deleted_at IS NULL
+                JOIN groups g ON g.id=ug.group_id AND g.tenant_id=u.tenant_id AND g.deleted_at IS NULL
+                WHERE ug.user_id=$1
+                UNION
+                SELECT g.id, g.tenant_id, m.source_id, m.source_name FROM membership m
+                JOIN group_groups gg ON gg.parent_group_id=m.id
+                JOIN groups g ON g.id=gg.child_group_id AND g.tenant_id=m.tenant_id AND g.deleted_at IS NULL
+            ) SELECT g.id, g.name, g.is_virtual, bool_or(m.source_id=g.id) AS direct,
+                array_agg(DISTINCT m.source_name ORDER BY m.source_name) AS sources
+              FROM membership m JOIN groups g ON g.id=m.id
+              GROUP BY g.id, g.name, g.is_virtual ORDER BY g.name
+        "#).bind(user_id).fetch_all(&state.db_pool).await {
+            Ok(rows) => rows,
+            Err(error) => return redirect_with("/admin/ui/memberships", "error", &format!("Could not load effective membership: {error}")).into_response(),
+        }
+    } else {
+        Vec::new()
+    };
+
     let selected_user_patterns = if let Some(user_id) = selected_user_id {
         sqlx::query_as::<_, UserGroupPatternRow>(
             r#"
@@ -7624,6 +7609,7 @@ async fn memberships_page(
         selected_user,
         selected_group,
         selected_user_groups,
+        effective_user_groups,
         selected_user_patterns,
         selected_group_users,
         available_groups,
@@ -7967,7 +7953,7 @@ async fn clients_create(
     let is_active = parse_checkbox(&form.is_active);
     let groups_claim_mode = normalize_groups_claim_mode(form.groups_claim_mode.as_deref());
     let include_claim_maps = parse_checkbox(&form.include_claim_maps);
-    let ignore_virtual_groups = parse_checkbox(&form.ignore_virtual_groups);
+    let ignore_virtual_groups = true;
     let client_secret_hash = if is_public {
         None
     } else {
@@ -8067,7 +8053,7 @@ async fn clients_update(
     let is_public = parse_checkbox(&form.is_public);
     let groups_claim_mode = normalize_groups_claim_mode(form.groups_claim_mode.as_deref());
     let include_claim_maps = parse_checkbox(&form.include_claim_maps);
-    let ignore_virtual_groups = parse_checkbox(&form.ignore_virtual_groups);
+    let ignore_virtual_groups = true;
 
     let grants = {
         let from_flags = selected_grant_types_from_flags(

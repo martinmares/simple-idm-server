@@ -145,6 +145,9 @@ mod tests {
 pub async fn settings(State(state): State<Arc<OAuth2State>>, headers: HeaderMap) -> Response {
     let (session, user) = match local_session(&state, &headers, false).await {
         Ok(value) => value,
+        Err(response) if response.status() == StatusCode::UNAUTHORIZED => {
+            return super::account_routes::sign_in_redirect("/account/mfa");
+        }
         Err(response) => return *response,
     };
     let active = match mfa::active_totp_authenticator(&state.db_pool, user.id).await {

@@ -501,7 +501,12 @@ enum ClientsCommand {
         groups_claim_mode: String,
         #[arg(long, default_value_t = true)]
         include_claim_maps: bool,
-        #[arg(long, default_value_t = false)]
+        #[arg(
+            long,
+            default_value_t = true,
+            hide = true,
+            help = "Deprecated: virtual group names are always excluded from groups"
+        )]
         ignore_virtual_groups: bool,
     },
     Update {
@@ -523,7 +528,7 @@ enum ClientsCommand {
         groups_claim_mode: Option<String>,
         #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
         include_claim_maps: Option<bool>,
-        #[arg(long, value_parser = clap::builder::BoolishValueParser::new())]
+        #[arg(long, hide = true, help = "Deprecated and ignored: virtual group names are always excluded", value_parser = clap::builder::BoolishValueParser::new())]
         ignore_virtual_groups: Option<bool>,
     },
     Delete {

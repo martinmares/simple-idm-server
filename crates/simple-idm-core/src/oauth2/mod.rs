@@ -1,3 +1,4 @@
+pub mod account_routes;
 pub mod authorization_code;
 pub mod cleanup;
 pub mod client_credentials;

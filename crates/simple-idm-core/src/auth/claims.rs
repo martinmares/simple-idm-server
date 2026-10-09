@@ -170,7 +170,7 @@ pub async fn build_custom_claims(
 pub async fn get_user_groups(pool: &DbPool, user_id: Uuid) -> Result<Vec<Uuid>, ClaimMapError> {
     let group_ids = sqlx::query_scalar::<_, Uuid>(
         r#"
-        SELECT group_id FROM user_groups WHERE user_id = $1
+        SELECT g.id FROM user_groups ug JOIN users u ON u.id=ug.user_id AND u.deleted_at IS NULL JOIN groups g ON g.id=ug.group_id AND g.tenant_id=u.tenant_id AND g.deleted_at IS NULL WHERE ug.user_id = $1
         "#,
     )
     .bind(user_id)
@@ -180,59 +180,37 @@ pub async fn get_user_groups(pool: &DbPool, user_id: Uuid) -> Result<Vec<Uuid>, 
     Ok(group_ids)
 }
 
-/// Rozbalí nested groups tranzitivně
-/// Vrací všechny transitive child groups pro danou skupinu
-async fn expand_nested_groups(pool: &DbPool, group_id: Uuid) -> Result<Vec<Uuid>, ClaimMapError> {
-    let mut all_groups = std::collections::HashSet::new();
-    let mut stack = vec![group_id];
-    let mut visited = std::collections::HashSet::new();
-
-    while let Some(current) = stack.pop() {
-        if visited.contains(&current) {
-            continue;
-        }
-        visited.insert(current);
-        all_groups.insert(current);
-
-        // Načti child groups
-        let children = sqlx::query_scalar::<_, Uuid>(
-            "SELECT child_group_id FROM group_groups WHERE parent_group_id = $1",
-        )
-        .bind(current)
-        .fetch_all(pool)
-        .await?;
-
-        stack.extend(children);
-    }
-
-    Ok(all_groups.into_iter().collect())
-}
-
-/// Načte všechny effective groups uživatele (včetně rozbalených nested groups)
+/// Internal membership includes virtual bundles; archived nodes interrupt inheritance.
 pub async fn get_effective_user_groups(
     pool: &DbPool,
     user_id: Uuid,
 ) -> Result<Vec<Uuid>, ClaimMapError> {
-    // Načti přímé skupiny uživatele
-    let direct_groups = get_user_groups(pool, user_id).await?;
-
-    // Rozbal nested groups pro každou přímou skupinu
-    let mut all_effective_groups = std::collections::HashSet::new();
-
-    for group_id in direct_groups {
-        let expanded = expand_nested_groups(pool, group_id).await?;
-        all_effective_groups.extend(expanded);
-    }
-
-    Ok(all_effective_groups.into_iter().collect())
+    Ok(sqlx::query_scalar::<_, Uuid>(
+        r#"
+        WITH RECURSIVE effective(id, tenant_id) AS (
+            SELECT g.id, g.tenant_id FROM user_groups ug
+            JOIN users u ON u.id=ug.user_id AND u.deleted_at IS NULL
+            JOIN groups g ON g.id=ug.group_id AND g.tenant_id=u.tenant_id
+            WHERE ug.user_id=$1 AND g.deleted_at IS NULL
+            UNION
+            SELECT g.id, g.tenant_id FROM effective e
+            JOIN group_groups gg ON gg.parent_group_id=e.id
+            JOIN groups g ON g.id=gg.child_group_id AND g.tenant_id=e.tenant_id
+            WHERE g.deleted_at IS NULL
+        ) SELECT id FROM effective ORDER BY id
+    "#,
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?)
 }
 
 /// Načte názvy skupin pro JWT (standardní claims)
-/// Vrací effective groups (včetně rozbalených nested groups), seřazené alfabeticky
+/// Returns only regular names. The legacy ignore_virtual argument is ignored.
 pub async fn get_user_group_names(
     pool: &DbPool,
     user_id: Uuid,
-    ignore_virtual: bool,
+    _ignore_virtual: bool,
 ) -> Result<Vec<String>, ClaimMapError> {
     // Získej effective group IDs (včetně nested)
     let effective_group_ids = get_effective_user_groups(pool, user_id).await?;
@@ -242,31 +220,9 @@ pub async fn get_user_group_names(
     }
 
     // Načti názvy pro všechny effective groups
-    let group_names = if ignore_virtual {
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT name
-            FROM groups
-            WHERE id = ANY($1) AND is_virtual = false AND deleted_at IS NULL
-            ORDER BY name
-            "#,
-        )
-        .bind(&effective_group_ids)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT name
-            FROM groups
-            WHERE id = ANY($1) AND deleted_at IS NULL
-            ORDER BY name
-            "#,
-        )
-        .bind(&effective_group_ids)
-        .fetch_all(pool)
-        .await?
-    };
+    let group_names = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM groups WHERE id=ANY($1) AND NOT is_virtual AND deleted_at IS NULL ORDER BY name",
+    ).bind(&effective_group_ids).fetch_all(pool).await?;
 
     Ok(group_names)
 }
@@ -275,7 +231,7 @@ pub async fn get_user_group_names(
 pub async fn get_direct_user_group_names(
     pool: &DbPool,
     user_id: Uuid,
-    ignore_virtual: bool,
+    _ignore_virtual: bool,
 ) -> Result<Vec<String>, ClaimMapError> {
     let direct_group_ids = get_user_groups(pool, user_id).await?;
 
@@ -283,31 +239,9 @@ pub async fn get_direct_user_group_names(
         return Ok(vec![]);
     }
 
-    let group_names = if ignore_virtual {
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT name
-            FROM groups
-            WHERE id = ANY($1) AND is_virtual = false AND deleted_at IS NULL
-            ORDER BY name
-            "#,
-        )
-        .bind(&direct_group_ids)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_scalar::<_, String>(
-            r#"
-            SELECT name
-            FROM groups
-            WHERE id = ANY($1) AND deleted_at IS NULL
-            ORDER BY name
-            "#,
-        )
-        .bind(&direct_group_ids)
-        .fetch_all(pool)
-        .await?
-    };
+    let group_names = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM groups WHERE id=ANY($1) AND NOT is_virtual AND deleted_at IS NULL ORDER BY name",
+    ).bind(&direct_group_ids).fetch_all(pool).await?;
 
     Ok(group_names)
 }
@@ -336,4 +270,38 @@ pub fn is_reserved_claim(name: &str) -> bool {
             | "at_hash"
             | "c_hash"
     )
+}
+
+/// Publication filters affect `groups` only. Claim maps have their own client-specific rules.
+pub async fn user_authorization_claims(
+    pool: &DbPool,
+    user_id: Uuid,
+    client: &crate::db::models::OAuthClient,
+) -> Result<(Vec<String>, HashMap<String, Value>), ClaimMapError> {
+    let ids = get_effective_user_groups(pool, user_id).await?;
+    let internal_names = sqlx::query_scalar::<_, String>(
+        "SELECT name FROM groups WHERE id=ANY($1) AND deleted_at IS NULL ORDER BY name",
+    )
+    .bind(&ids)
+    .fetch_all(pool)
+    .await?;
+    let names = match client.groups_claim_mode.as_str() {
+        "none" => Vec::new(),
+        "direct" => get_direct_user_group_names(pool, user_id, true).await?,
+        _ => get_user_group_names(pool, user_id, true).await?,
+    };
+    let patterns = sqlx::query_as::<_, crate::db::models::OAuthClientGroupPattern>(
+        "SELECT id, client_id, pattern, is_include, priority, created_at FROM oauth_client_group_patterns WHERE client_id=$1 AND deleted_at IS NULL ORDER BY priority",
+    ).bind(client.id).fetch_all(pool).await?;
+    let published = if patterns.is_empty() {
+        names
+    } else {
+        crate::client_group_filters::apply_client_group_filters(&names, &patterns)
+    };
+    let claims = if client.include_claim_maps {
+        build_custom_claims(pool, client.id, &ids, &internal_names).await?
+    } else {
+        HashMap::new()
+    };
+    Ok((published, claims))
 }

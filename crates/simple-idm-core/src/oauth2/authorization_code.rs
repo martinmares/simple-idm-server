@@ -1,12 +1,7 @@
 use crate::audit;
-use crate::auth::{
-    build_custom_claims, get_direct_user_group_names, get_effective_user_groups,
-    get_user_group_names, verify_password_async,
-};
-use crate::client_group_filters::apply_client_group_filters;
+use crate::auth::{claims::user_authorization_claims, verify_password_async};
 use crate::db::models::{
-    AuthenticationSession, AuthorizationCode, OAuthClient, OAuthClientGroupPattern, RefreshToken,
-    UsedRefreshToken, User,
+    AuthenticationSession, AuthorizationCode, OAuthClient, RefreshToken, UsedRefreshToken, User,
 };
 use crate::mfa::{self, MfaPolicy, NewMfaTransaction};
 use crate::secret_crypto::{decrypt_secret, encrypt_secret};
@@ -305,7 +300,8 @@ pub async fn handle_authorize(
         return Html(html).into_response();
     }
 
-    if super::device_flow::device_login_code(redirect_uri).is_none()
+    if !super::account_routes::is_account_destination(&client, redirect_uri)
+        && super::device_flow::device_login_code(redirect_uri).is_none()
         && !super::utils::authorization_allowed(
             &client,
             params
@@ -439,6 +435,9 @@ pub(crate) async fn is_login_destination_allowed(
     client: &OAuthClient,
     destination: &str,
 ) -> bool {
+    if client.client_id == super::account_routes::CLIENT_ID {
+        return super::account_routes::is_account_destination(client, destination);
+    }
     if destination.starts_with(super::device_flow::DEVICE_LOGIN_PREFIX) {
         let Some(code) = super::device_flow::device_login_code(destination) else {
             return false;
@@ -523,6 +522,12 @@ pub(super) async fn complete_user_authorization(
         {
             return Err("Device client mismatch".into());
         }
+    } else if client.client_id == super::account_routes::CLIENT_ID {
+        if !super::account_routes::is_account_destination(&client, &pending.redirect_uri)
+            || !pending.scope.is_empty()
+        {
+            return Err("Invalid account sign-in destination".into());
+        }
     } else if !super::utils::authorization_allowed(
         &client,
         &pending.scope,
@@ -545,7 +550,12 @@ pub(super) async fn complete_user_authorization(
     sqlx::query("INSERT INTO authentication_sessions (session_token,user_id,client_id,expires_at,amr,acr,credential_version) VALUES ($1,$2,$3,$4,$5,$6,$7)")
         .bind(&session).bind(pending.user_id).bind(client.id).bind(Utc::now()+Duration::seconds(state.auth_session_expiry)).bind(&amr).bind(&acr).bind(pending.credential_version)
         .execute(&mut *tx).await.map_err(|_| "Cannot create session")?;
-    let redirect_url = if let Some(device_code) = device {
+    let redirect_url = if super::account_routes::is_account_destination(
+        &client,
+        &pending.redirect_uri,
+    ) {
+        pending.redirect_uri.clone()
+    } else if let Some(device_code) = device {
         super::device_flow::device_confirmation_url(device_code)
     } else {
         let code = Uuid::new_v4().to_string();
@@ -2593,96 +2603,17 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
             .into_response();
     }
 
-    let user_group_names = match client.groups_claim_mode.as_str() {
-        "none" => vec![],
-        "direct" => {
-            match get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
-                .await
-            {
-                Ok(names) => names,
-                Err(_) => {
-                    return oauth_token_error(ErrorResponse {
-                        error: "server_error".to_string(),
-                        error_description: "Failed to fetch direct user group names".to_string(),
-                    });
-                }
-            }
-        }
-        _ => {
-            match get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await
-            {
-                Ok(names) => names,
-                Err(_) => {
-                    return oauth_token_error(ErrorResponse {
-                        error: "server_error".to_string(),
-                        error_description: "Failed to fetch user group names".to_string(),
-                    });
-                }
-            }
-        }
-    };
-
-    // Apply client group filtering patterns (if any)
-    let filtered_group_names = match sqlx::query_as!(
-        OAuthClientGroupPattern,
-        r#"
-        SELECT id, client_id, pattern, is_include, priority, created_at
-        FROM oauth_client_group_patterns
-        WHERE client_id = $1
-          AND deleted_at IS NULL
-        ORDER BY priority ASC
-        "#,
-        client.id
-    )
-    .fetch_all(&state.db_pool)
-    .await
-    {
-        Ok(patterns) => {
-            if patterns.is_empty() {
-                user_group_names
-            } else {
-                apply_client_group_filters(&user_group_names, &patterns)
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch client group patterns: {:?}", e);
-            return oauth_token_error(ErrorResponse {
-                error: "server_error".into(),
-                error_description: "Failed to load authorization filters".into(),
-            });
-        }
-    };
-
-    // Vytvoř custom claims pomocí claim maps (pokud povoleno)
-    let mut custom_claims = if client.include_claim_maps {
-        let user_group_ids = match get_effective_user_groups(&state.db_pool, user.id).await {
-            Ok(ids) => ids,
-            Err(_) => {
+    let (filtered_group_names, mut custom_claims) =
+        match user_authorization_claims(&state.db_pool, user.id, &client).await {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::error!(%error, "Failed to load authorization data");
                 return oauth_token_error(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Failed to fetch user groups".to_string(),
+                    error: "server_error".into(),
+                    error_description: "Failed to load authorization data".into(),
                 });
             }
         };
-        match build_custom_claims(
-            &state.db_pool,
-            client.id,
-            &user_group_ids,
-            &filtered_group_names,
-        )
-        .await
-        {
-            Ok(claims) => claims,
-            Err(_) => {
-                return oauth_token_error(ErrorResponse {
-                    error: "server_error".to_string(),
-                    error_description: "Failed to build custom claims".to_string(),
-                });
-            }
-        }
-    } else {
-        std::collections::HashMap::new()
-    };
 
     // Tenant is authoritative server metadata, never a group claim-map override.
     custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));
@@ -3042,78 +2973,17 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
             .into_response();
     }
 
-    macro_rules! authorization_data {
-        ($value:expr) => {
-            match $value {
-                Ok(value) => value,
-                Err(_) => {
-                    return oauth_token_error(ErrorResponse {
-                        error: "server_error".into(),
-                        error_description: "Failed to load authorization data".into(),
-                    })
-                }
+    let (filtered_group_names, mut custom_claims) =
+        match user_authorization_claims(&state.db_pool, user.id, &client).await {
+            Ok(data) => data,
+            Err(error) => {
+                tracing::error!(%error, "Failed to load authorization data");
+                return oauth_token_error(ErrorResponse {
+                    error: "server_error".into(),
+                    error_description: "Failed to load authorization data".into(),
+                });
             }
         };
-    }
-    let user_group_names = match client.groups_claim_mode.as_str() {
-        "none" => vec![],
-        "direct" => {
-            authorization_data!(
-                get_direct_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups)
-                    .await
-            )
-        }
-        _ => authorization_data!(
-            get_user_group_names(&state.db_pool, user.id, client.ignore_virtual_groups).await
-        ),
-    };
-
-    // Apply client group filtering patterns (if any)
-    let filtered_group_names = match sqlx::query_as!(
-        OAuthClientGroupPattern,
-        r#"
-        SELECT id, client_id, pattern, is_include, priority, created_at
-        FROM oauth_client_group_patterns
-        WHERE client_id = $1
-          AND deleted_at IS NULL
-        ORDER BY priority ASC
-        "#,
-        client.id
-    )
-    .fetch_all(&state.db_pool)
-    .await
-    {
-        Ok(patterns) => {
-            if patterns.is_empty() {
-                user_group_names
-            } else {
-                apply_client_group_filters(&user_group_names, &patterns)
-            }
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch client group patterns: {:?}", e);
-            return oauth_token_error(ErrorResponse {
-                error: "server_error".into(),
-                error_description: "Failed to load authorization filters".into(),
-            });
-        }
-    };
-
-    let mut custom_claims = if client.include_claim_maps {
-        let user_group_ids =
-            authorization_data!(get_effective_user_groups(&state.db_pool, user.id).await);
-        authorization_data!(
-            build_custom_claims(
-                &state.db_pool,
-                client.id,
-                &user_group_ids,
-                &filtered_group_names,
-            )
-            .await
-        )
-    } else {
-        std::collections::HashMap::new()
-    };
 
     // Tenant is authoritative server metadata, never a group claim-map override.
     custom_claims.insert("tenant_id".into(), serde_json::json!(user.tenant_id));

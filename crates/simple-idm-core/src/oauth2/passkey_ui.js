@@ -94,7 +94,7 @@
       window.location.assign(result.redirect_url);
     } catch (error) {
       message.textContent = error.name === 'NotAllowedError' ?
-        'Passkey sign-in was cancelled.' : (error.message || 'Passkey sign-in failed.');
+        'Passkey sign-in was cancelled.' : (error.message === 'Passkey sign-in is unavailable' ? 'A registered passkey is required. Sign in with your password and authenticator code, then add a passkey in Account security.' : (error.message || 'Passkey sign-in failed.'));
       loginButton.disabled = false;
     }
   });

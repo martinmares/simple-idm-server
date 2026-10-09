@@ -285,6 +285,7 @@ pub fn login_page_with_providers(
     let passkey_html = if passkeys_enabled {
         r#"<div class="text-center text-secondary my-3">or</div>
 <button type="button" id="passkey-login" class="btn btn-outline-primary w-100">Continue with passkey</button>
+<div class="form-hint mt-2">Use a previously registered passkey for password-free sign-in. TOTP authenticator codes do not replace your password.</div>
 <div id="passkey-message" class="form-hint mt-2" role="status" aria-live="polite"></div>"#
     } else {
         ""
@@ -323,9 +324,9 @@ pub fn login_page_with_providers(
   <div class="mb-3">
     <label class="form-label" for="password">Password</label>
     <input class="form-control" type="password" id="password" name="password" required autocomplete="current-password">
-    <div class="form-hint">If two-factor authentication is enabled, you will enter its code after your password.</div>
+    <div class="form-hint">Sign in with your password first, then enter your authenticator code if MFA is enabled.</div>
   </div>
-  <button type="submit" class="btn btn-primary w-100">Sign in</button>
+  <button type="submit" class="btn btn-primary w-100">Sign in with password</button>
 </form>
 {passkey_html}
 {passkey_script}"#,
@@ -534,7 +535,9 @@ mod tests {
     fn login_page_collects_mfa_on_the_following_step() {
         let html = login_page(&HashMap::new(), None);
         assert!(html.contains("name=\"password\" required"));
-        assert!(html.contains("you will enter its code after your password"));
+        assert!(
+            html.contains("Sign in with your password first, then enter your authenticator code")
+        );
         assert!(!html.contains("name=\"mfa_code\""));
         assert!(!html.contains("placeholder=\"********\""));
     }
