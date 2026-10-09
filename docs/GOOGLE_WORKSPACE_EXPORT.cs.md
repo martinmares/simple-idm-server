@@ -171,8 +171,10 @@ opakovanim stejneho prikazu s `--apply`. Exportni JSON zde neni potreba.
 - Vlastni username, napr. `custom-user`, nemeni. Nemenene zaznamy maji akci `skip`.
 - `--tenant-id <UUID>` a opakovane `--email <email>` omezuji rozsah stejne jako
   u importu. Vychozi tenant UUID je `11111111-1111-1111-1111-111111111111`.
-- Kazda kolize navrzeneho username, i se smazanym uctem nebo jinym navrhem
+- Kazda kolize navrzeneho username s nesmazanym uctem nebo jinym navrhem
   v davce, zablokuje cely zapis. Kontrola je bez rozliseni velikosti pismen.
+- Archivovany ucet username nerezervuje. Pri importu zustava email i externi
+  identita rezervovana a archivovany ucet se automaticky neobnovuje ani neprepojuje.
 - Prejmenovani i audit se ukladaji v jedne transakci. Opakovane spusteni po
   oprave uz nic neprejmenuje. Neni potreba migrace DB.
 - UUID uzivatele, email, profil, Google issuer/sub, approval, hesla, skupiny

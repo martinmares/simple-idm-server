@@ -1,4 +1,5 @@
 pub mod models;
+pub mod users;
 
 use sqlx::{PgPool, postgres::PgPoolOptions};
 use std::time::Duration;

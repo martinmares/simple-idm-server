@@ -14,6 +14,7 @@ export DATABASE_URL="postgres://postgres:local-test-only@${address}/simple_idm_t
 export GOOGLE_IMPORT_TEST_DATABASE_URL="$DATABASE_URL"
 export DOMAIN_POLICY_TEST_DATABASE_URL="$DATABASE_URL"
 export DEVICE_SSO_TEST_DATABASE_URL="$DATABASE_URL"
+export USER_ARCHIVE_TEST_DATABASE_URL="$DATABASE_URL"
 export SQLX_OFFLINE=true
 
 cargo sqlx migrate run --source migrations

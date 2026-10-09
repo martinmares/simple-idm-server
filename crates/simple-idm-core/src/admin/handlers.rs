@@ -488,7 +488,11 @@ pub async fn create_user(
                 StatusCode::BAD_REQUEST,
                 Json(ErrorResponse {
                     error: "bad_request".to_string(),
-                    error_description: format!("Failed to create user: {}", e),
+                    error_description: if crate::db::users::is_username_conflict(&e) {
+                        "Username is already used by another non-archived account".to_string()
+                    } else {
+                        format!("Failed to create user: {}", e)
+                    },
                 }),
             )
                 .into_response()

@@ -765,6 +765,15 @@ GROUP_PATTERNS_SYNC_INTERVAL_SECONDS=300
 
 Admin operations use soft delete where possible. Deleted rows are marked and can be hidden from normal UI/API views.
 
+Archiving a user releases their username within the tenant. A new local account
+can reuse that name with a different email and receives a new UUID; the archived
+account retains its original username, Google/other identity links, memberships
+and audit history. Disabling an account without archiving it still reserves its
+username. Restoring an archived account fails if another non-archived account
+has taken the name. Email uniqueness and external identity reservations remain
+unchanged. Migration `050_release_archived_usernames.sql` applies automatically
+when the updated server starts.
+
 Optional purge:
 
 ```env

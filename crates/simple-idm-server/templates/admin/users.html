@@ -236,7 +236,7 @@
               {% endif %}
             {% endif %}
             {% endif %}
-            <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate" data-confirm="Safe delete user '{{ r.username }}'?" data-confirm-action="Safe delete">
+            <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate" data-confirm="Archive user '{{ r.username }}'? Their username becomes available for a new account. The archived identity and its links are preserved." data-confirm-action="Safe delete">
               <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
             </form>
           </div>

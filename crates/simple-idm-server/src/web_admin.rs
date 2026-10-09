@@ -4885,6 +4885,12 @@ async fn users_create(
 
     match result {
         Ok(_) => redirect_with(&return_path, "message", "User created").into_response(),
+        Err(e) if simple_idm_core::db::users::is_username_conflict(&e) => redirect_with(
+            &return_path,
+            "error",
+            "Username is already used by another non-archived account",
+        )
+        .into_response(),
         Err(e) => {
             redirect_with(&return_path, "error", &format!("Create failed: {e}")).into_response()
         }
@@ -5450,22 +5456,21 @@ async fn users_restore(
     }
 
     let return_path = users_return_path_from_referer(&headers);
-    let result = sqlx::query(
-        r#"UPDATE users
-           SET deleted_at = NULL, updated_at = NOW()
-           WHERE id = $1 AND deleted_at IS NOT NULL"#,
-    )
-    .bind(id)
-    .execute(&state.db_pool)
-    .await;
+    let result = simple_idm_core::db::users::restore(&state.db_pool, id).await;
 
     match result {
-        Ok(done) if done.rows_affected() > 0 => {
+        Ok(true) => {
             redirect_with(&return_path, "message", "User restored").into_response()
         }
-        Ok(_) => {
+        Ok(false) => {
             redirect_with(&return_path, "error", "User not found in deleted users").into_response()
         }
+        Err(e) if simple_idm_core::db::users::is_username_conflict(&e) => redirect_with(
+            &return_path,
+            "error",
+            "Cannot restore: username is already used by another non-archived account. Archive that account before restoring this user.",
+        )
+        .into_response(),
         Err(e) => {
             redirect_with(&return_path, "error", &format!("Restore failed: {e}")).into_response()
         }

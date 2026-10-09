@@ -219,10 +219,10 @@ fn plan(
                     .into();
         } else if users
             .iter()
-            .any(|u| u.username.eq_ignore_ascii_case(&row.username))
+            .any(|u| !u.deleted && u.username.eq_ignore_ascii_case(&row.username))
         {
             row.action = "conflict";
-            row.detail = "Short username already exists, including deleted accounts".into();
+            row.detail = "Short username already exists on a non-archived account".into();
         } else if identities.iter().any(|i| {
             i.subject == user.google_id && (i.issuer == provider.issuer || i.idp_id == provider.id)
         }) {
@@ -468,7 +468,9 @@ fn rename_plan(
             row.action = "conflict";
             row.detail = "Email cannot be safely converted to a username";
         } else if reserved.iter().any(|other| {
-            other.id != user.id && other.username.eq_ignore_ascii_case(&row.new_username)
+            !other.deleted
+                && other.id != user.id
+                && other.username.eq_ignore_ascii_case(&row.new_username)
         }) || candidates.iter().any(|other| {
             other.id != user.id
                 && other.is_active
@@ -556,7 +558,7 @@ async fn run_normalize(
         .collect();
     let reserved = sqlx::query_as::<_, ExistingUser>(
         "SELECT id, email, username, auth_mode, auth_provider_id, is_active, deleted_at IS NOT NULL AS deleted
-         FROM users WHERE tenant_id = $1 AND lower(username) = ANY($2)")
+         FROM users WHERE tenant_id = $1 AND deleted_at IS NULL AND lower(username) = ANY($2)")
         .bind(req.tenant_id).bind(usernames).fetch_all(&mut *tx).await.map_err(db_error)?;
     let mut report = rename_plan(&req, &candidates, &reserved);
     if !req.apply || report.conflicts > 0 {
@@ -830,13 +832,8 @@ mod tests {
                 .await
                 .unwrap()
                 .conflicts,
-            1
+            0
         );
-        sqlx::query("UPDATE users SET username = 'reserved-c' WHERE id = $1")
-            .bind(reserved_id)
-            .execute(&db)
-            .await
-            .unwrap();
         sqlx::query("ALTER TABLE audit_events ADD CONSTRAINT reject_test_rename CHECK (action <> 'admin.user.normalize_google_username') NOT VALID")
             .execute(&db).await.unwrap();
         assert!(
@@ -925,9 +922,14 @@ mod tests {
         let provider = provider();
         let report = plan(&req, &provider, &[], &[]);
         assert_eq!(report.rows[0].username, "a");
+        let reserved = existing("someone@other.com", "A");
+        assert_eq!(plan(&req, &provider, &[reserved], &[]).conflicts, 1);
         let mut reserved = existing("someone@other.com", "A");
         reserved.deleted = true;
-        assert_eq!(plan(&req, &provider, &[reserved], &[]).conflicts, 1);
+        assert_eq!(plan(&req, &provider, &[reserved], &[]).conflicts, 0);
+        let mut same_email = existing("a@example.com", "old-name");
+        same_email.deleted = true;
+        assert_eq!(plan(&req, &provider, &[same_email], &[]).conflicts, 1);
     }
 
     #[test]
@@ -942,9 +944,11 @@ mod tests {
         assert_eq!(plan.skip, 1);
         assert_eq!(plan.rows[0].new_username, "user.one");
         assert_eq!(plan.rows[1].new_username, "user");
+        let reserved = existing("other@example.com", "USER.ONE");
+        assert_eq!(rename_plan(&req, &candidates, &[reserved]).conflicts, 1);
         let mut reserved = existing("other@example.com", "USER.ONE");
         reserved.deleted = true;
-        assert_eq!(rename_plan(&req, &candidates, &[reserved]).conflicts, 1);
+        assert_eq!(rename_plan(&req, &candidates, &[reserved]).conflicts, 0);
         let duplicates = [
             existing("same@example.com", "same@example.com"),
             existing("SAME@example.com", "SAME@example.com"),

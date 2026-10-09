@@ -17,6 +17,14 @@ Tento dokument zavádí jednotný model mazání v `simple-idm` podobný běžn�
 
 ## Matice entit
 
+Archivovaný uživatel si zachová UUID, původní username a vazby, ale username
+uvolní pro nový účet ve stejném tenantu. Unikátní index rezervuje jméno jen pro
+řádky s `deleted_at IS NULL`; pouhé vypnutí účtu jméno neuvolní. Obnovení původního
+účtu při obsazeném jméně skončí konfliktem bez změny archivovaného záznamu.
+Nový účet nepřebírá přímá členství ani federované identity původního UUID.
+Rezervace emailů a externích identit zůstávají beze změny. Migrace `050` opraví
+i rezervace již archivovaných účtů, bez jejich přejmenování nebo smazání.
+
 | Entita | API delete | Runtime viditelnost | Purge doporučení |
 |---|---|---|---|
 | `users` | soft (`is_active=false`, `deleted_at`) | v login/auth flow filtrovat `deleted_at IS NULL` | 30–90 dní |
