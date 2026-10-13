@@ -58,6 +58,14 @@ pub struct Host {
     pub logins: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principals: Option<Vec<String>>,
+    /// Permit a separate root read-only SFTP session using sudo -n.
+    #[serde(default)]
+    pub sftp_sudo_readonly: bool,
+    #[serde(default = "default_sftp_server")]
+    pub sftp_server: String,
+}
+pub(crate) fn default_sftp_server() -> String {
+    "/usr/lib/openssh/sftp-server".into()
 }
 fn default_port() -> u16 {
     22
@@ -162,6 +170,16 @@ impl Config {
         }
         let mut ids = HashSet::new();
         for host in &self.hosts {
+            if host.sftp_sudo_readonly {
+                ensure!(
+                    host.sftp_server.starts_with('/')
+                        && host
+                            .sftp_server
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"/_-.".contains(&b)),
+                    "sftp_server must be an absolute executable path without shell metacharacters"
+                );
+            }
             ensure!(
                 identifier(&host.id) && ids.insert(&host.id),
                 "invalid/duplicate host ID"

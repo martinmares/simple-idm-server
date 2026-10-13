@@ -1679,6 +1679,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e4eba85ea1d0a966a983acd07deee566e67395d2d96b6fb39e62b5a833f1eb0b"
 
 [[package]]
+name = "gloo-timers"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "482ce8a491a501da4cd806bd190275363d674f2845005c6ddbd5d3e1dd54495d"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "governor"
 version = "0.10.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3724,6 +3736,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "russh-sftp"
+version = "3.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bb17f72aba4314656b359ffba72c68dcbd70ed9e97497898b75498fe7198042"
+dependencies = [
+ "bitflags 2.13.2",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "gloo-timers",
+ "log",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.21",
+ "tokio",
+ "tokio-util",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "rust-embed"
 version = "8.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4018,6 +4050,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_cbor_2"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4279,7 +4321,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "simple-idm-ad-auth"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4290,7 +4332,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ad-proxy"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4314,7 +4356,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-bastion"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4339,7 +4381,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-common"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4349,7 +4391,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-core"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4402,7 +4444,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ctl"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4428,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ldap-sync"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -4436,7 +4478,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-oauth2-proxy"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4457,7 +4499,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-oidc-metadata-proxy"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4472,7 +4514,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-server"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4521,29 +4563,35 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ssh-login"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
+ "axum",
  "clap",
  "crossterm",
  "dirs",
  "futures-util",
  "libc",
+ "open",
  "ratatui",
  "reqwest 0.13.5",
+ "russh-sftp",
  "rustls",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "simple-idm-core",
+ "tempfile",
  "tokio",
  "tokio-tungstenite 0.30.0",
  "toml",
  "tracing-subscriber",
  "url",
+ "uuid",
 ]
 
 [[package]]
 name = "simple-idm-ssh-signer"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "axum",
  "clap",
@@ -4556,7 +4604,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-token-proxy"
-version = "0.13.8"
+version = "0.15.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -5196,6 +5244,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "libc",
  "pin-project-lite",
  "tokio",

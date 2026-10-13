@@ -6,7 +6,7 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use futures_util::{SinkExt, StreamExt};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     io::{self, IsTerminal, Write},
@@ -23,8 +23,8 @@ struct Config {
 }
 
 #[derive(Debug, Deserialize)]
-struct Profile {
-    url: String,
+pub(crate) struct Profile {
+    pub(crate) url: String,
     issuer: String,
     client_id: String,
     tenant: Option<String>,
@@ -38,7 +38,7 @@ fn default_scopes() -> Vec<String> {
         .to_vec()
 }
 
-fn secure_url(value: &str) -> Result<Url> {
+pub(crate) fn secure_url(value: &str) -> Result<Url> {
     let url = Url::parse(value)?;
     let loopback = match url.host() {
         Some(url::Host::Domain("localhost")) => true,
@@ -76,39 +76,39 @@ fn profile_from(content: &str, hostname: &str) -> Result<Profile> {
     Ok(profile)
 }
 
-#[derive(Debug, Deserialize)]
-struct Catalog {
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct Catalog {
     #[serde(default)]
     identity: Option<Identity>,
     #[serde(default)]
     bastion: Option<BastionInfo>,
     #[serde(skip)]
     peer_ip: Option<std::net::IpAddr>,
-    hosts: Vec<Host>,
+    pub(crate) hosts: Vec<Host>,
 }
-#[derive(Debug, Deserialize)]
-struct Identity {
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct Identity {
     username: String,
     subject: String,
     tenant: Option<String>,
 }
-#[derive(Debug, Deserialize)]
-struct BastionInfo {
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct BastionInfo {
     id: String,
 }
-#[derive(Debug, Deserialize)]
-struct Host {
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct Host {
     #[serde(default)]
-    address: String,
+    pub(crate) address: String,
     #[serde(default)]
-    port: u16,
+    pub(crate) port: u16,
     #[serde(default)]
-    resolved_ips: Vec<String>,
-    id: String,
-    name: String,
-    environment: String,
-    description: String,
-    logins: Vec<String>,
+    pub(crate) resolved_ips: Vec<String>,
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) environment: String,
+    pub(crate) description: String,
+    pub(crate) logins: Vec<String>,
 }
 
 fn matches(host: &Host, query: &str) -> bool {
@@ -129,11 +129,11 @@ fn matches(host: &Host, query: &str) -> bool {
 }
 
 // Server-supplied labels must never inject terminal escape/control sequences.
-fn label(value: &str) -> String {
+pub(crate) fn label(value: &str) -> String {
     value.chars().filter(|c| !c.is_control()).collect()
 }
 
-struct TerminalGuard;
+pub(crate) struct TerminalGuard;
 pub fn install_panic_hook() {
     static INSTALL: std::sync::Once = std::sync::Once::new();
     INSTALL.call_once(|| {
@@ -160,7 +160,7 @@ fn restore_terminal() {
 }
 
 impl TerminalGuard {
-    fn enter() -> Result<Self> {
+    pub(crate) fn enter() -> Result<Self> {
         terminal::enable_raw_mode()?;
         let guard = Self;
         execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide)?;
@@ -173,6 +173,20 @@ impl Drop for TerminalGuard {
             restore_terminal();
         }
     }
+}
+
+pub(crate) fn load_profile(hostname: &str) -> Result<Profile> {
+    let path = dirs::config_dir()
+        .ok_or("Cannot determine config directory")?
+        .join("simple-idm-ssh-login")
+        .join("bastions.toml");
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        format!(
+            "Cannot read {}: {e}. See the bastions.toml example.",
+            path.display()
+        )
+    })?;
+    profile_from(&content, hostname)
 }
 
 pub async fn run(hostname: &str, device: bool) -> Result<()> {
@@ -200,17 +214,7 @@ async fn run_inner(hostname: &str, device: bool) -> Result<()> {
     return Err("V1 raw bastion transport currently requires Unix (Linux/macOS)".into());
     #[cfg(unix)]
     {
-        let path = dirs::config_dir()
-            .ok_or("Cannot determine config directory")?
-            .join("simple-idm-ssh-login")
-            .join("bastions.toml");
-        let content = std::fs::read_to_string(&path).map_err(|e| {
-            format!(
-                "Cannot read {}: {e}. See the bastions.toml example.",
-                path.display()
-            )
-        })?;
-        let profile = profile_from(&content, hostname)?;
+        let profile = load_profile(hostname)?;
         let base = secure_url(&profile.url)?;
         let mut token = authenticate(&profile, device).await?;
         let client = reqwest::Client::builder()
@@ -280,7 +284,12 @@ async fn run_inner(hostname: &str, device: bool) -> Result<()> {
                     &logins[index]
                 }
             };
-            notice = match terminal_session(&base, &token, &host.id, login).await {
+            let result = if host_picker.files {
+                crate::files::run(&base, &token, &host.id, &host.name, login, &context).await
+            } else {
+                terminal_session(&base, &token, &host.id, login).await
+            };
+            notice = match result {
                 Ok(message) => message,
                 Err(error) if unauthorized(error.as_ref()) => {
                     // Restore the local terminal before printing browser instructions.
@@ -297,7 +306,15 @@ async fn run_inner(hostname: &str, device: bool) -> Result<()> {
     }
 }
 
-async fn authenticate(profile: &Profile, device: bool) -> Result<String> {
+pub(crate) async fn authenticate(profile: &Profile, device: bool) -> Result<String> {
+    authenticate_with_browser(profile, device, None).await
+}
+
+pub(crate) async fn authenticate_with_browser(
+    profile: &Profile,
+    device: bool,
+    browser: Option<&str>,
+) -> Result<String> {
     let token = if device {
         simple_idm_core::ssh_login::oidc_device::device_access_token_flow(
             &profile.issuer,
@@ -307,18 +324,23 @@ async fn authenticate(profile: &Profile, device: bool) -> Result<String> {
         )
         .await?
     } else {
-        simple_idm_core::ssh_login::oidc_browser::browser_access_token_flow(
+        simple_idm_core::ssh_login::oidc_browser::browser_access_token_flow_with_browser(
             &profile.issuer,
             &profile.client_id,
             profile.tenant.as_deref(),
             &profile.scopes,
+            browser,
         )
         .await?
     };
     Ok(token)
 }
 
-async fn load_catalog(client: &reqwest::Client, base: &Url, token: &str) -> Result<Catalog> {
+pub(crate) async fn load_catalog(
+    client: &reqwest::Client,
+    base: &Url,
+    token: &str,
+) -> Result<Catalog> {
     let response = client
         .get(base.join("/api/v1/hosts")?)
         .bearer_auth(token)
@@ -340,7 +362,7 @@ fn unauthorized(error: &(dyn std::error::Error + 'static)) -> bool {
 }
 
 impl Catalog {
-    fn context(&self, base: &Url) -> Vec<String> {
+    pub(crate) fn context(&self, base: &Url) -> Vec<String> {
         let mut lines = vec!["Welcome to Bastion!".into()];
         if let Some(identity) = &self.identity {
             lines.push(format!(
@@ -399,6 +421,7 @@ struct PickerState {
     query: String,
     selected: usize,
     table: ratatui::widgets::TableState,
+    files: bool,
 }
 
 async fn table_picker(
@@ -518,7 +541,14 @@ async fn table_picker(
                         }
                         KeyCode::Home => memory.selected = 0,
                         KeyCode::End => memory.selected = indices.len().saturating_sub(1),
+                        KeyCode::F(2) | KeyCode::Char('f')
+                            if title == "Hosts" && !indices.is_empty() =>
+                        {
+                            memory.files = true;
+                            return Ok(Some(indices[memory.selected]));
+                        }
                         KeyCode::Enter if !indices.is_empty() => {
+                            memory.files = false;
                             return Ok(Some(indices[memory.selected]));
                         }
                         _ => continue,
@@ -687,13 +717,13 @@ fn draw_picker(
         Paragraph::new(if editing_filter {
             "Type: filter  Enter: apply / return to list  Esc: cancel edit  Ctrl-U: clear"
         } else {
-            "/: filter  ↑/↓: select  PgUp/PgDn/Home/End: scroll  Enter: connect  q: quit / back  Esc: back"
+            "/: filter  ↑/↓: select  PgUp/PgDn/Home/End: scroll  Enter: connect  f/F2: files  q: quit / back  Esc: back"
         }),
         chunks[4],
     );
 }
 
-fn terminal_url(
+pub(crate) fn terminal_url(
     base: &Url,
     host: &str,
     login: &str,

@@ -9,12 +9,14 @@ name = "simple-idm-ssh-login"
 path = "src/main.rs"
 
 [dependencies]
+axum = { version = "0.8", features = ["ws"] }
+open = "5"
 clap = { version = "4.6", features = ["derive"] }
 simple-idm-core = { path = "../simple-idm-core" }
 tokio = { version = "1", features = ["full"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 crossterm = "0.29"
-ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29"] }
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm_0_29", "unstable-rendered-line-info"] }
 futures-util = { version = "0.3", features = ["sink"] }
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-native-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
@@ -25,5 +27,12 @@ toml = "1.1"
 url = "2.5"
 dirs = "7.0"
 
+russh-sftp = "3.0.1"
+sha2 = "0.10"
+uuid = { version = "1", features = ["v4"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"

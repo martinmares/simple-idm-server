@@ -84,7 +84,7 @@ Client resize requires version 1 and dimensions 1..1000. Default dimensions are
 `_-+.` only. Sending terminal input before ready fails. WebSocket messages are
 limited to 64 KiB; PTY queues are bounded, slow peers time out, and ping/pong
 keepalive detects lost connections. There is no idle/session/certificate lifetime
-termination policy. Reconnection and file transfer are outside V1.
+termination policy. Reconnection is outside V1. File sessions use a separate endpoint described below.
 
 A private Unix socket in the session's mode-0700 directory carries a random
 LocalCommand marker; terminal output cannot spoof readiness. OpenSSH invokes it
@@ -160,3 +160,37 @@ and `/etc/simple-idm-bastion/bastion.toml`. Linux uses `$XDG_CONFIG_HOME` or
 a Clap usage error listing searched paths. An invalid explicit path never falls
 back to another file. Help, version and examples work without a configuration.
 For the existing user-service setup, `simple-idm-bastion add-host` is sufficient.
+
+## SFTP relay (0.14.0)
+
+`GET /api/v1/files?host_id=grafana&login=alice` upgrades an authenticated WebSocket
+using the same identity, scope, tenant, host/account authorization, capacity limits,
+short-lived certificate and strict known_hosts checks as terminal sessions.
+V1 JSON `ready`/`error`/`exit` messages carry setup/lifecycle information; binary
+messages form one SFTP byte stream independent of WebSocket message boundaries.
+There is no PTY or resize protocol. The target must enable its SSH SFTP subsystem,
+for example `Subsystem sftp internal-sftp` outside sshd Match blocks.
+
+The daemon relays stdin/stdout of `/usr/bin/ssh -T -s ... host sftp`, without shell
+interpolation of requested paths or a TCP-forwarding tunnel. Authentication is
+durably audited before protocol bytes are released. Existing audit records cover
+identity, host/account, certificate, connection duration, failures and disconnects.
+SFTP exits use `sftp_exit`; disconnects use the shared `client_disconnected` reason.
+This is session audit, not an audit of individual file operations or filenames.
+The bastion does not parse SFTP payloads or persist transferred content.
+
+Deploy both client and daemon 0.14.0; the existing nginx WebSocket location can
+proxy this endpoint unchanged if it covers `/api/v1/files`.
+The isolated `scripts/bastion-smoke.py` fixture also checks SFTP authorization,
+host-key rejection, binary upload/download, Unicode paths, listing, mkdir, rename,
+delete and disconnected-session audit against a real target sshd.
+
+## Root read-only SFTP (0.14.4)
+
+Hosts may opt in with `sftp_sudo_readonly = true` and an absolute `sftp_server` path.
+A `/api/v1/files` request with `sudo_readonly=true` then starts a separate SSH
+session as the selected login, executing only `/usr/bin/sudo -n -- <path> -R`.
+Terminal requests cannot select this mode. There is no root write/password fallback.
+The daemon confirms the mode in `ready`; SFTP initialization proves the subsystem
+started. Audit schema v2 records `session_kind` and `sudo_readonly` alongside the
+original identity. See [setup and migration](../../docs/BASTION.md#optional-root-read-only-files-0144).

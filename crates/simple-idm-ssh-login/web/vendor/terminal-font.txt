@@ -1,0 +1,6 @@
+JetBrains Mono NL Nerd Font Mono Regular
+Nerd Fonts v3.4.0; upstream JetBrains Mono 2.304
+Source: https://raw.githubusercontent.com/ryanoasis/nerd-fonts/v3.4.0/patched-fonts/JetBrainsMono/NoLigatures/Regular/JetBrainsMonoNLNerdFontMono-Regular.ttf
+SHA-256: d83b3639f2a78e6d6da2cc2a7de4c2fc6817819a2199a6213790b3f7573710d1
+Font copyright: Copyright 2020 The JetBrains Mono NL Project Authors (https://github.com/JetBrains/JetBrainsMonoNL)
+See JetBrainsMono.OFL.txt and NerdFonts.LICENSE for licenses.

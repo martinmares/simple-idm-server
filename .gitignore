@@ -136,3 +136,7 @@ $RECYCLE.BIN/
 
 # CI dependency cache
 /.cache/
+
+# Local browser verification artifacts
+/.playwright-cli/
+/output/playwright/

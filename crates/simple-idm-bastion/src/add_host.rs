@@ -229,6 +229,8 @@ pub fn run(path: &Path, args: AddHost) -> Result<()> {
         );
     }
     let host = Host {
+        sftp_sudo_readonly: false,
+        sftp_server: crate::config::default_sftp_server(),
         id: required(args.id, "host ID (--id)", interactive)?,
         name: required(args.name, "display name (--name)", interactive)?,
         address: required(args.address, "hostname/IP (--address)", interactive)?,
@@ -356,6 +358,8 @@ mod tests {
     fn appending_preserves_comments_and_rejects_duplicate_or_invalid_hosts() {
         let original = include_str!("../examples/bastion.toml");
         let mut host = Host {
+            sftp_sudo_readonly: false,
+            sftp_server: crate::config::default_sftp_server(),
             id: "new-host".into(),
             name: "New host".into(),
             address: "nuc.cluster".into(),

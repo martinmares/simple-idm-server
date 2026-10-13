@@ -7,7 +7,7 @@ use anyhow::{Context, Result, ensure};
 use axum::{
     Json, Router,
     extract::{
-        ConnectInfo, Query, State, WebSocketUpgrade,
+        ConnectInfo, OriginalUri, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode},
@@ -40,6 +40,7 @@ pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/api/v1/hosts", get(hosts))
         .route("/api/v1/terminal", get(open))
+        .route("/api/v1/files", get(open))
         .with_state(app)
 }
 fn bearer(headers: &HeaderMap) -> Result<&str> {
@@ -120,6 +121,8 @@ pub struct TerminalQuery {
     pub rows: u16,
     #[serde(default = "default_term")]
     pub term: String,
+    #[serde(default)]
+    pub sudo_readonly: bool,
 }
 fn default_cols() -> u16 {
     80
@@ -174,8 +177,10 @@ async fn open(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Query(query): Query<TerminalQuery>,
+    OriginalUri(uri): OriginalUri,
     ws: WebSocketUpgrade,
 ) -> Response {
+    let files = uri.path() == "/api/v1/files";
     let id = uuid::Uuid::new_v4().to_string();
     if app.audit_failed.load(Ordering::SeqCst) {
         return error(StatusCode::SERVICE_UNAVAILABLE, "audit unavailable");
@@ -192,6 +197,15 @@ async fn open(
         .await
     {
         tracing::error!(error=%e,"cannot durably start session");
+        return error(StatusCode::SERVICE_UNAVAILABLE, "audit unavailable");
+    }
+    if app
+        .audit
+        .mode(&id, files, query.sudo_readonly)
+        .await
+        .is_err()
+    {
+        finish(&app, &id, "failed", "audit_unavailable", None, None).await;
         return error(StatusCode::SERVICE_UNAVAILABLE, "audit unavailable");
     }
     let token = match bearer(&headers) {
@@ -228,6 +242,13 @@ async fn open(
             return error(StatusCode::FORBIDDEN, "host or login denied");
         }
     };
+    if query.sudo_readonly && (!files || !host.sftp_sudo_readonly) {
+        finish(&app, &id, "denied", "sudo_readonly_denied", None, None).await;
+        return error(
+            StatusCode::FORBIDDEN,
+            "Root read-only SFTP is not enabled for this host",
+        );
+    }
     if dimensions(query.cols, query.rows)
         .and_then(|_| terminal(&query.term))
         .is_err()
@@ -266,7 +287,7 @@ async fn open(
                 .await;
             });
         })
-        .on_upgrade(move |socket| session(app, socket, id, query, host, token, slot))
+        .on_upgrade(move |socket| session(app, socket, id, query, host, token, slot, files))
         .into_response()
 }
 #[derive(Deserialize)]
@@ -275,24 +296,39 @@ enum ClientMessage {
     #[serde(rename = "resize")]
     Resize { version: u8, cols: u16, rows: u16 },
 }
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 #[derive(Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum ServerMessage<'a> {
-    Ready { version: u8, session_id: &'a str },
-    Error { version: u8, message: &'a str },
-    Exit { version: u8, status: i32 },
+pub(crate) enum ServerMessage<'a> {
+    Ready {
+        version: u8,
+        session_id: &'a str,
+        #[serde(skip_serializing_if = "is_false")]
+        sudo_readonly: bool,
+    },
+    Error {
+        version: u8,
+        message: &'a str,
+    },
+    Exit {
+        version: u8,
+        status: i32,
+    },
 }
-async fn send(socket: &mut WebSocket, message: Message) -> Result<()> {
+pub(crate) async fn send(socket: &mut WebSocket, message: Message) -> Result<()> {
     tokio::time::timeout(Duration::from_secs(15), socket.send(message)).await??;
     Ok(())
 }
-async fn control(socket: &mut WebSocket, message: ServerMessage<'_>) -> Result<()> {
+pub(crate) async fn control(socket: &mut WebSocket, message: ServerMessage<'_>) -> Result<()> {
     send(
         socket,
         Message::Text(serde_json::to_string(&message)?.into()),
     )
     .await
 }
+#[allow(clippy::too_many_arguments)]
 async fn session(
     app: Arc<App>,
     mut socket: WebSocket,
@@ -301,14 +337,20 @@ async fn session(
     host: Host,
     token: String,
     _slot: OwnedSemaphorePermit,
+    files: bool,
 ) {
     let mut started = None;
-    let result = run_session(&app, &mut socket, &id, &query, &host, &token, &mut started).await;
+    let result = if files {
+        crate::files::run(&app, &mut socket, &id, &query, &host, &token, &mut started).await
+    } else {
+        run_session(&app, &mut socket, &id, &query, &host, &token, &mut started).await
+    };
     match result {
         Ok((status, reason)) => {
             let outcome = if reason == "client_disconnected" {
                 "disconnected"
-            } else if status == Some(255) {
+            } else if status == Some(255) || (query.sudo_readonly && status.is_some_and(|s| s != 0))
+            {
                 "failed"
             } else {
                 "exited"
@@ -320,13 +362,13 @@ async fn session(
         }
         Err(e) => {
             // Operational errors never include tokens, signer bodies or terminal bytes.
-            tracing::warn!(session_id=%id,error=%e,"terminal session failed");
+            tracing::warn!(session_id=%id,error=%e,"bastion session failed");
             finish(&app, &id, "failed", "session_error", None, started).await;
             let _ = control(
                 &mut socket,
                 ServerMessage::Error {
                     version: 1,
-                    message: "SSH session failed; check bastion service logs and known_hosts",
+                    message: if query.sudo_readonly { "Root read-only SFTP failed; check sudoers NOPASSWD rule and sftp-server path" } else { "SSH session failed; check bastion service logs and known_hosts" },
                 },
             )
             .await;
@@ -371,7 +413,7 @@ async fn run_session(
                     ensure!(transport.child.try_wait()?.is_none(),"OpenSSH exited before local terminal ready");
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                control(socket,ServerMessage::Ready{version:1,session_id:id}).await?;
+                control(socket,ServerMessage::Ready{version:1,session_id:id,sudo_readonly:false}).await?;
                 break;
             }
             _ = &mut connect_timeout => anyhow::bail!("SSH authentication timed out"),
@@ -529,6 +571,7 @@ mod tests {
         let ready = serde_json::to_value(ServerMessage::Ready {
             version: 1,
             session_id: "s",
+            sudo_readonly: false,
         })
         .unwrap();
         assert_eq!(

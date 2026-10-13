@@ -1,11 +1,11 @@
-# Bastion V1
+# Bastion SSH and SFTP
 
 V1 provides browser SSO, a local host picker, an interactive SSH terminal and
 durable access audit. The client connects to the bastion over HTTPS/WSS; only
 the bastion generates the per-session SSH private key and obtains the user
 certificate. The CA private key stays on the signer. Linux/macOS clients and a
-Unix bastion with OpenSSH are supported. File transfer, forwarding, session
-recording and reconnection are outside V1.
+Unix bastion with OpenSSH are supported. SFTP file transfer is available from 0.14.0. Forwarding, session
+recording and reconnection are outside this version.
 
 ## Client
 
@@ -323,3 +323,102 @@ and `/etc/simple-idm-bastion/bastion.toml`. Linux uses `$XDG_CONFIG_HOME` or
 a Clap usage error listing searched paths. An invalid explicit path never falls
 back to another file. Help, version and examples work without a configuration.
 For the existing user-service setup, `simple-idm-bastion add-host` is sufficient.
+
+## File manager from 0.14.0
+
+Upgrade both the bastion daemon and `simple-idm-ssh-login` to 0.14.0. Start the
+client as before, select a host, then press `f` or F2 instead of Enter. Select the
+Linux account if the host permits several accounts. Files use the same IDM login,
+including `--device`, and the same allowed host/account configuration as SSH.
+
+The left panel is local and the right panel is remote. Tab changes the active
+panel; `/` edits its filter, Enter applies the filter or opens a directory, and
+Backspace opens the parent. `c`/`s` or F5 copies one regular file to the other
+panel, `r`/F6 renames, `n`/F7 creates a directory, `d`/F8 deletes after confirmation,
+`u`/F4 refreshes, and `q` returns to the host list. Esc cancels an active transfer.
+Letters remain ordinary input while editing filters or names.
+
+Enable the target sshd SFTP subsystem if it is not already configured:
+
+```text
+Subsystem sftp internal-sftp
+```
+
+Use only one SFTP Subsystem declaration, outside Match blocks, and validate the
+result with `sshd -t` before reloading sshd. The existing nginx location must cover
+`/api/v1/files` with WebSocket upgrade, just as it covers `/api/v1/terminal`.
+
+File transport is a separate authenticated binary WebSocket relayed to OpenSSH
+without PTY. SSH session credentials stay on the bastion. The client requires no
+direct route to the target. Session audit records who connected and where; it does
+not record each file operation. Relay byte counts are emitted in the daemon log.
+
+This initial version has no recursive copy, multiple-file selection, resume or
+file preview/editing. Permissions and timestamps are not preserved. Overwrite
+requires a separate confirmation and preserves the old remote file as a temporary
+backup until publishing succeeds. This is not crash-atomic; interruption can leave
+`.simple-idm-*.part` or `.simple-idm-*.backup` files. See the [client file-manager
+notes](../crates/simple-idm-ssh-login/README.bastion.md#file-manager-0140) for details
+and the SFTP/PTY integration test commands.
+
+## Optional root read-only files (0.14.4)
+
+Upgrade client and daemon to 0.14.4. In the file manager, `e` opens a separate
+certificate-authenticated SSH session as the same configured Linux login and runs
+`/usr/bin/sudo -n -- <sftp_server> -R`. The panel is marked ROOT READ ONLY; downloads,
+preview and SHA-256 are allowed. Upload, rename, mkdir and delete on that panel
+are blocked by the client worker and by the remote SFTP server. `e` again returns
+to the configured login. The old session remains in place until the new mode has
+successfully initialized and listed a directory; a failed switch leaves the mode
+unchanged. If the current directory is inaccessible after switching, the new
+session starts in its home directory.
+
+Enable this per host in the bastion TOML:
+
+```toml
+# Inside the existing [[hosts]] entry, alongside logins/allowed_groups:
+sftp_sudo_readonly = true
+sftp_server = "/usr/lib/openssh/sftp-server"
+```
+
+The path defaults to the Ubuntu/Debian path above. Set it to the actual external
+SFTP executable on the target (for example `/usr/lib/ssh/sftp-server` on the Alpine
+fixture). `internal-sftp` alone is not an executable for sudo. The host flag is off
+by default. Existing host/account/group authorization still applies; sudoers must
+also permit the exact command for that Linux login.
+
+On each enabled target, an administrator verifies that the binary exists, then
+uses `sudo visudo -f /etc/sudoers.d/simple-idm-sftp` to install:
+
+```sudoers
+mares ALL=(root) NOPASSWD: /usr/lib/openssh/sftp-server -R
+```
+
+Replace `mares` and the executable path as appropriate. Keep the file root-owned
+with mode 0440; validate the complete policy using `sudo visudo -c`. There is no
+password prompt, `su`, unrestricted sudo rule or root write mode. Shell-based
+uploads remain normal-user uploads followed by explicit privileged commands in
+the interactive terminal. sudo policies requiring a password or a TTY are not
+supported by this mode and fail without prompting.
+
+The daemon audit schema migrates automatically from version 1 to 2 on service
+startup. Records retain the original IDM identity and `linux_user`, and add
+`session_kind` (`terminal`/`sftp`) and `sudo_readonly`. Historical sessions without
+mode metadata are marked `unknown`. New denied elevation attempts also carry the
+requested mode. Record the migration when planning a daemon downgrade: older
+binaries reject the newer audit schema. The client requires explicit elevated-mode
+confirmation from the daemon; an older daemon cannot silently open a normal
+session while the UI labels it root.
+
+The certificate validity continues to govern new SSH authentication, not a
+maximum lifetime of an already established elevated session. No new session-age
+limit is introduced by this feature.
+
+### Local browser client
+
+Client 0.15.0 adds `simple-idm-ssh-login bastion <hostname> --web`. It opens a
+loopback-only web UI for hosts, terminal and files, reusing the same daemon APIs,
+certificates, authorization and root read-only restrictions. No daemon web UI or
+additional public endpoint is needed. See
+[`README.bastion.md`](../crates/simple-idm-ssh-login/README.bastion.md#local-web-ui-0150)
+for local session protection, usage and limitations.

@@ -1,0 +1,5 @@
+# Install via visudo on the TARGET host; adjust account and executable path.
+# Example: visudo -f /etc/sudoers.d/simple-idm-sftp
+# Validate with visudo -c. File ownership root:root, mode 0440.
+# Allows only root read-only SFTP, without a password. No wildcard arguments.
+mares ALL=(root) NOPASSWD: /usr/lib/openssh/sftp-server -R

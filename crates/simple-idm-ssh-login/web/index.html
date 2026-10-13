@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Bastion</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/xterm.css" />
+    <link rel="stylesheet" href="/app.css" />
+    <script defer src="/xterm.js"></script>
+    <script defer src="/addon-fit.js"></script>
+    <script defer src="/app.js"></script>
+  </head>
+  <body>
+    <header>
+      <div>
+        <strong>Bastion</strong> <span id="version"></span>
+        <div id="identity"></div>
+      </div>
+      <button id="quit" class="danger">Stop client</button>
+    </header>
+    <main>
+      <aside>
+        <h2>Hosts <span id="host-count"></span></h2>
+        <input
+          id="host-filter"
+          type="search"
+          placeholder="Filter hosts…"
+          aria-label="Filter hosts"
+        />
+        <div id="hosts"></div>
+        <div class="hint">All connections pass through the bastion.</div>
+      </aside>
+      <section id="workspace">
+        <div class="target">
+          <div>
+            <strong id="target">Select a host</strong>
+            <div id="address" class="muted"></div>
+          </div>
+          <label
+            >Account
+            <select id="account" aria-label="SSH account"></select></label
+          ><button id="files" disabled>Files</button
+          ><button id="terminal" disabled>Terminal</button>
+        </div>
+        <div id="welcome">
+          <h1>Your hosts, one secure connection.</h1>
+          <p>Select a host to browse files or open its terminal.</p>
+          <p class="muted">
+            The browser connects to this local client. Authentication and SSH
+            certificates stay with the client and bastion.
+          </p>
+        </div>
+        <div id="file-view" hidden>
+          <div class="toolbar">
+            <button data-action="copy">Copy <kbd>c</kbd></button
+            ><button data-action="rename">Rename <kbd>r</kbd></button
+            ><button data-action="mkdir">New folder <kbd>n</kbd></button
+            ><button data-action="delete">Delete <kbd>d</kbd></button
+            ><button data-action="view">View <kbd>v</kbd></button
+            ><button data-action="hash">SHA-256 <kbd>h</kbd></button
+            ><button id="refresh">Refresh <kbd>u</kbd></button
+            ><button id="root">Root read-only <kbd>e</kbd></button>
+          </div>
+          <div class="panels">
+            <section class="panel" id="local-panel" data-side="local">
+              <h2>Local <span class="muted">This computer</span></h2>
+              <form class="path-form">
+                <button type="button" class="parent" title="Parent directory">
+                  ↑</button
+                ><input class="path" aria-label="Local path" /><button>
+                  Go
+                </button>
+              </form>
+              <input
+                class="filter"
+                type="search"
+                placeholder="Filter /"
+                aria-label="Local filter"
+              />
+              <div class="listing" tabindex="0" aria-label="Local files">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Size</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div class="count"></div>
+            </section>
+            <section class="panel" id="remote-panel" data-side="remote">
+              <h2>Remote <span id="remote-mode" class="muted"></span></h2>
+              <form class="path-form">
+                <button type="button" class="parent" title="Parent directory">
+                  ↑</button
+                ><input class="path" aria-label="Remote path" /><button>
+                  Go
+                </button>
+              </form>
+              <input
+                class="filter"
+                type="search"
+                placeholder="Filter /"
+                aria-label="Remote filter"
+              />
+              <div class="listing" tabindex="0" aria-label="Remote files">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Name</th>
+                      <th>Size</th>
+                    </tr>
+                  </thead>
+                  <tbody></tbody>
+                </table>
+              </div>
+              <div class="count"></div>
+            </section>
+          </div>
+          <div class="hint">
+            Tab switch panel · Enter open directory · Backspace parent · /
+            filter · Single files only; folders are not copied recursively.
+          </div>
+        </div>
+        <div id="terminal-view" hidden>
+          <div class="toolbar">
+            <span id="terminal-state">Connecting…</span
+            ><button id="disconnect">Disconnect terminal</button>
+          </div>
+          <div id="terminal-screen"><div id="terminal-mount"></div></div>
+        </div>
+        <footer>
+          <span id="status" role="status">Starting local session…</span
+          ><progress id="progress" hidden></progress
+          ><button id="cancel" hidden>Cancel</button>
+        </footer>
+      </section>
+    </main>
+    <dialog id="viewer">
+      <div class="dialog-head">
+        <strong id="viewer-title"></strong
+        ><label
+          ><input id="wrap" type="checkbox" checked /> Wrap <kbd>w</kbd></label
+        ><button id="close-viewer">Close</button>
+      </div>
+      <pre id="preview" class="wrap" tabindex="0"></pre>
+    </dialog>
+    <dialog id="prompt">
+      <form method="dialog">
+        <h2 id="prompt-title"></h2>
+        <p id="prompt-message"></p>
+        <input id="prompt-input" autocomplete="off" aria-label="Name" />
+        <div class="dialog-actions">
+          <button type="button" id="prompt-cancel">Cancel</button
+          ><button value="ok" id="prompt-ok">OK</button>
+        </div>
+      </form>
+    </dialog>
+  </body>
+</html>

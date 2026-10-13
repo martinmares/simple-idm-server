@@ -26,3 +26,8 @@ allowed_groups = ["infra-admins"]
 logins = ["{username}", "postgres"]
 # Optional narrowing of the signer's group-derived principals, not login names.
 principals = ["infra-admins"]
+
+# Optional root READ ONLY file session for this host; disabled by default.
+# Requires matching NOPASSWD sudoers rule on the target. No root writes supported.
+# sftp_sudo_readonly = true
+# sftp_server = "/usr/lib/openssh/sftp-server"

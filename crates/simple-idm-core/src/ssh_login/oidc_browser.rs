@@ -42,7 +42,7 @@ pub async fn browser_flow(
     tenant: Option<&str>,
     scopes: &[String],
 ) -> Result<String, String> {
-    browser_token_flow(issuer, client_id, tenant, scopes, false).await
+    browser_token_flow(issuer, client_id, tenant, scopes, false, None).await
 }
 
 /// Browser login for an API client. Validates the ID token/nonce before returning
@@ -53,7 +53,18 @@ pub async fn browser_access_token_flow(
     tenant: Option<&str>,
     scopes: &[String],
 ) -> Result<String, String> {
-    browser_token_flow(issuer, client_id, tenant, scopes, true).await
+    browser_access_token_flow_with_browser(issuer, client_id, tenant, scopes, None).await
+}
+
+/// API browser login with an explicitly selected local browser application.
+pub async fn browser_access_token_flow_with_browser(
+    issuer: &str,
+    client_id: &str,
+    tenant: Option<&str>,
+    scopes: &[String],
+    browser: Option<&str>,
+) -> Result<String, String> {
+    browser_token_flow(issuer, client_id, tenant, scopes, true, browser).await
 }
 
 async fn browser_token_flow(
@@ -62,6 +73,7 @@ async fn browser_token_flow(
     tenant: Option<&str>,
     scopes: &[String],
     access_token: bool,
+    browser: Option<&str>,
 ) -> Result<String, String> {
     tracing::info!("Starting browser flow");
 
@@ -153,7 +165,11 @@ async fn browser_token_flow(
     println!("\n🔐 Opening browser for authentication...");
     println!("If browser doesn't open, visit:\n{}\n", auth_url);
 
-    if let Err(e) = open::that(auth_url.to_string()) {
+    let opened = match browser {
+        Some(browser) => open::with(auth_url.to_string(), browser),
+        None => open::that(auth_url.to_string()),
+    };
+    if let Err(e) = opened {
         tracing::warn!("Failed to open browser: {}", e);
     }
 

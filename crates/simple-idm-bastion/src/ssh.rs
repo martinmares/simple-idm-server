@@ -162,6 +162,35 @@ impl Prepared {
             certificate_id: format!("{key_id};serial={serial}"),
         })
     }
+    pub fn spawn_files(
+        &self,
+        config: &Config,
+        host: &Host,
+        login: &str,
+        sudo_readonly: bool,
+    ) -> Result<tokio::process::Child> {
+        let command = ssh_command(
+            config,
+            host,
+            login,
+            self.dir.path(),
+            &self.nonce,
+            true,
+            sudo_readonly,
+        )?;
+        let argv = command.get_argv();
+        let mut process = tokio::process::Command::new(&argv[0]);
+        process
+            .args(&argv[1..])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("SSH_ASKPASS_REQUIRE", "never")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        Ok(process.spawn()?)
+    }
     pub async fn marker(&self) -> Result<tokio::net::UnixStream> {
         let (mut stream, _) = self.listener.accept().await?;
         let mut nonce = vec![0; self.nonce.len()];
@@ -190,7 +219,15 @@ impl Prepared {
             .bits()
             .to_ne_bytes()
             .to_vec();
-        let mut command = ssh_command(config, host, login, self.dir.path(), &self.nonce)?;
+        let mut command = ssh_command(
+            config,
+            host,
+            login,
+            self.dir.path(),
+            &self.nonce,
+            false,
+            false,
+        )?;
         command.env_clear();
         command.env("PATH", "/usr/bin:/bin");
         command.env("TERM", term);
@@ -296,12 +333,14 @@ fn ssh_command(
     login: &str,
     dir: &Path,
     nonce: &str,
+    files: bool,
+    sudo_readonly: bool,
 ) -> Result<CommandBuilder> {
     let mut cmd = CommandBuilder::new("/usr/bin/ssh");
     cmd.args([
         "-F",
         "/dev/null",
-        "-tt",
+        if files { "-T" } else { "-tt" },
         "-p",
         &host.port.to_string(),
         "-l",
@@ -359,7 +398,20 @@ fn ssh_command(
         quote(dir.join("ready.sock").to_str().unwrap()),
         quote(nonce)
     );
-    cmd.args(["-o", &local, "--", &host.address]);
+    cmd.args(["-o", &local]);
+    if files && !sudo_readonly {
+        cmd.arg("-s");
+    }
+    cmd.args(["--", &host.address]);
+    if sudo_readonly {
+        ensure!(
+            files && host.sftp_sudo_readonly,
+            "root read-only SFTP denied"
+        );
+        cmd.args(["/usr/bin/sudo", "-n", "--", &host.sftp_server, "-R"]);
+    } else if files {
+        cmd.arg("sftp");
+    }
     Ok(cmd)
 }
 pub struct Transport {
@@ -441,5 +493,82 @@ mod tests {
         assert!(!helper.is_finished());
         release(stream).await.unwrap();
         helper.await.unwrap().unwrap();
+    }
+    #[test]
+    fn file_transport_requests_only_sftp_without_pty() {
+        let config: Config = toml::from_str(include_str!("../examples/bastion.toml")).unwrap();
+        let cmd = ssh_command(
+            &config,
+            &config.hosts[0],
+            "fixture",
+            Path::new("/tmp/session"),
+            "nonce",
+            true,
+            false,
+        )
+        .unwrap();
+        let args = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args.iter().any(|a| a == "-T"));
+        assert!(args.iter().any(|a| a == "-s"));
+        assert!(!args.iter().any(|a| a == "-tt"));
+        assert_eq!(args.last().unwrap(), "sftp");
+        for option in [
+            "StrictHostKeyChecking=yes",
+            "IdentityAgent=none",
+            "PasswordAuthentication=no",
+            "ClearAllForwardings=yes",
+        ] {
+            assert!(args.iter().any(|a| a == option));
+        }
+    }
+    #[test]
+    fn sudo_file_transport_is_opt_in_and_forces_no_password_and_read_only() {
+        let mut config: Config = toml::from_str(include_str!("../examples/bastion.toml")).unwrap();
+        assert!(
+            ssh_command(
+                &config,
+                &config.hosts[0],
+                "mares",
+                Path::new("/tmp/session"),
+                "nonce",
+                true,
+                true
+            )
+            .is_err()
+        );
+        config.hosts[0].sftp_sudo_readonly = true;
+        config.validate().unwrap();
+        let cmd = ssh_command(
+            &config,
+            &config.hosts[0],
+            "mares",
+            Path::new("/tmp/session"),
+            "nonce",
+            true,
+            true,
+        )
+        .unwrap();
+        let args = cmd
+            .get_argv()
+            .iter()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(!args.iter().any(|a| a == "-s" || a == "-tt"));
+        assert_eq!(
+            &args[args.len() - 5..],
+            [
+                "/usr/bin/sudo",
+                "-n",
+                "--",
+                "/usr/lib/openssh/sftp-server",
+                "-R"
+            ]
+        );
+        config.hosts[0].sftp_server = "/tmp/server;id".into();
+        assert!(config.validate().is_err());
     }
 }

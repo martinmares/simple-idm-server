@@ -1,5 +1,8 @@
 mod bastion;
+mod file_ops;
+mod files;
 mod protocol;
+mod web;
 
 use clap::{Parser, Subcommand};
 use simple_idm_core::ssh_login::{SshLoginConfig, commands};
@@ -60,6 +63,12 @@ Profiles are read from bastions.toml alongside config.toml in the OS configurati
     )]
     Bastion {
         hostname: String,
+        /// Open the local browser UI instead of the terminal UI.
+        #[arg(long)]
+        web: bool,
+        /// Browser application for IDM login and the web UI (e.g. firefox); requires --web.
+        #[arg(long, requires = "web", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        web_browser: Option<String>,
         /// Authenticate on another device; print URL/code without opening a local browser.
         #[arg(long, conflicts_with = "browser")]
         device: bool,
@@ -135,8 +144,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         Commands::Bastion {
-            hostname, device, ..
-        } => return bastion::run(hostname, *device).await,
+            hostname,
+            device,
+            web,
+            web_browser,
+            ..
+        } => {
+            return if *web {
+                web::run(hostname, *device, web_browser.as_deref()).await
+            } else {
+                bastion::run(hostname, *device).await
+            };
+        }
         Commands::Hostname(args) => {
             // Parse the shortcut using the same Clap command, flags and help as the explicit form.
             let shortcut = Cli::try_parse_from(
@@ -146,10 +165,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .unwrap_or_else(|error| error.exit());
             if let Commands::Bastion {
-                hostname, device, ..
+                hostname,
+                device,
+                web,
+                web_browser,
+                ..
             } = shortcut.command
             {
-                return bastion::run(&hostname, device).await;
+                return if web {
+                    web::run(&hostname, device, web_browser.as_deref()).await
+                } else {
+                    bastion::run(&hostname, device).await
+                };
             }
             unreachable!();
         }
@@ -221,7 +248,9 @@ fn print_examples() {
     print!("{}", EXAMPLES);
 }
 
-const EXAMPLES: &str = r#"Bastion client V1 (Linux/macOS)
+const EXAMPLES: &str = r#"Bastion SSH/SFTP client (Linux/macOS)
+Host list: Enter opens SSH; f/F2 opens the local/remote file manager.
+Files: v/F3 view, h SHA256, / filter, c/s/F5 copy, r/F6 rename, n/F7 mkdir, d/F8 delete, u/F4 refresh, q back.
 
 Create bastions.toml alongside config.toml in the OS configuration directory:
   macOS: ~/Library/Application Support/simple-idm-ssh-login/bastions.toml
@@ -342,6 +371,93 @@ mod tests {
             Cli::try_parse_from(["login", "bastion", "example.org", "--device", "--browser"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn bastion_web_and_device_parse_together() {
+        for argv in [
+            vec!["login", "bastion", "example.org", "--web"],
+            vec!["login", "bastion", "--web", "example.org", "--device"],
+        ] {
+            assert!(matches!(
+                Cli::try_parse_from(argv).unwrap().command,
+                Commands::Bastion { web: true, .. }
+            ));
+        }
+        let Commands::Hostname(args) =
+            Cli::try_parse_from(["login", "example.org", "--web", "--device"])
+                .unwrap()
+                .command
+        else {
+            panic!("shortcut")
+        };
+        assert!(matches!(
+            Cli::try_parse_from(
+                ["login", "bastion"]
+                    .into_iter()
+                    .chain(args.iter().map(String::as_str))
+            )
+            .unwrap()
+            .command,
+            Commands::Bastion {
+                web: true,
+                device: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn web_browser_requires_web_and_works_with_device_and_shortcut() {
+        assert!(
+            Cli::try_parse_from([
+                "login",
+                "bastion",
+                "example.org",
+                "--web-browser",
+                "firefox"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "login",
+                "bastion",
+                "example.org",
+                "--web",
+                "--web-browser",
+                ""
+            ])
+            .is_err()
+        );
+        let args = [
+            "example.org",
+            "--web",
+            "--device",
+            "--web-browser",
+            "firefox",
+        ];
+        let Commands::Hostname(shortcut) = Cli::try_parse_from(["login"].into_iter().chain(args))
+            .unwrap()
+            .command
+        else {
+            panic!("shortcut")
+        };
+        for arguments in [args.to_vec(), shortcut.iter().map(String::as_str).collect()] {
+            let command = Cli::try_parse_from(["login", "bastion"].into_iter().chain(arguments))
+                .unwrap()
+                .command;
+            let Commands::Bastion {
+                web: true,
+                device: true,
+                web_browser: Some(browser),
+                ..
+            } = command
+            else {
+                panic!("web browser options")
+            };
+            assert_eq!(browser, "firefox");
+        }
     }
 
     #[test]

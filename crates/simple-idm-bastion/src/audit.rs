@@ -93,6 +93,8 @@ pub struct Record {
     pub end_reason: Option<String>,
     pub exit_status: Option<i64>,
     pub certificate_id: Option<String>,
+    pub session_kind: String,
+    pub sudo_readonly: bool,
 }
 impl Audit {
     pub async fn open(path: &Path, readonly: bool) -> Result<Self> {
@@ -116,10 +118,19 @@ impl Audit {
             let version: i64 = sqlx::query_scalar("PRAGMA user_version")
                 .fetch_one(&pool)
                 .await?;
-            ensure!(version <= 1, "audit schema newer than this binary");
-            sqlx::raw_sql(include_str!("../migrations/001_sessions.sql"))
-                .execute(&pool)
-                .await?;
+            ensure!(version <= 2, "audit schema newer than this binary");
+            let mut tx = pool.begin().await?;
+            if version == 0 {
+                sqlx::raw_sql(include_str!("../migrations/001_sessions.sql"))
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            if version < 2 {
+                sqlx::raw_sql(include_str!("../migrations/002_file_mode.sql"))
+                    .execute(&mut *tx)
+                    .await?;
+            }
+            tx.commit().await?;
         }
         Ok(Self { pool })
     }
@@ -138,6 +149,15 @@ impl Audit {
     ) -> Result<()> {
         sqlx::query("INSERT INTO sessions (session_id,bastion_id,host_id,linux_user,client_ip,requested_at,result) VALUES (?,?,?,?,?,?,'requested')")
             .bind(session).bind(&config.bastion_id).bind(host).bind(login).bind(ip).bind(now()).execute(&self.pool).await?;
+        Ok(())
+    }
+    pub async fn mode(&self, session: &str, files: bool, sudo_readonly: bool) -> Result<()> {
+        sqlx::query("UPDATE sessions SET session_kind=?,sudo_readonly=? WHERE session_id=?")
+            .bind(if files { "sftp" } else { "terminal" })
+            .bind(sudo_readonly)
+            .bind(session)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
     pub async fn identity(
@@ -223,6 +243,24 @@ impl Audit {
                     end_reason: r.try_get("end_reason")?,
                     exit_status: r.try_get("exit_status")?,
                     certificate_id: r.try_get("certificate_id")?,
+                    session_kind: if r
+                        .columns()
+                        .iter()
+                        .any(|c| sqlx::Column::name(c) == "session_kind")
+                    {
+                        r.try_get("session_kind")?
+                    } else {
+                        "unknown".into()
+                    },
+                    sudo_readonly: if r
+                        .columns()
+                        .iter()
+                        .any(|c| sqlx::Column::name(c) == "sudo_readonly")
+                    {
+                        r.try_get("sudo_readonly")?
+                    } else {
+                        false
+                    },
                 })
             })
             .collect()
@@ -245,6 +283,7 @@ mod tests {
         a.requested(&c, "one", "host", "alice", "127.0.0.1")
             .await
             .unwrap();
+        a.mode("one", true, true).await.unwrap();
         a.connected("one").await.unwrap();
         a.ended("one", "exited", "shell_exit", Some(0), Some(42))
             .await
@@ -258,6 +297,9 @@ mod tests {
         assert_eq!(a.reconcile().await.unwrap(), 1);
         assert_eq!(a.reconcile().await.unwrap(), 0);
         let rows = a.records(&Filters::default()).await.unwrap();
+        assert_eq!(rows[0].session_kind, "sftp");
+        assert!(rows[0].sudo_readonly);
+        assert_eq!(rows[0].linux_user, "alice");
         assert_eq!(rows[0].duration_ms, Some(42));
         assert_eq!(rows[0].result, "exited");
         assert_eq!(rows[1].result, "interrupted");
@@ -274,5 +316,35 @@ mod tests {
             1
         );
         drop(lock);
+    }
+    #[tokio::test]
+    async fn existing_audit_schema_is_upgraded_once_and_keeps_old_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("old.db");
+        let _lock = InstanceLock::acquire(&db).unwrap();
+        let pool = SqlitePoolOptions::new()
+            .connect_with(SqliteConnectOptions::new().filename(&db))
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!("../migrations/001_sessions.sql"))
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO sessions(session_id,bastion_id,host_id,linux_user,client_ip,requested_at,result) VALUES('old','b','host','mares','127.0.0.1',1,'exited')").execute(&pool).await.unwrap();
+        pool.close().await;
+        let old = Audit::open(&db, true).await.unwrap();
+        assert_eq!(
+            old.records(&Filters::default()).await.unwrap()[0].session_kind,
+            "unknown"
+        );
+        old.pool.close().await;
+        for _ in 0..2 {
+            let audit = Audit::open(&db, false).await.unwrap();
+            let record = audit.records(&Filters::default()).await.unwrap().remove(0);
+            assert_eq!(record.linux_user, "mares");
+            assert!(!record.sudo_readonly);
+            assert_eq!(record.session_kind, "unknown");
+            audit.pool.close().await;
+        }
     }
 }

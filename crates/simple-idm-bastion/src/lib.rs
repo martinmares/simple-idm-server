@@ -2,5 +2,6 @@
 pub mod add_host;
 pub mod audit;
 pub mod config;
+pub mod files;
 pub mod server;
 pub mod ssh;

@@ -166,6 +166,7 @@ X11Forwarding no
 PermitTunnel no
 PermitUserRC no
 LogLevel VERBOSE
+Subsystem sftp internal-sftp
 PidFile /tmp/fixture-sshd.pid
 """)
         # Docker chooses an unused loopback port; never expose this on the LAN.
@@ -355,7 +356,7 @@ class WebSocket:
 
     Optional TLS uses the fixture's certificate trust store and hostname checks.
     """
-    def __init__(self, port, token, host="fixture", login="fixture", tls_context=None, **query):
+    def __init__(self, port, token, host="fixture", login="fixture", tls_context=None, endpoint="/api/v1/terminal", **query):
         self.sock = socket.create_connection(("127.0.0.1", port), timeout=15)
         if tls_context:
             try:
@@ -369,7 +370,7 @@ class WebSocket:
         key = base64.b64encode(os.urandom(16)).decode()
         params = {"host_id": host, "login": login, "cols": 80, "rows": 24,
                   "term": "xterm-256color", **query}
-        request = ("GET /api/v1/terminal?" + urllib.parse.urlencode(params) + " HTTP/1.1\r\n"
+        request = ("GET " + endpoint + "?" + urllib.parse.urlencode(params) + " HTTP/1.1\r\n"
                    + f"Host: 127.0.0.1:{port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
                    + f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n"
                    + (f"Authorization: Bearer {token}\r\n" if token else "") + "\r\n")
@@ -475,7 +476,7 @@ class WebSocket:
             try:
                 control = self.pump(max(0.01, deadline - time.monotonic()))
             except TimeoutError as error:
-                raise AssertionError(f"terminal timeout awaiting {marker!r}: {self.output!r}") from error
+                raise AssertionError(f"terminal timeout awaiting control {kind!r}: {self.output!r}") from error
             if control and control.get("type") == kind:
                 return control
             if control and control.get("type") == "error":
@@ -651,6 +652,90 @@ def denied_upgrade(port, token, expected, **params):
         raise AssertionError("unauthorized terminal upgraded")
 
 
+
+def sftp_checks(port, token, config, binary, readonly=False):
+    """Real target SFTP over the daemon's WS relay, without a terminal or shell."""
+    def string(value):
+        return struct.pack("!I", len(value)) + value
+    with contextlib.closing(WebSocket(port, token, endpoint="/api/v1/files", **({"sudo_readonly":"true"} if readonly else {}))) as ws:
+        ready = ws.expect_control("ready")
+        check(ready.get("sudo_readonly",False) == readonly, "SFTP ready confirms requested mode")
+        record = wait_audit(config, binary, ready["session_id"], "connected")
+        check(record["sudo_readonly"] == readonly and record["session_kind"] == "sftp", "SFTP audit records login identity and elevation mode")
+        check(record["connected_at"] is not None, "SFTP audit is durable before protocol input")
+        buffered = bytearray()
+        request_id = 0
+        def exchange(payload):
+            wire = struct.pack("!I", len(payload)) + payload
+            # Message boundaries must not become SFTP packet boundaries.
+            for offset in range(0, len(wire), 511):
+                ws.binary(wire[offset:offset+511])
+            while len(buffered) < 4 or len(buffered) < 4 + struct.unpack("!I", buffered[:4])[0]:
+                opcode, data = ws.message(15)
+                if opcode != 2:
+                    raise AssertionError("unexpected SFTP control: " + repr(data))
+                buffered.extend(data)
+            length = struct.unpack("!I", buffered[:4])[0]
+            result = bytes(buffered[4:4+length])
+            del buffered[:4+length]
+            return result
+        def request(kind, payload=b"", expected=101):
+            nonlocal request_id
+            request_id += 1
+            reply = exchange(bytes([kind]) + struct.pack("!I", request_id) + payload)
+            assert reply[0] == expected and struct.unpack("!I",reply[1:5])[0] == request_id, repr(reply)
+            if expected == 101:
+                assert struct.unpack("!I", reply[5:9])[0] == 0, repr(reply)
+            return reply
+        version = exchange(b"\x01" + struct.pack("!I", 3))
+        check(version[0] == 2 and struct.unpack("!I", version[1:5])[0] == 3, "SFTP subsystem negotiates v3 through WS without PTY")
+        if readonly:
+            protected=b"/root/bastion-proof.txt"
+            handle_reply=request(3,string(protected)+struct.pack("!II",1,0),102)
+            handle=handle_reply[9:9+struct.unpack("!I",handle_reply[5:9])[0]]
+            reply=request(5,string(handle)+struct.pack("!QI",0,4096),103)
+            check(b"root-only-fixture" in reply,"Root read-only SFTP reads a root-owned 0600 file without password")
+            request(4,string(handle))
+            for kind,payload in [(3,string(protected)+struct.pack("!II",2,0)),(13,string(protected)),(14,string(b"/root/not-created")+struct.pack("!I",0)),(18,string(protected)+string(b"/root/not-renamed"))]:
+                request_id += 1
+                reply=exchange(bytes([kind])+struct.pack("!I",request_id)+payload)
+                check(reply[0]==101 and struct.unpack("!I",reply[5:9])[0]!=0,"Root read-only SFTP refuses write operation " + str(kind))
+            return
+        # Ordinary SFTP cannot access the same protected file.
+        request_id+=1
+        denied=exchange(bytes([3])+struct.pack("!I",request_id)+string(b"/root/bastion-proof.txt")+struct.pack("!II",1,0))
+        check(denied[0]==101 and struct.unpack("!I",denied[5:9])[0]!=0,"Ordinary SFTP cannot read root-owned file")
+        directory = ("/home/fixture/files-" + secrets.token_hex(6)).encode()
+        request(14, string(directory) + struct.pack("!I",0))
+        path = directory + "/žluťoučký.bin".encode()
+        handle_reply = request(3,string(path) + struct.pack("!II", 2|8|32,0),102)
+        handle = handle_reply[9:9+struct.unpack("!I",handle_reply[5:9])[0]]
+        data = bytes(range(256)) * 1024
+        for offset in range(0,len(data),16384):
+            request(6,string(handle) + struct.pack("!Q",offset) + string(data[offset:offset+16384]))
+        request(4,string(handle))
+        handle_reply = request(3,string(path) + struct.pack("!II",1,0),102)
+        handle = handle_reply[9:9+struct.unpack("!I",handle_reply[5:9])[0]]
+        downloaded = bytearray()
+        while len(downloaded) < len(data):
+            reply=request(5,string(handle) + struct.pack("!QI",len(downloaded),32768),103)
+            downloaded.extend(reply[9:9+struct.unpack("!I",reply[5:9])[0]])
+        request(4,string(handle))
+        check(bytes(downloaded)==data, "SFTP upload/download preserves binary bytes and Unicode paths")
+        handle_reply=request(11,string(directory),102)
+        handle=handle_reply[9:9+struct.unpack("!I",handle_reply[5:9])[0]]
+        entries=request(12,string(handle),104)
+        check("žluťoučký.bin".encode() in entries,"SFTP directory listing")
+        request(4,string(handle))
+        renamed=directory+b"/renamed.bin"
+        request(18,string(path)+string(renamed))
+        request(13,string(renamed))
+        request(15,string(directory))
+        check(True,"SFTP mkdir, rename, delete and rmdir")
+        session_id=ready["session_id"]
+    ended=wait_audit(config,binary,session_id,"disconnected")
+    check(ended["ended_at"] is not None,"SFTP disconnect is durably audited")
+
 def daemon_checks(fixture, binary):
     port = free_port()
     config = fixture.root / "bastion.toml"
@@ -683,6 +768,8 @@ description = "Disposable Docker target"
 allowed_groups = ["infra-admins"]
 logins = ["fixture"]
 principals = ["fixture"]
+sftp_sudo_readonly = true
+sftp_server = "/usr/lib/ssh/sftp-server"
 
 [[hosts]]
 id = "hidden"
@@ -703,6 +790,18 @@ environment = "test"
 allowed_groups = ["infra-admins"]
 logins = ["fixture"]
 principals = ["fixture"]
+
+[[hosts]]
+id = "sudo-denied"
+name = "Sudo denied"
+address = "127.0.0.1"
+port = {fixture.port}
+environment = "test"
+allowed_groups = ["infra-admins"]
+logins = ["fixture"]
+principals = ["fixture"]
+sftp_sudo_readonly = true
+sftp_server = "/usr/bin/false"
 ''')
     run(binary, "--config", config, "check-config")
     env = {"BASTION_SERVICE_KEY": fixture.service_key}
@@ -711,7 +810,7 @@ principals = ["fixture"]
     token = fixture.access_token
     catalog_url = f"http://127.0.0.1:{port}/api/v1/hosts"
     status, catalog = http_json(catalog_url, token)
-    check(status == 200 and {h["id"] for h in catalog["hosts"]} == {"fixture", "wrong-key"},
+    check(status == 200 and {h["id"] for h in catalog["hosts"]} == {"fixture", "wrong-key", "sudo-denied"},
           "daemon catalog filters hidden host")
     for label, supplied, expected in (
         ("missing access token", None, 401),
@@ -729,6 +828,22 @@ principals = ["fixture"]
     denied_upgrade(port, outsider, 403)
     denied_upgrade(port, token, 400, cols=0)
     denied_upgrade(port, token, 403, host="127.0.0.1")
+    denied_upgrade(port, None, 401, endpoint="/api/v1/files")
+    denied_upgrade(port, token, 403, endpoint="/api/v1/files", host="hidden")
+    denied_upgrade(port, token, 403, endpoint="/api/v1/files", login="root")
+    with contextlib.closing(WebSocket(port, token, host="wrong-key", endpoint="/api/v1/files")) as ws:
+        ws.expect_control("error")
+        check(not any(c["type"] == "ready" for c in ws.controls), "SFTP denies changed host key before ready")
+    denied_upgrade(port, token, 403, endpoint="/api/v1/files", host="hidden", sudo_readonly="true")
+    denied_upgrade(port, token, 403, endpoint="/api/v1/files", host="wrong-key", sudo_readonly="true")
+    denied_upgrade(port, token, 403, endpoint="/api/v1/terminal", sudo_readonly="true")
+    with contextlib.closing(WebSocket(port, token, endpoint="/api/v1/files", host="sudo-denied", sudo_readonly="true")) as ws:
+        ready=ws.expect_control("ready")
+        check(ws.expect_control("exit")["status"] != 0, "sudo -n rejects an unapproved command without a password prompt")
+        failed=wait_audit(config,binary,ready["session_id"],"failed")
+        check(failed["sudo_readonly"] and failed["linux_user"]=="fixture", "Failed sudo elevation retains original identity in audit")
+    sftp_checks(port, token, config, binary)
+    sftp_checks(port, token, config, binary, readonly=True)
     with contextlib.closing(WebSocket(port, token, host="wrong-key")) as ws:
         error = ws.expect_control("error")
         check(error["version"] == 1 and not any(c["type"] == "ready" for c in ws.controls),
