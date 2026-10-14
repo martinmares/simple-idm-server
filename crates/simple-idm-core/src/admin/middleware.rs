@@ -30,6 +30,32 @@ pub struct AdminAuth {
 }
 
 impl AdminAuth {
+    /// Call only after validate_token succeeds. Root tokens carry no human identity.
+    pub fn audit_actor(&self, token: &str) -> Option<crate::audit::Actor> {
+        if self
+            .admin_root_token
+            .as_ref()
+            .is_some_and(|root| !root.is_empty() && token == root)
+        {
+            return Some(crate::audit::Actor {
+                root_token: true,
+                ..Default::default()
+            });
+        }
+        let claims = self
+            .jwt_service
+            .verify_access_token(token, &self.oauth_client_ids, &["admin:*"])
+            .ok()?;
+        Some(crate::audit::Actor {
+            subject: Some(claims.sub),
+            client_id: if claims.aud.len() == 1 {
+                claims.aud.into_iter().next()
+            } else {
+                None
+            },
+            root_token: false,
+        })
+    }
     pub fn new(config: &Config, jwt_service: Arc<JwtService>, db_pool: DbPool) -> Self {
         Self {
             admin_root_token: config.admin.root_token.clone(),
@@ -117,7 +143,7 @@ impl AdminAuth {
 pub async fn admin_auth_middleware(
     State(admin_auth): State<AdminAuth>,
     headers: HeaderMap,
-    request: Request,
+    mut request: Request,
     next: Next,
 ) -> Result<Response, Response> {
     // Get Authorization header
@@ -150,6 +176,10 @@ pub async fn admin_auth_middleware(
     let token = &auth_header[7..]; // Skip "Bearer "
 
     if admin_auth.validate_token(token).await {
+        let Some(actor) = admin_auth.audit_actor(token) else {
+            return Err(StatusCode::UNAUTHORIZED.into_response());
+        };
+        request.extensions_mut().insert(actor);
         Ok(next.run(request).await)
     } else {
         Err((

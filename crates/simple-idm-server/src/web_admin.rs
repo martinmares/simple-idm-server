@@ -30,6 +30,7 @@ use tokio::sync::RwLock;
 use url::Url;
 use uuid::Uuid;
 
+mod audit;
 mod bulk;
 mod lists;
 
@@ -478,17 +479,6 @@ struct PageQuery {
     client_id: Option<Uuid>,
     #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     group_id: Option<Uuid>,
-}
-
-#[derive(Debug, Deserialize)]
-struct AuditQuery {
-    message: Option<String>,
-    error: Option<String>,
-    action: Option<String>,
-    resource_type: Option<String>,
-    outcome: Option<String>,
-    q: Option<String>,
-    range: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1009,31 +999,6 @@ struct ClaimMapPatternRow {
     priority: i32,
 }
 
-#[derive(Debug, Clone, FromRow)]
-struct AuditEventRow {
-    created_at: DateTime<Utc>,
-    action: String,
-    resource_type: String,
-    resource_id: Option<Uuid>,
-    outcome: String,
-    actor_sub: Option<String>,
-    actor_client_id: Option<String>,
-    details: Option<serde_json::Value>,
-}
-
-impl AuditEventRow {
-    fn has_actor(&self) -> bool {
-        self.actor_sub.is_some() || self.actor_client_id.is_some()
-    }
-
-    fn details_display(&self) -> String {
-        self.details
-            .as_ref()
-            .and_then(|value| serde_json::to_string_pretty(value).ok())
-            .unwrap_or_else(|| "-".to_string())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AdminSection {
     Dashboard,
@@ -1243,20 +1208,6 @@ struct ClaimsTemplate {
     claim_patterns: Vec<ClaimMapPatternRow>,
 }
 
-#[derive(Template)]
-#[template(path = "admin/audit.html")]
-struct AuditTemplate {
-    sections: Vec<NavItem>,
-    message: Option<String>,
-    error: Option<String>,
-    rows: Vec<AuditEventRow>,
-    filter_action: String,
-    filter_resource_type: String,
-    filter_outcome: String,
-    filter_q: String,
-    filter_range: String,
-}
-
 #[derive(Clone)]
 struct NavItem {
     title: &'static str,
@@ -1317,6 +1268,8 @@ struct DashboardTemplate {
     providers_total: i64,
     claim_maps_total: i64,
     managed_domains: Vec<String>,
+    mfa_pending: i64,
+    failed_auth_24h: i64,
 }
 
 pub fn router(state: WebAdminState) -> Router {
@@ -1334,7 +1287,8 @@ pub fn router(state: WebAdminState) -> Router {
         .route("/admin/ui/static/{*path}", get(admin_static_asset))
         .route("/admin/ui", get(ui_dashboard))
         .route("/admin/ui/", get(ui_dashboard))
-        .route("/admin/ui/audit", get(audit_page))
+        .route("/admin/ui/audit", get(audit::page))
+        .route("/admin/ui/audit/export", get(audit::export))
         .route("/admin/ui/login", get(login_page).post(login_submit))
         .route("/admin/ui/logout", post(logout_submit))
         .route("/admin/ui/users", get(users_page))
@@ -2897,6 +2851,11 @@ async fn ui_dashboard(
     .await
     .unwrap_or_default();
 
+    let mfa_pending = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM users u WHERE u.deleted_at IS NULL AND u.is_active AND EXISTS (SELECT 1 FROM user_authenticators a WHERE a.user_id=u.id AND a.kind='totp' AND a.status='pending') AND NOT EXISTS (SELECT 1 FROM user_authenticators a WHERE a.user_id=u.id AND a.kind='totp' AND a.status='active')")
+        .fetch_one(&state.db_pool).await.unwrap_or(0);
+    let failed_auth_24h = sqlx::query_scalar::<_, i64>("SELECT count(*) FROM audit_events WHERE created_at >= NOW() - INTERVAL '24 hours' AND created_at <= NOW() AND outcome='failure' AND action LIKE 'auth.%'")
+        .fetch_one(&state.db_pool).await.unwrap_or(0);
+
     render_template(DashboardTemplate {
         sections: nav_items(AdminSection::Dashboard),
         message: query.message,
@@ -2911,84 +2870,8 @@ async fn ui_dashboard(
         providers_total,
         claim_maps_total,
         managed_domains,
-    })
-}
-
-async fn audit_page(
-    State(state): State<WebAdminState>,
-    headers: HeaderMap,
-    Query(query): Query<AuditQuery>,
-) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
-
-    let filter_action = query.action.unwrap_or_default();
-    let filter_resource_type = query.resource_type.unwrap_or_default();
-    let filter_outcome = match query.outcome.unwrap_or_default().as_str() {
-        "success" => "success".to_string(),
-        "failure" => "failure".to_string(),
-        _ => String::new(),
-    };
-    let filter_q = query.q.unwrap_or_default();
-    let filter_range = match query.range.unwrap_or_else(|| "all".to_string()).as_str() {
-        "1h" => "1h".to_string(),
-        "24h" => "24h".to_string(),
-        "7d" => "7d".to_string(),
-        "30d" => "30d".to_string(),
-        "all" => "all".to_string(),
-        _ => "24h".to_string(),
-    };
-
-    let rows = match sqlx::query_as::<_, AuditEventRow>(
-        r#"
-        SELECT created_at, action, resource_type, resource_id, outcome, actor_sub, actor_client_id, details
-        FROM audit_events
-        WHERE ($1::text = '' OR action ILIKE '%' || $1 || '%')
-          AND ($2::text = '' OR resource_type ILIKE '%' || $2 || '%')
-          AND ($3::text = '' OR outcome = $3)
-          AND (
-            $4::text = '' OR
-            COALESCE(actor_sub, '') ILIKE '%' || $4 || '%' OR
-            COALESCE(actor_client_id, '') ILIKE '%' || $4 || '%' OR
-            COALESCE(details::text, '') ILIKE '%' || $4 || '%'
-          )
-          AND (
-            $5::text = 'all' OR
-            ($5::text = '1h' AND created_at >= NOW() - INTERVAL '1 hour') OR
-            ($5::text = '24h' AND created_at >= NOW() - INTERVAL '24 hours') OR
-            ($5::text = '7d' AND created_at >= NOW() - INTERVAL '7 days') OR
-            ($5::text = '30d' AND created_at >= NOW() - INTERVAL '30 days')
-          )
-        ORDER BY created_at DESC
-        LIMIT 200
-        "#,
-    )
-    .bind(filter_action.trim())
-    .bind(filter_resource_type.trim())
-    .bind(filter_outcome.trim())
-    .bind(filter_q.trim())
-    .bind(filter_range.trim())
-    .fetch_all(&state.db_pool)
-    .await
-    {
-        Ok(v) => v,
-        Err(e) => {
-            return redirect_with("/admin/ui/audit", "error", &format!("DB error: {e}"))
-                .into_response();
-        }
-    };
-
-    render_template(AuditTemplate {
-        sections: nav_items(AdminSection::Audit),
-        message: query.message,
-        error: query.error,
-        rows,
-        filter_action,
-        filter_resource_type,
-        filter_outcome,
-        filter_q,
-        filter_range,
+        mfa_pending,
+        failed_auth_24h,
     })
 }
 
@@ -5193,15 +5076,20 @@ async fn users_mfa_reset(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
+    let token = match require_admin_token(&state, &headers).await {
+        Ok(token) => token,
+        Err(redir) => return redir.into_response(),
+    };
+    let Some(audit_actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
 
     let return_path = users_return_path_from_referer(&headers);
     match simple_idm_core::mfa::admin_reset_user_mfa(&state.db_pool, id).await {
         Ok(true) => {
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "auth.mfa.admin_reset",
                 "user",
                 Some(id),
@@ -5225,8 +5113,9 @@ async fn users_mfa_reset(
         )
         .into_response(),
         Err(err) => {
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "auth.mfa.admin_reset",
                 "user",
                 Some(id),
@@ -5245,15 +5134,20 @@ async fn users_passkeys_reset(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
+    let token = match require_admin_token(&state, &headers).await {
+        Ok(token) => token,
+        Err(redir) => return redir.into_response(),
+    };
+    let Some(audit_actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
 
     let return_path = users_return_path_from_referer(&headers);
     match simple_idm_core::passkeys::admin_reset_user_passkeys(&state.db_pool, id).await {
         Ok(true) => {
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "auth.passkey.admin_reset",
                 "user",
                 Some(id),
@@ -5273,8 +5167,9 @@ async fn users_passkeys_reset(
         }
         Err(err) => {
             tracing::warn!(user_id = %id, "Passkey admin reset failed: {err}");
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "auth.passkey.admin_reset",
                 "user",
                 Some(id),
@@ -5380,9 +5275,13 @@ async fn users_ad_mappings_apply(
     Path(id): Path<Uuid>,
     Form(form): Form<UserAdMappingsApplyForm>,
 ) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
+    let token = match require_admin_token(&state, &headers).await {
+        Ok(token) => token,
+        Err(redir) => return redir.into_response(),
+    };
+    let Some(audit_actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let return_path = users_return_path_from_referer(&headers);
 
     let user = match sqlx::query_as::<_, User>(
@@ -5512,8 +5411,9 @@ async fn users_ad_mappings_apply(
     if let Err(err) =
         oauth2::sync_ldap_roles_force(state.oauth_state.as_ref(), &user, &user.email).await
     {
-        simple_idm_core::audit::emit_event(
+        simple_idm_core::audit::emit_event_as(
             &state.db_pool,
+            &audit_actor,
             "ad.role_mapping.apply",
             "external_role_mappings",
             Some(user.id),
@@ -5529,8 +5429,9 @@ async fn users_ad_mappings_apply(
         .into_response();
     }
 
-    simple_idm_core::audit::emit_event(
+    simple_idm_core::audit::emit_event_as(
         &state.db_pool,
+        &audit_actor,
         "ad.role_mapping.apply",
         "external_role_mappings",
         Some(user.id),
@@ -5552,9 +5453,13 @@ async fn users_ad_onboarding_link(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
+    let token = match require_admin_token(&state, &headers).await {
+        Ok(token) => token,
+        Err(redir) => return redir.into_response(),
+    };
+    let Some(audit_actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
 
     let return_path = users_return_path_from_referer(&headers);
     let user =
@@ -5620,8 +5525,9 @@ async fn users_ad_onboarding_link(
                 "AD onboarding link generated ({}h)",
                 state.ad_onboarding_token_ttl_seconds / 3600
             );
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "ad.onboarding.link.create",
                 "ad_onboarding",
                 Some(id),
@@ -5639,8 +5545,9 @@ async fn users_ad_onboarding_link(
             .into_response()
         }
         Err(e) => {
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "ad.onboarding.link.create",
                 "ad_onboarding",
                 Some(id),
@@ -5664,9 +5571,13 @@ async fn users_federated_invitation_link(
     Path(id): Path<Uuid>,
     Form(form): Form<FederatedInvitationForm>,
 ) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
+    let token = match require_admin_token(&state, &headers).await {
+        Ok(token) => token,
+        Err(redir) => return redir.into_response(),
+    };
+    let Some(audit_actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
 
     let return_path = users_return_path_from_referer(&headers);
     let user = match sqlx::query_as::<_, User>(
@@ -5764,8 +5675,9 @@ async fn users_federated_invitation_link(
                 "Federated invitation generated via {} ({})",
                 provider_slug, provider_type
             );
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "federated.invitation.create",
                 "federated_invitation_tokens",
                 Some(id),
@@ -5800,9 +5712,13 @@ async fn users_federated_approve(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
+    let token = match require_admin_token(&state, &headers).await {
+        Ok(token) => token,
+        Err(redir) => return redir.into_response(),
+    };
+    let Some(audit_actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
 
     let return_path = users_return_path_from_referer(&headers);
     let result = sqlx::query(
@@ -5823,8 +5739,9 @@ async fn users_federated_approve(
 
     match result {
         Ok(done) if done.rows_affected() > 0 => {
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "federated.identity.approve",
                 "user_identities",
                 Some(id),
@@ -5847,9 +5764,13 @@ async fn users_federated_unlink(
     headers: HeaderMap,
     Path(id): Path<Uuid>,
 ) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
+    let token = match require_admin_token(&state, &headers).await {
+        Ok(token) => token,
+        Err(redir) => return redir.into_response(),
+    };
+    let Some(audit_actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
 
     let return_path = users_return_path_from_referer(&headers);
     let result = sqlx::query(
@@ -5867,8 +5788,9 @@ async fn users_federated_unlink(
 
     match result {
         Ok(done) if done.rows_affected() > 0 => {
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "federated.identity.unlink",
                 "user_identities",
                 Some(id),
@@ -6106,9 +6028,13 @@ async fn groups_members(
     Path(id): Path<Uuid>,
     Form(fields): Form<Vec<(String, String)>>,
 ) -> Response {
-    if let Err(redir) = require_admin_token(&state, &headers).await {
-        return redir.into_response();
-    }
+    let token = match require_admin_token(&state, &headers).await {
+        Ok(token) => token,
+        Err(redir) => return redir.into_response(),
+    };
+    let Some(audit_actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let return_path = q_return_path_from_referer(&headers, "/admin/ui/groups", "/admin/ui/groups");
     let members: Result<Vec<_>, _> = fields
         .iter()
@@ -6123,8 +6049,9 @@ async fn groups_members(
     };
     match simple_idm_core::db::groups::set_members(&state.db_pool, id, &members).await {
         Ok(()) => {
-            simple_idm_core::audit::emit_event(
+            simple_idm_core::audit::emit_event_as(
                 &state.db_pool,
+                &audit_actor,
                 "group.members.update",
                 "group",
                 Some(id),

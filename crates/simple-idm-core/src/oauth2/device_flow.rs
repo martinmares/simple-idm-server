@@ -399,8 +399,13 @@ pub async fn handle_device_verify(
             );
         }
     }
-    crate::audit::emit_event(
+    crate::audit::emit_event_as(
         &state.db_pool,
+        &crate::audit::Actor {
+            subject: Some(session.user_id.to_string()),
+            client_id: Some(client.client_id.clone()),
+            root_token: false,
+        },
         "auth.device.approve",
         "oauth_client",
         Some(client.id),

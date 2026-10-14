@@ -408,8 +408,13 @@ pub async fn confirm(
         .bind(session.id)
         .execute(&state.db_pool)
         .await;
-    audit::emit_event(
+    audit::emit_event_as(
         &state.db_pool,
+        &audit::Actor {
+            subject: Some(user.id.to_string()),
+            client_id: None,
+            root_token: false,
+        },
         "auth.mfa.enroll",
         "user",
         Some(user.id),

@@ -1,6 +1,9 @@
 {% extends "admin/base.html" %}
 {% block content %}
 <div class="row g-3">
+  <div class="col-md-6"><a class="card card-body text-reset text-decoration-none" href="/admin/ui/users?status=active&amp;mfa=pending"><div class="text-secondary">MFA enrollment pending</div><div class="h2 mb-0">{{ mfa_pending }}</div></a></div>
+  <div class="col-md-6"><a class="card card-body text-reset text-decoration-none" href="/admin/ui/audit?range=24h&amp;action=auth.&amp;outcome=failure"><div class="text-secondary">Failed authentication events · last 24 hours</div><div class="h2 mb-0">{{ failed_auth_24h }}</div></a></div>
+
   <div class="col-12">
     <div class="card">
       <div class="card-body">

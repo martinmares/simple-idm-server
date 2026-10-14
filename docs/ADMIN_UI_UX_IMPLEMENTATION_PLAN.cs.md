@@ -1,6 +1,6 @@
 # Sjednocení admin UI Simple IDM
 
-Stav: fáze 1 hotová (0.16.0); fáze 2 hotová (0.16.3); fáze 3 zatím nezačala. Schválený návrh z diskuze 2026-10-14.
+Stav: fáze 1 hotová (0.16.0); fáze 2 hotová (0.16.3); fáze 3 Audit a dashboard hotové (0.16.4). Schválený návrh z diskuze 2026-10-14.
 
 ## Kontrakt
 
@@ -46,16 +46,16 @@ Stav: fáze 1 hotová (0.16.0); fáze 2 hotová (0.16.3); fáze 3 zatím nezača
 
 ## Fáze 3 — audit a užitečný dashboard
 
-- [ ] Audit: od/do a timezone, actor, target, client, action, outcome, text.
-- [ ] Nahradit pevné LIMIT 200 stabilním stránkováním (timestamp + event ID).
-- [ ] Sjednotit auditní kontext v emiterech; chybějící historical actor přiznat.
-- [ ] Čitelný popis události, samostatná technická data v detailu.
-- [ ] Souhrny podle CELÉHO filtrovaného rozsahu, nikoli aktuální stránky.
-- [ ] CSV/JSON export stejného filtrovaného rozsahu, explicitní rozsah/limity.
-- [ ] Exporty ošetřit pro tabulkové aplikace a nezahrnovat tokeny/hesla.
-- [ ] Dashboard: MFA k dokončení a chybná přihlášení s odkazy na filtr.
-- [ ] Tenants/domains: stručný single-tenant pohled, jednoduché hledání domén dle potřeby.
-- [ ] Integrační ověření filtrů, auditních aktérů, stránkování, exportu a dávek.
+- [x] Audit: od/do a timezone, actor, target, client, action, outcome, text.
+- [x] Nahradit pevné LIMIT 200 stabilním stránkováním (timestamp + event ID).
+- [x] Sjednotit auditní kontext v emiterech; chybějící historical actor přiznat.
+- [x] Čitelný popis události, samostatná technická data v detailu.
+- [x] Souhrny podle CELÉHO filtrovaného rozsahu, nikoli aktuální stránky.
+- [x] CSV/JSON export stejného filtrovaného rozsahu, explicitní rozsah/limity.
+- [x] Exporty ošetřit pro tabulkové aplikace a nezahrnovat tokeny/hesla.
+- [x] Dashboard: MFA k dokončení a chybná přihlášení s odkazy na filtr.
+- [x] Tenants/domains: ponechán stručný single-tenant pohled; další filtr pro jednotky domén není potřeba.
+- [x] Integrační ověření filtrů, auditních aktérů, stránkování, exportu a dávek.
 
 ## Ověřování a vydání
 
@@ -208,4 +208,51 @@ Zbývající otevřené body fáze 2 a celá fáze 3 nejsou součástí tohoto p
   error/retry/success, HTTP chybu, claim CSV a povinnou hodnotu, potvrzení group
   typu, odznačení off-page výběru a chybu při načtení výběru.
 
-Fáze 3 (Audit, exporty, souhrny a dashboard) zůstává neimplementovaná.
+Fáze 3 dokončena níže jako 0.16.4.
+
+
+## Fáze 3 — Audit a dashboard (0.16.4)
+
+- Audit má společnou hlavičku/filtr, výchozí posledních 24 hodin, vlastní od/do
+  s explicitním UTC. RFC3339 s offsetem backend normalizuje do UTC.
+- Samostatné podmínky action, target type/ID, actor subject/client a outcome;
+  textové hledání je case insensitive a %, _ i zpětné lomítko jsou literály.
+  URL nahradila starou skrytou cookie s filtry.
+- 50 událostí na stránku, Older/Newer podle (created_at, id), nový index 053.
+  Odkazy zachovají přesné časové meze. Jedna stránka čte souhrn, pořadí akcí
+  a události ve stejné read-only repeatable-read transakci. Časové ukotvení
+  mezi HTTP požadavky není archivní snapshot databáze: historický import či
+  pozdější commit transakce s dřívějším created_at může rozsah doplnit.
+- Souhrny success/failure/unknown actor a pět nejčastějších akcí platí pro
+  celý filtr, nikoli právě viditelných 50 řádků.
+- CSV/JSON export téhož přesného času a filtru; všechny výsledky do 10 000.
+  Větší výsledek vrací 422 a nevytvoří částečný soubor. Exporty vyžadují
+  platnou admin session a mají Cache-Control: no-store.
+- Exportovaná pole: ID/čas/action/target type/ID/outcome/actor subject/client/kind.
+  Volný details JSON se neexportuje. CSV neutralizuje vzorce včetně prefixu
+  whitespace/control; JSON má metadata rozsahu a použitých filtrů.
+- Detail události odděluje identitu a technická data. JSON detail v UI rediguje
+  klíče pro hesla, tokeny, secrets, cookies, private keys a recovery codes;
+  nejde o obecnou garanci pro libovolný tajný text uložený pod jiným klíčem.
+- Nové auditované admin API operace získají Actor z ověřeného middleware,
+  stávající auditované UI operace z ověřené session; bulk používá stejný
+  překlad admin tokenu. Root token nemá vymyšlený subjekt ani klienta.
+- Úspěšné password/federated/MFA/Passkey přihlášení, token issue/refresh,
+  device approval a auditované self-service MFA/Passkey změny zapisují
+  ověřený subjekt. Klient je kanonický client_id; UUID interního klienta se
+  nemíchá s client_id. Neúspěšné pokusy bez ověřené identity a historické
+  záznamy zůstávají Unknown actor. Neprovádí se historický backfill.
+- Toto není úplný přepis pokrytí auditování: přidávání událostí do operací,
+  které dosud emit_event nevolají, zůstává samostatná navazující práce.
+- Dashboard odkazuje na aktivní uživatele s pending MFA a na filtrované
+  neúspěšné auth.* události za 24 hodin (nejde o počet unikátních přihlášení).
+
+Ověření:
+- 14 server testů včetně izolovaného PostgreSQL: rovné timestampy, více než
+  původních 200 událostí, obousměrné cursor paging, úplné souhrny, doslovné
+  filtry, stabilní časová mez po novém insertu, CSV/JSON a limit exportu;
+  admin root/OAuth aktér přes skutečný middleware a odmítnutí neplatného tokenu.
+- 88 core testů a všech 12 databázových integračních scénářů prošlo.
+- Playwright scénář verify-admin-audit.js: UTC/presety, more filters,
+  souhrn nezávislý na řádcích, neznámý/root aktér, čas exportu/cursoru,
+  modal/redakce dat a desktop/mobilní zobrazení. Artefakty output/playwright.

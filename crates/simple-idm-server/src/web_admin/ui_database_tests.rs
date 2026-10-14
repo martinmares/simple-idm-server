@@ -5,7 +5,7 @@ use rsa::{
     rand_core::OsRng,
 };
 
-async fn state(pool: DbPool) -> WebAdminState {
+pub(super) async fn state(pool: DbPool) -> WebAdminState {
     let dir = tempfile::tempdir().unwrap();
     let key = RsaPrivateKey::new(&mut OsRng, 2048).unwrap();
     let private = dir.path().join("private.pem");
@@ -81,6 +81,120 @@ async fn state(pool: DbPool) -> WebAdminState {
             ),
         )]))),
     }
+}
+
+#[tokio::test]
+#[ignore = "requires disposable ADMIN_UI_TEST_DATABASE_URL"]
+async fn authenticated_admin_events_record_actor_separately_from_target() {
+    use axum::{body::Body, http::Request, middleware};
+    use tower::Service;
+    let pool = DbPool::connect(&std::env::var("ADMIN_UI_TEST_DATABASE_URL").unwrap())
+        .await
+        .unwrap();
+    simple_idm_core::db::run_migrations(&pool).await.unwrap();
+    let mut state = state(pool.clone()).await;
+    let client_id = format!("audit-client-{}", Uuid::new_v4());
+    let client_uuid = Uuid::new_v4();
+    sqlx::query("INSERT INTO oauth_clients (id,client_id,client_secret_hash,name,redirect_uris,grant_types,scope,is_public,is_active) VALUES ($1,$2,'unused','Audit test',ARRAY[]::text[],ARRAY['client_credentials'],'admin:*',false,true)")
+        .bind(client_uuid).bind(&client_id).execute(&pool).await.unwrap();
+    state.admin_auth.oauth_client_ids = vec![client_id.clone()];
+    let token = state
+        .admin_auth
+        .jwt_service
+        .create_access_token(
+            client_uuid,
+            client_id.clone(),
+            None,
+            None,
+            Some("admin:*".into()),
+            vec![],
+            HashMap::new(),
+            vec![],
+            None,
+            600,
+        )
+        .unwrap();
+    let mut app = Router::new()
+        .route(
+            "/groups",
+            post(simple_idm_core::admin::handlers::create_group),
+        )
+        .layer(middleware::from_fn_with_state(
+            state.admin_auth.clone(),
+            simple_idm_core::admin::middleware::admin_auth_middleware,
+        ))
+        .with_state(pool.clone());
+    let prefix = format!("actor-test-{}", Uuid::new_v4());
+    let mut targets = vec![];
+    for (credential, root) in [(token.as_str(), false), ("test-only-root", true)] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/groups")
+            .header(header::AUTHORIZATION, format!("Bearer {credential}"))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                json!({"name":format!("{prefix}-{root}"),"is_virtual":false}).to_string(),
+            ))
+            .unwrap();
+        let response = app.call(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let response: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1_000_000)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let target = Uuid::parse_str(response["id"].as_str().unwrap()).unwrap();
+        targets.push(target);
+        let event = sqlx::query("SELECT actor_sub,actor_client_id,details FROM audit_events WHERE resource_id=$1 AND action='admin.group.create'").bind(target).fetch_one(&pool).await.unwrap();
+        if root {
+            assert_eq!(event.get::<Option<String>, _>("actor_sub"), None);
+            assert_eq!(event.get::<Option<String>, _>("actor_client_id"), None);
+            assert_eq!(
+                event.get::<serde_json::Value, _>("details")["actor_kind"],
+                "root_token"
+            );
+        } else {
+            assert_eq!(event.get::<String, _>("actor_sub"), client_uuid.to_string());
+            assert_eq!(event.get::<String, _>("actor_client_id"), client_id);
+            assert_ne!(client_uuid, target);
+        }
+    }
+    let request = Request::builder()
+        .method("POST")
+        .uri("/groups")
+        .header(header::AUTHORIZATION, "Bearer invalid")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"name":format!("{prefix}-denied")}).to_string(),
+        ))
+        .unwrap();
+    assert_eq!(
+        app.call(request).await.unwrap().status(),
+        StatusCode::UNAUTHORIZED
+    );
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM groups WHERE name=$1)")
+            .bind(format!("{prefix}-denied"))
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    );
+    sqlx::query("DELETE FROM groups WHERE id=ANY($1)")
+        .bind(&targets)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM oauth_clients WHERE id=$1")
+        .bind(client_uuid)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM audit_events WHERE resource_id=ANY($1)")
+        .bind(&targets)
+        .execute(&pool)
+        .await
+        .unwrap();
 }
 
 async fn users_html(state: &WebAdminState, query: &str) -> String {

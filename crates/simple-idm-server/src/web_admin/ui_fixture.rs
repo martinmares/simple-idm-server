@@ -41,6 +41,7 @@ fn group(id: u128, name: &str, virtual_group: bool) -> GroupRow {
 }
 fn pages(query: &PageQuery) -> HashMap<String, String> {
     let mut pages = HashMap::new();
+    pages.insert("audit".into(), audit::fixture());
     pages.insert(
         "users".into(),
         UsersTemplate {

@@ -131,7 +131,7 @@ impl ListPagination {
     }
 }
 
-fn literal_pattern(word: &str) -> String {
+pub(super) fn literal_pattern(word: &str) -> String {
     format!(
         "%{}%",
         word.to_lowercase()

@@ -273,6 +273,12 @@ pub async fn login_finish(
             );
         }
     };
+    let audit_client_id =
+        sqlx::query_scalar::<_, String>("SELECT client_id FROM oauth_clients WHERE id=$1")
+            .bind(pending.client_id)
+            .fetch_optional(&state.db_pool)
+            .await
+            .unwrap_or(None);
     let user_id = pending.user_id;
     let oidc = OidcPending {
         credential_version: pending.credential_version,
@@ -302,8 +308,13 @@ pub async fn login_finish(
             );
         }
     };
-    audit::emit_event(
+    audit::emit_event_as(
         &state.db_pool,
+        &audit::Actor {
+            subject: Some(user_id.to_string()),
+            client_id: audit_client_id,
+            root_token: false,
+        },
         "auth.passkey.login",
         "user",
         Some(user_id),
@@ -489,8 +500,13 @@ pub async fn registration_finish(
         .await
     {
         Ok(id) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &state.db_pool,
+                &audit::Actor {
+                    subject: Some(user.id.to_string()),
+                    client_id: None,
+                    root_token: false,
+                },
                 "auth.passkey.register",
                 "user",
                 Some(user.id),
@@ -502,8 +518,13 @@ pub async fn registration_finish(
         }
         Err(err) => {
             tracing::warn!(user_id = %user.id, "Passkey registration failed: {err}");
-            audit::emit_event(
+            audit::emit_event_as(
                 &state.db_pool,
+                &audit::Actor {
+                    subject: Some(user.id.to_string()),
+                    client_id: None,
+                    root_token: false,
+                },
                 "auth.passkey.register",
                 "user",
                 Some(user.id),
@@ -536,8 +557,13 @@ pub async fn rename(
         .await
     {
         Ok(true) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &state.db_pool,
+                &audit::Actor {
+                    subject: Some(user.id.to_string()),
+                    client_id: None,
+                    root_token: false,
+                },
                 "auth.passkey.rename",
                 "user",
                 Some(user.id),
@@ -572,8 +598,13 @@ pub async fn revoke(
         .await
     {
         Ok(true) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &state.db_pool,
+                &audit::Actor {
+                    subject: Some(user.id.to_string()),
+                    client_id: None,
+                    root_token: false,
+                },
                 "auth.passkey.revoke",
                 "user",
                 Some(user.id),

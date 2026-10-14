@@ -1191,8 +1191,13 @@ pub async fn handle_federated_callback(
     );
     let federated_cookie = build_federated_csrf_cookie(None, secure);
 
-    audit::emit_event(
+    audit::emit_event_as(
         &state.db_pool,
+        &audit::Actor {
+            subject: Some(user.id.to_string()),
+            client_id: Some(payload.client_id.clone()),
+            root_token: false,
+        },
         "auth.login.federated",
         "session",
         Some(user.id),
@@ -1543,8 +1548,9 @@ pub async fn handle_login(
                 .into_response();
             }
         };
-    audit::emit_event(
+    audit::emit_event_as(
         &state.db_pool,
+        &audit::Actor { subject: Some(user.id.to_string()), client_id: Some(client.client_id.clone()), root_token: false },
         "auth.login",
         "session",
         Some(user.id),
@@ -1773,6 +1779,12 @@ pub async fn handle_mfa(
             .into_response();
         }
     };
+    let audit_client_id =
+        sqlx::query_scalar::<_, String>("SELECT client_id FROM oauth_clients WHERE id=$1")
+            .bind(transaction.client_id)
+            .fetch_optional(&state.db_pool)
+            .await
+            .unwrap_or(None);
     let pending = pending_from_mfa_transaction(transaction);
     let completion = match complete_user_authorization(
         state.as_ref(),
@@ -1792,8 +1804,13 @@ pub async fn handle_mfa(
             .into_response();
         }
     };
-    audit::emit_event(
+    audit::emit_event_as(
         &state.db_pool,
+        &audit::Actor {
+            subject: Some(user.id.to_string()),
+            client_id: audit_client_id,
+            root_token: false,
+        },
         if recovery_codes.is_some() {
             "auth.mfa.enroll"
         } else {
@@ -2763,8 +2780,13 @@ async fn handle_authorization_code_token(state: Arc<OAuth2State>, req: TokenRequ
         scope: Some(auth_code.scope),
     };
 
-    audit::emit_event(
+    audit::emit_event_as(
         &state.db_pool,
+        &audit::Actor {
+            subject: Some(user.id.to_string()),
+            client_id: Some(client.client_id.clone()),
+            root_token: false,
+        },
         "oauth.token.issue",
         "token",
         Some(user.id),
@@ -3149,8 +3171,13 @@ async fn handle_refresh_token(state: Arc<OAuth2State>, req: TokenRequest) -> Res
         scope: Some(refresh_token.scope),
     };
 
-    audit::emit_event(
+    audit::emit_event_as(
         &state.db_pool,
+        &audit::Actor {
+            subject: Some(user.id.to_string()),
+            client_id: Some(client.client_id.clone()),
+            root_token: false,
+        },
         "oauth.token.refresh",
         "token",
         Some(user.id),

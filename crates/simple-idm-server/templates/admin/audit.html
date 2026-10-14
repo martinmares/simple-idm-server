@@ -1,221 +1,74 @@
 {% extends "admin/base.html" %}
 {% block content %}
 <div class="card mb-3">
-  <div class="card-header">
-    <h3 class="card-title mb-0">Audit log</h3>
+  <div class="card-header admin-header">
+    <div><h3 class="card-title mb-0">Audit</h3><div class="text-secondary small">Authentication and administrative activity · UTC</div></div>
+    <div class="btn-list"><a class="btn btn-outline-primary" href="{{ csv_url }}">Export CSV</a><a class="btn btn-outline-primary" href="{{ json_url }}">Export JSON</a></div>
   </div>
   <div class="card-body">
-    <form method="get" action="/admin/ui/audit" class="row g-2 align-items-end" id="audit-filter-form">
-      <div class="col-md-2">
-        <label class="form-label">Range</label>
-        <select class="form-select" name="range">
-          <option value="1h" {% if filter_range == "1h" %}selected{% endif %}>last hour</option>
-          <option value="24h" {% if filter_range == "24h" %}selected{% endif %}>last 24h</option>
-          <option value="7d" {% if filter_range == "7d" %}selected{% endif %}>last 7 days</option>
-          <option value="30d" {% if filter_range == "30d" %}selected{% endif %}>last 30 days</option>
-          <option value="all" {% if filter_range == "all" %}selected{% endif %}>all</option>
-        </select>
+    <form method="get" action="/admin/ui/audit" id="audit-filter-form">
+      <div class="admin-filter">
+        <div class="admin-search"><label class="form-label" for="audit-q">Search</label><input id="audit-q" class="form-control" name="q" value="{{ filters.q }}" placeholder="Action, target, actor or event details"></div>
+        <div class="admin-field"><label class="form-label" for="audit-range">Time range</label><select id="audit-range" class="form-select" name="range">
+          <option value="1h" {% if filters.range == "1h" %}selected{% endif %}>Last hour</option><option value="24h" {% if filters.range == "24h" %}selected{% endif %}>Last 24 hours</option><option value="7d" {% if filters.range == "7d" %}selected{% endif %}>Last 7 days</option><option value="30d" {% if filters.range == "30d" %}selected{% endif %}>Last 30 days</option><option value="all" {% if filters.range == "all" %}selected{% endif %}>All history</option><option value="custom" {% if filters.range == "custom" %}selected{% endif %}>Custom (UTC)</option>
+        </select></div>
+        <div class="admin-field"><label class="form-label" for="audit-outcome">Outcome</label><select id="audit-outcome" class="form-select" name="outcome"><option value="">All outcomes</option><option value="success" {% if filters.outcome == "success" %}selected{% endif %}>Success</option><option value="failure" {% if filters.outcome == "failure" %}selected{% endif %}>Failure</option></select></div>
+        <div class="btn-list"><button type="submit" class="btn btn-primary">Apply</button><a class="btn btn-outline-secondary" href="/admin/ui/audit?range=24h">Reset</a></div>
       </div>
-      <div class="col-md-2">
-        <label class="form-label">Action</label>
-        <input class="form-control" name="action" value="{{ filter_action }}" placeholder="login, token, ssh...">
+      <div id="audit-custom-range" class="row g-2 mt-1" {% if filters.range != "custom" %}hidden{% endif %}>
+        <div class="col-md-4"><label class="form-label" for="audit-from">From (UTC, inclusive)</label><input id="audit-from" type="datetime-local" step="any" class="form-control" name="from" value="{{ from_input }}" {% if filters.range != "custom" %}disabled{% endif %}></div>
+        <div class="col-md-4"><label class="form-label" for="audit-to">To (UTC, inclusive)</label><input id="audit-to" type="datetime-local" step="any" class="form-control" name="to" value="{{ to_input }}" {% if filters.range != "custom" %}disabled{% endif %}></div>
       </div>
-      <div class="col-md-2">
-        <label class="form-label">Resource type</label>
-        <input class="form-control" name="resource_type" value="{{ filter_resource_type }}" placeholder="user, client...">
-      </div>
-      <div class="col-md-2">
-        <label class="form-label">Outcome</label>
-        <select class="form-select" name="outcome">
-          <option value="" {% if filter_outcome == "" %}selected{% endif %}>all</option>
-          <option value="success" {% if filter_outcome == "success" %}selected{% endif %}>success</option>
-          <option value="failure" {% if filter_outcome == "failure" %}selected{% endif %}>failure</option>
-        </select>
-      </div>
-      <div class="col-md-3">
-        <label class="form-label">Text</label>
-        <input class="form-control" name="q" value="{{ filter_q }}" placeholder="actor, client, details">
-      </div>
-      <div class="col-md-1">
-        <button class="btn btn-primary w-100" type="submit">Filter</button>
-      </div>
-      <div class="col-12">
-        <button class="btn btn-outline-secondary btn-sm" type="button" id="audit-filter-reset">Reset filters</button>
-      </div>
+      <details class="mt-3" {% if !filters.action.is_empty() || !filters.resource_type.is_empty() || !filters.actor.is_empty() || !filters.client.is_empty() || !filters.target.is_empty() %}open{% endif %}><summary>More filters</summary>
+        <div class="row g-2 mt-1">
+          <div class="col-md-3"><label class="form-label" for="audit-action">Action</label><input id="audit-action" class="form-control" name="action" value="{{ filters.action }}" placeholder="auth.login, user.archive…"></div>
+          <div class="col-md-2"><label class="form-label" for="audit-resource">Target type</label><input id="audit-resource" class="form-control" name="resource_type" value="{{ filters.resource_type }}" placeholder="user, client…"></div>
+          <div class="col-md-3"><label class="form-label" for="audit-target">Target ID</label><input id="audit-target" class="form-control" name="target" value="{{ filters.target }}" placeholder="Target UUID"></div>
+          <div class="col-md-2"><label class="form-label" for="audit-actor">Actor subject</label><input id="audit-actor" class="form-control" name="actor" value="{{ filters.actor }}" placeholder="Recorded subject"></div>
+          <div class="col-md-2"><label class="form-label" for="audit-client">Actor client</label><input id="audit-client" class="form-control" name="client" value="{{ filters.client }}" placeholder="Recorded client ID"></div>
+        </div>
+      </details>
     </form>
   </div>
 </div>
-
+<div class="row g-3 mb-3" id="audit-summary">
+  <div class="col-6 col-md-3"><div class="card card-body"><div class="text-secondary">Events</div><div class="h2 mb-0" data-audit-total="{{ summary.total }}">{{ summary.total }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="card card-body"><div class="text-secondary">Success</div><div class="h2 text-green mb-0">{{ summary.succeeded }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="card card-body"><div class="text-secondary">Failure</div><div class="h2 text-red mb-0">{{ summary.failed }}</div></div></div>
+  <div class="col-6 col-md-3"><div class="card card-body"><div class="text-secondary">Actor not recorded</div><div class="h2 mb-0">{{ summary.unknown }}</div></div></div>
+</div>
+<div class="small text-secondary mb-2">Summary covers all filtered events · {{ range_label }}</div>
+{% if !actions.is_empty() %}<div class="d-flex flex-wrap gap-2 mb-3" aria-label="Most frequent actions">{% for a in actions %}<span class="badge bg-secondary-lt">{{ a.action }} · {{ a.count }}</span>{% endfor %}</div>{% endif %}
 <div class="card">
-  <div class="table-responsive">
-    <table class="table table-vcenter card-table">
-      <thead>
-        <tr>
-          <th>Time</th>
-          <th>Action</th>
-          <th>Resource</th>
-          <th>Outcome</th>
-          <th>Actor</th>
-          <th>Details</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for r in rows %}
-        <tr>
-          <td class="text-nowrap">{{ r.created_at }}</td>
-          <td><code>{{ r.action }}</code></td>
-          <td>
-            <div>{{ r.resource_type }}</div>
-            {% if let Some(resource_id) = r.resource_id %}
-            <div class="small text-secondary"><code>{{ resource_id }}</code></div>
-            {% endif %}
-          </td>
-          <td>
-            <span class="badge {% if r.outcome == "success" %}bg-green-lt{% else %}bg-red-lt{% endif %}">
-              {{ r.outcome }}
-            </span>
-          </td>
-          <td>
-            {% if let Some(actor_sub) = r.actor_sub %}
-            <div class="small"><code>{{ actor_sub }}</code></div>
-            {% endif %}
-            {% if let Some(actor_client_id) = r.actor_client_id %}
-            <div class="small text-secondary">client: <code>{{ actor_client_id }}</code></div>
-            {% endif %}
-            {% if !r.has_actor() %}
-            <span class="text-secondary">-</span>
-            {% endif %}
-          </td>
-          <td class="text-nowrap">
-            <button
-              class="btn btn-outline-secondary btn-sm"
-              type="button"
-              data-bs-toggle="modal"
-              data-bs-target="#audit-details-{{ loop.index }}"
-            >
-              Details
-            </button>
-          </td>
-        </tr>
-        {% endfor %}
-        {% if rows.len() == 0 %}
-        <tr>
-          <td colspan="6" class="text-secondary">
-            No audit events found. Try widening the time range or resetting filters.
-          </td>
-        </tr>
-        {% endif %}
-      </tbody>
-    </table>
-  </div>
+  <div class="table-responsive"><table class="table table-vcenter card-table admin-table">
+    <thead><tr><th>Time (UTC)</th><th>Event</th><th>Target</th><th>Outcome</th><th>Actor</th><th></th></tr></thead>
+    <tbody>{% for r in rows %}<tr data-audit-id="{{ r.id }}">
+      <td class="text-nowrap small">{{ r.time() }}</td><td><div>{{ r.description() }}</div><code class="small text-secondary">{{ r.action }}</code></td>
+      <td>{{ r.resource_type }}{% if let Some(id) = r.resource_id %}<div class="small text-secondary text-break"><code>{{ id }}</code></div>{% endif %}</td>
+      <td><span class="badge {% if r.outcome == "success" %}bg-green-lt{% else %}bg-red-lt{% endif %}">{{ r.outcome }}</span></td>
+      <td>{% if let Some(actor) = r.actor_sub %}<div class="small text-break"><code>{{ actor }}</code></div>{% endif %}{% if let Some(client) = r.actor_client_id %}<div class="small text-secondary text-break">Client: {{ client }}</div>{% endif %}{% if r.actor_sub.is_none() && r.actor_client_id.is_none() %}<span class="text-secondary small">{{ r.actor_label() }}</span>{% endif %}</td>
+      <td class="text-end"><button class="btn btn-outline-secondary btn-sm" type="button" data-bs-toggle="modal" data-bs-target="#audit-details-{{ r.id }}">Details</button></td>
+    </tr>{% endfor %}{% if rows.is_empty() %}<tr><td colspan="6" class="text-secondary py-4">No events match these filters. Widen the time range or reset the filters.</td></tr>{% endif %}</tbody>
+  </table></div>
 </div>
-
-{% for r in rows %}
-<div class="modal modal-blur fade" id="audit-details-{{ loop.index }}" tabindex="-1" aria-hidden="true">
-  <div class="modal-dialog modal-lg modal-dialog-scrollable">
-    <div class="modal-content">
-      <div class="modal-header">
-        <div>
-          <h5 class="modal-title">{{ r.action }}</h5>
-          <div class="text-secondary small">{{ r.created_at }} · {{ r.resource_type }} · {{ r.outcome }}</div>
-        </div>
-        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-      </div>
-      <div class="modal-body">
-        <dl class="row mb-3">
-          <dt class="col-sm-3">Resource ID</dt>
-          <dd class="col-sm-9">
-            {% if let Some(resource_id) = r.resource_id %}
-            <code>{{ resource_id }}</code>
-            {% else %}
-            <span class="text-secondary">-</span>
-            {% endif %}
-          </dd>
-          <dt class="col-sm-3">Actor</dt>
-          <dd class="col-sm-9">
-            {% if let Some(actor_sub) = r.actor_sub %}
-            <div><code>{{ actor_sub }}</code></div>
-            {% endif %}
-            {% if let Some(actor_client_id) = r.actor_client_id %}
-            <div class="text-secondary">client: <code>{{ actor_client_id }}</code></div>
-            {% endif %}
-            {% if !r.has_actor() %}
-            <span class="text-secondary">-</span>
-            {% endif %}
-          </dd>
-        </dl>
-        <label class="form-label">Details JSON</label>
-        <pre class="border rounded p-3 mb-0 text-secondary bg-dark-lt"><code>{{ r.details_display() }}</code></pre>
-      </div>
-      <div class="modal-footer">
-        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
-      </div>
-    </div>
-  </div>
-</div>
-{% endfor %}
+<div class="d-flex justify-content-between align-items-center gap-2 my-3"><div class="small text-secondary">{{ rows.len() }} displayed · up to 50 per page</div><nav class="btn-list" aria-label="Audit pages">
+  {% if !newer.is_empty() %}<a class="btn btn-outline-secondary btn-sm" href="{{ newer }}">Newer</a>{% endif %}{% if !older.is_empty() %}<a class="btn btn-outline-secondary btn-sm" href="{{ older }}">Older</a>{% endif %}
+</nav></div>
+<div class="small text-secondary">Exports include all filtered events, up to 10,000. Narrow the filters for larger results. Event details JSON is excluded. Missing historical actors remain unknown.</div>
+{% for r in rows %}<div class="modal modal-blur fade" id="audit-details-{{ r.id }}" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content">
+  <div class="modal-header"><div><h5 class="modal-title">{{ r.description() }}</h5><div class="small text-secondary">{{ r.time() }} · {{ r.outcome }}</div></div><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+  <div class="modal-body"><dl class="row"><dt class="col-sm-3">Event ID</dt><dd class="col-sm-9"><code>{{ r.id }}</code></dd><dt class="col-sm-3">Action</dt><dd class="col-sm-9"><code>{{ r.action }}</code></dd><dt class="col-sm-3">Target</dt><dd class="col-sm-9">{{ r.resource_type }}{% if let Some(id) = r.resource_id %} · <code>{{ id }}</code>{% endif %}</dd><dt class="col-sm-3">Actor</dt><dd class="col-sm-9">{{ r.actor_label() }}{% if let Some(actor) = r.actor_sub %}<div><code>{{ actor }}</code></div>{% endif %}{% if let Some(client) = r.actor_client_id %}<div>Client: <code>{{ client }}</code></div>{% endif %}</dd></dl>
+    <details><summary>Technical event data</summary><pre class="border rounded p-3 mt-2 text-secondary text-wrap"><code>{{ r.details_display() }}</code></pre></details>
+  </div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button></div>
+</div></div></div>{% endfor %}
 <script>
 document.addEventListener('DOMContentLoaded', () => {
-  const form = document.getElementById('audit-filter-form');
-  const reset = document.getElementById('audit-filter-reset');
-  const cookieName = 'sidm_audit_filters';
-  const filterKeys = ['range', 'action', 'resource_type', 'outcome', 'q'];
-
-  function setCookie(name, value, days) {
-    const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
-    document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
-  }
-
-  function getCookie(name) {
-    const raw = document.cookie.split('; ').find((row) => row.startsWith(`${name}=`));
-    if (!raw) return null;
-    return decodeURIComponent(raw.substring(name.length + 1));
-  }
-
-  function clearCookie(name) {
-    document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`;
-  }
-
-  function currentParams() {
-    const params = new URLSearchParams();
-    filterKeys.forEach((key) => {
-      const field = form?.elements[key];
-      if (!field) return;
-      const value = (field.value || '').trim();
-      if (value) params.set(key, value);
-    });
-    return params;
-  }
-
-  if (!form) return;
-
-  const urlParams = new URLSearchParams(window.location.search);
-  const hasFilterState = filterKeys.some((key) => urlParams.has(key));
-  if (!hasFilterState) {
-    const saved = getCookie(cookieName);
-    if (saved) {
-      const savedParams = new URLSearchParams(saved);
-      const hasSaved = filterKeys.some((key) => savedParams.has(key));
-      if (hasSaved) {
-        window.location.replace(`/admin/ui/audit?${savedParams.toString()}`);
-        return;
-      }
-    }
-  }
-
-  form.addEventListener('submit', () => {
-    setCookie(cookieName, currentParams().toString(), 14);
-  });
-
-  form.querySelectorAll('input, select').forEach((field) => {
-    field.addEventListener('change', () => {
-      setCookie(cookieName, currentParams().toString(), 14);
-    });
-  });
-
-  reset?.addEventListener('click', () => {
-    clearCookie(cookieName);
-    window.location.href = '/admin/ui/audit?range=all';
+  const range = document.getElementById('audit-range');
+  const custom = document.getElementById('audit-custom-range');
+  range.addEventListener('change', () => {
+    const visible = range.value === 'custom';
+    custom.hidden = !visible;
+    custom.querySelectorAll('input').forEach(input => input.disabled = !visible);
   });
 });
 </script>

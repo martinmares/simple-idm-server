@@ -88,14 +88,19 @@ mod tests {
 
         // The admin API archives the old UUID and can then create a new local user.
         assert_eq!(
-            delete_user(State(pool.clone()), Path(old))
-                .await
-                .into_response()
-                .status(),
+            delete_user(
+                State(pool.clone()),
+                axum::Extension(crate::audit::Actor::default()),
+                Path(old)
+            )
+            .await
+            .into_response()
+            .status(),
             StatusCode::OK
         );
         let response = create_user(
             State(pool.clone()),
+            axum::Extension(crate::audit::Actor::default()),
             Json(CreateUserRequest {
                 username: username.clone(),
                 email: new_email.clone(),
@@ -196,10 +201,14 @@ mod tests {
         );
 
         assert_eq!(
-            delete_user(State(pool.clone()), Path(new))
-                .await
-                .into_response()
-                .status(),
+            delete_user(
+                State(pool.clone()),
+                axum::Extension(crate::audit::Actor::default()),
+                Path(new)
+            )
+            .await
+            .into_response()
+            .status(),
             StatusCode::OK
         );
         assert!(restore(&pool, old).await.unwrap());

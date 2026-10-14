@@ -121,16 +121,11 @@ async fn handle(state: WebAdminState, headers: HeaderMap, form: BulkForm, users:
         Err(error) => return redirect_with(&path, "error", error).into_response(),
     };
     // A configured root token has no user subject. Never invent one or store the token.
-    let claims = state
-        .admin_auth
-        .jwt_service
-        .verify_access_token(&token, &state.admin_auth.oauth_client_ids, &["admin:*"])
-        .ok();
-    let actor_sub = claims.as_ref().map(|claims| claims.sub.as_str());
-    let actor_client = claims
-        .as_ref()
-        .and_then(|claims| (claims.aud.len() == 1).then(|| &claims.aud[0]))
-        .map(String::as_str);
+    let Some(actor) = state.admin_auth.audit_actor(&token) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    let actor_sub = actor.subject.as_deref();
+    let actor_client = actor.client_id.as_deref();
     let batch_id = Uuid::new_v4();
     let audit = BatchAudit {
         id: batch_id,

@@ -24,9 +24,9 @@
             <div class="list-group list-group-flush border rounded overflow-auto" style="max-height: 48vh;">
               {% for r in client_rows %}
               <a data-rules-count="{{ r.claims_count }}" class="list-group-item list-group-item-action claim-side-item {% if r.selected %}active{% endif %}" href="/admin/ui/claims?client_id={{ r.id }}{% if let Some(group) = selected_group %}{% if let Some(group_id) = group.id %}&group_id={{ group_id }}{% endif %}{% endif %}#by-client">
-                <div class="d-flex justify-content-between gap-2">
+                <div class="d-flex align-items-center justify-content-between gap-2">
                   <span>{{ r.name }}</span>
-                  <span class="badge {% if r.selected %}bg-white text-primary{% else %}bg-blue-lt{% endif %}">{{ r.claims_count }}</span>
+                  <span class="badge flex-shrink-0 {% if r.selected %}bg-white text-primary{% else %}bg-blue-lt{% endif %}">{{ r.claims_count }}</span>
                 </div>
               </a>
               {% endfor %}
@@ -114,9 +114,9 @@
               {% for r in group_rows %}
               {% if let Some(id) = r.id %}
               <a data-rules-count="{{ r.claims_count }}" class="list-group-item list-group-item-action claim-side-item {% if r.selected %}active{% endif %}" href="/admin/ui/claims?{% if let Some(client) = selected_client %}client_id={{ client.id }}&{% endif %}group_id={{ id }}#by-group">
-                <div class="d-flex justify-content-between gap-2">
+                <div class="d-flex align-items-center justify-content-between gap-2">
                   <span>{{ r.name }}</span>
-                  <span class="badge {% if r.selected %}bg-white text-primary{% else %}bg-blue-lt{% endif %}">{{ r.claims_count }}</span>
+                  <span class="badge flex-shrink-0 {% if r.selected %}bg-white text-primary{% else %}bg-blue-lt{% endif %}">{{ r.claims_count }}</span>
                 </div>
               </a>
               {% endif %}

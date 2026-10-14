@@ -4,7 +4,7 @@ use crate::db::{DbPool, models::OAuthClient};
 use crate::password_reset::{PasswordResetTokenInfo, create_reset_token_for_user};
 use crate::secret_crypto::encrypt_secret;
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
@@ -371,6 +371,7 @@ fn normalize_passkey_policy(policy: Option<&str>) -> Result<&'static str, ErrorR
 
 pub async fn create_user(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Json(req): Json<CreateUserRequest>,
 ) -> impl IntoResponse {
     let requested_username = req.username.clone();
@@ -386,8 +387,9 @@ pub async fn create_user(
     .await;
 
     if let Ok(Some(_)) = conflict {
-        audit::emit_event(
+        audit::emit_event_as(
             &db_pool,
+            &actor,
             "admin.user.create",
             "user",
             None,
@@ -446,8 +448,9 @@ pub async fn create_user(
 
     match result {
         Ok(user) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.user.create",
                 "user",
                 Some(user.id),
@@ -470,8 +473,9 @@ pub async fn create_user(
                 .into_response()
         }
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.user.create",
                 "user",
                 None,
@@ -642,6 +646,7 @@ pub async fn list_users(
 
 pub async fn update_user(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Path(user_id): Path<Uuid>,
     Json(req): Json<UpdateUserRequest>,
 ) -> impl IntoResponse {
@@ -721,8 +726,9 @@ pub async fn update_user(
 
     match result {
         Ok(Some(user)) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.user.update",
                 "user",
                 Some(user.id),
@@ -750,8 +756,9 @@ pub async fn update_user(
         )
             .into_response(),
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.user.update",
                 "user",
                 Some(user_id),
@@ -774,6 +781,7 @@ pub async fn update_user(
 
 pub async fn delete_user(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Path(user_id): Path<Uuid>,
 ) -> impl IntoResponse {
     let result = sqlx::query(
@@ -795,8 +803,9 @@ pub async fn delete_user(
                 )
                     .into_response()
             } else {
-                audit::emit_event(
+                audit::emit_event_as(
                     &db_pool,
+                    &actor,
                     "admin.user.delete",
                     "user",
                     Some(user_id),
@@ -814,8 +823,9 @@ pub async fn delete_user(
             }
         }
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.user.delete",
                 "user",
                 Some(user_id),
@@ -842,6 +852,7 @@ pub async fn delete_user(
 
 pub async fn create_group(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Json(req): Json<CreateGroupRequest>,
 ) -> impl IntoResponse {
     let tenant_id = default_tenant_id();
@@ -861,8 +872,9 @@ pub async fn create_group(
 
     match result {
         Ok(group) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.group.create",
                 "group",
                 Some(group.id),
@@ -882,8 +894,9 @@ pub async fn create_group(
                 .into_response()
         }
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.group.create",
                 "group",
                 None,
@@ -906,6 +919,7 @@ pub async fn create_group(
 
 pub async fn update_group(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Path(group_id): Path<Uuid>,
     Json(req): Json<UpdateGroupRequest>,
 ) -> impl IntoResponse {
@@ -964,8 +978,9 @@ pub async fn update_group(
 
     match result {
         Ok(Some(group)) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.group.update",
                 "group",
                 Some(group.id),
@@ -1001,8 +1016,9 @@ pub async fn update_group(
         )
             .into_response(),
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.group.update",
                 "group",
                 Some(group_id),
@@ -1139,6 +1155,7 @@ pub async fn list_user_groups(
 
 pub async fn delete_group(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Path(group_id): Path<Uuid>,
 ) -> impl IntoResponse {
     let result = sqlx::query(
@@ -1160,8 +1177,9 @@ pub async fn delete_group(
                 )
                     .into_response()
             } else {
-                audit::emit_event(
+                audit::emit_event_as(
                     &db_pool,
+                    &actor,
                     "admin.group.delete",
                     "group",
                     Some(group_id),
@@ -1179,8 +1197,9 @@ pub async fn delete_group(
             }
         }
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.group.delete",
                 "group",
                 Some(group_id),
@@ -1293,6 +1312,7 @@ pub async fn remove_user_from_group(
 
 pub async fn create_oauth_client(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Json(req): Json<CreateOAuthClientRequest>,
 ) -> impl IntoResponse {
     let requested_client_id = req.client_id.clone();
@@ -1410,8 +1430,9 @@ pub async fn create_oauth_client(
 
     match result {
         Ok(client) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.client.create",
                 "oauth_client",
                 Some(client.id),
@@ -1438,8 +1459,9 @@ pub async fn create_oauth_client(
                 .into_response()
         }
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.client.create",
                 "oauth_client",
                 None,
@@ -1517,6 +1539,7 @@ pub async fn list_oauth_clients(
 
 pub async fn delete_oauth_client(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Path(client_id): Path<Uuid>,
 ) -> impl IntoResponse {
     let result = sqlx::query(
@@ -1539,8 +1562,9 @@ pub async fn delete_oauth_client(
                 )
                     .into_response()
             } else {
-                audit::emit_event(
+                audit::emit_event_as(
                     &db_pool,
+                    &actor,
                     "admin.client.delete",
                     "oauth_client",
                     Some(client_id),
@@ -1558,8 +1582,9 @@ pub async fn delete_oauth_client(
             }
         }
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.client.delete",
                 "oauth_client",
                 Some(client_id),
@@ -1582,6 +1607,7 @@ pub async fn delete_oauth_client(
 
 pub async fn update_oauth_client(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Path(client_id): Path<Uuid>,
     Json(req): Json<UpdateOAuthClientRequest>,
 ) -> impl IntoResponse {
@@ -1758,8 +1784,9 @@ pub async fn update_oauth_client(
 
     match result {
         Ok(Some(client)) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.client.update",
                 "oauth_client",
                 Some(client.id),
@@ -1794,8 +1821,9 @@ pub async fn update_oauth_client(
         )
             .into_response(),
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.client.update",
                 "oauth_client",
                 Some(client_id),
@@ -1912,6 +1940,7 @@ fn validate_redirect_uris(
 
 pub async fn create_claim_map(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Json(req): Json<CreateClaimMapRequest>,
 ) -> impl IntoResponse {
     let tenant_id = default_tenant_id();
@@ -2023,8 +2052,9 @@ pub async fn create_claim_map(
 
     match result {
         Ok(claim_map) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.claim_map.create",
                 "claim_map",
                 Some(claim_map.id),
@@ -2061,8 +2091,9 @@ pub async fn create_claim_map(
                 .into_response()
         }
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.claim_map.create",
                 "claim_map",
                 None,
@@ -2156,6 +2187,7 @@ pub async fn list_claim_maps(
 
 pub async fn delete_claim_map(
     State(db_pool): State<DbPool>,
+    Extension(actor): Extension<audit::Actor>,
     Path(claim_map_id): Path<Uuid>,
 ) -> impl IntoResponse {
     let result = sqlx::query(
@@ -2190,8 +2222,9 @@ pub async fn delete_claim_map(
                 )
                     .into_response()
             } else {
-                audit::emit_event(
+                audit::emit_event_as(
                     &db_pool,
+                    &actor,
                     "admin.claim_map.delete",
                     "claim_map",
                     Some(claim_map_id),
@@ -2209,8 +2242,9 @@ pub async fn delete_claim_map(
             }
         }
         Err(e) => {
-            audit::emit_event(
+            audit::emit_event_as(
                 &db_pool,
+                &actor,
                 "admin.claim_map.delete",
                 "claim_map",
                 Some(claim_map_id),
