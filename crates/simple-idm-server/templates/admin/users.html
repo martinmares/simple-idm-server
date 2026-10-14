@@ -30,138 +30,48 @@
 {% endif %}
 
 <div class="card mb-3">
-  <div class="card-header d-flex align-items-center justify-content-between">
+  <div class="card-header admin-header">
     <h3 class="card-title mb-0">Users</h3>
     <div class="btn-list">
-      <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-user-modal">
-        <i class="ti ti-user-plus me-1"></i>Create user
-      </button>
+
       <button type="button" class="btn btn-outline-secondary btn-sm" data-bs-toggle="modal" data-bs-target="#ad-onboarding-tokens-modal">
         <i class="ti ti-ticket me-1"></i>AD onboarding tokens
       </button>
       <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#import-users-modal">
         <i class="ti ti-file-import me-1"></i>Import CSV
       </button>
+      <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#create-user-modal">
+        <i class="ti ti-plus me-1"></i>Create user
+      </button>
     </div>
   </div>
   <div class="card-body">
-    <form method="get" action="/admin/ui/users" class="row g-2" id="users-filter-form">
-      <div class="col-md-5">
-        <input class="form-control" name="q" placeholder="search username, email, name, external id/login/upn" value="{{ filter_q }}" autocomplete="off">
-      </div>
-      <div class="col-md-3">
-        <select class="form-select" name="status">
-          <option value="all" {% if filter_status == "all" %}selected{% endif %}>all statuses</option>
-          <option value="active" {% if filter_status == "active" %}selected{% endif %}>active</option>
-          <option value="inactive" {% if filter_status == "inactive" %}selected{% endif %}>inactive</option>
-        </select>
-      </div>
-      <div class="col-md-4">
-        <input class="form-control" name="note" placeholder="note contains..." value="{{ filter_note }}" autocomplete="off">
-      </div>
-      <div class="col-12 d-flex justify-content-end">
-        <button type="button" class="btn btn-outline-secondary btn-sm" id="users-filter-reset">
-          <i class="ti ti-filter-off me-1"></i>Reset filters
-        </button>
-      </div>
-      <div class="col-12 mt-2">
-        <input type="hidden" name="letters" id="letters-hidden">
-        <div class="table-responsive">
-          <table class="table table-sm table-borderless align-middle mb-0" style="max-width: 980px;">
-            <tbody>
-              <tr>
-                {% for l in letter_filters %}
-                <td class="text-center text-secondary small fw-semibold py-1">{{ l.value }}</td>
-                {% endfor %}
-              </tr>
-              <tr>
-                {% for l in letter_filters %}
-                <td class="text-center py-1">
-                  <input class="form-check-input letter-filter" type="checkbox" value="{{ l.value }}" {% if l.selected %}checked{% endif %}>
-                </td>
-                {% endfor %}
-              </tr>
-            </tbody>
-          </table>
-        </div>
-        <div class="form-text mt-1">Filter by first letter of last name (A-Z, multi-select).</div>
-      </div>
+    <form method="get" action="/admin/ui/users" class="admin-filter" id="users-filter-form">
+      <div class="admin-search"><label class="form-label" for="users-search">Search</label><input id="users-search" class="form-control" name="q" placeholder="Username, name, email, external identity…" value="{{ filter_q }}" autocomplete="off"></div>
+      <div class="admin-field"><label class="form-label" for="users-status">Status</label><select id="users-status" class="form-select" name="status"><option value="all" {% if filter_status == "all" %}selected{% endif %}>All statuses</option><option value="active" {% if filter_status == "active" %}selected{% endif %}>Active</option><option value="inactive" {% if filter_status == "inactive" %}selected{% endif %}>Inactive</option></select></div>
+      <div class="btn-list"><button class="btn btn-primary" type="submit">Apply</button><button type="button" class="btn btn-outline-secondary" id="users-filter-reset">Reset</button></div>
+      <details class="w-100" {% if !filter_note.is_empty() || filter_auth != "all" || filter_mfa != "all" || filter_passkeys != "all" || !filter_group.is_empty() || filter_sort != "username" %}open{% endif %}><summary class="text-secondary">More filters</summary><div class="row g-3 mt-1">
+<div class="col-md-4"><label class="form-label" for="users-auth">Authentication</label><select id="users-auth" class="form-select" name="auth"><option value="all">All methods</option><option value="local" {% if filter_auth == "local" %}selected{% endif %}>Local password</option><option value="ad" {% if filter_auth == "ad" %}selected{% endif %}>AD/LDAP</option><option value="federated" {% if filter_auth == "federated" %}selected{% endif %}>Federated OIDC</option></select></div>
+<div class="col-md-4"><label class="form-label" for="users-mfa">Local TOTP</label><select id="users-mfa" class="form-select" name="mfa"><option value="all">All states</option><option value="active" {% if filter_mfa == "active" %}selected{% endif %}>Enrolled</option><option value="pending" {% if filter_mfa == "pending" %}selected{% endif %}>Enrollment pending</option><option value="not_enrolled" {% if filter_mfa == "not_enrolled" %}selected{% endif %}>Not enrolled</option></select></div>
+<div class="col-md-4"><label class="form-label" for="users-passkeys">Passkeys</label><select id="users-passkeys" class="form-select" name="passkeys"><option value="all">All users</option><option value="yes" {% if filter_passkeys == "yes" %}selected{% endif %}>Has active passkeys</option><option value="no" {% if filter_passkeys == "no" %}selected{% endif %}>No active passkeys</option></select></div>
+<div class="col-md-4"><label class="form-label" for="users-group">Directly assigned group</label><select id="users-group" class="form-select" name="group_id"><option value="">All groups</option>{% for group in bulk_groups %}<option value="{{ group.id }}" {% if filter_group == group.id.to_string() %}selected{% endif %}>{{ group.name }}</option>{% endfor %}</select></div>
+<div class="col-md-4"><label class="form-label" for="users-sort">Sort by</label><select id="users-sort" class="form-select" name="sort"><option value="username" {% if filter_sort == "username" %}selected{% endif %}>Username</option><option value="name" {% if filter_sort == "name" %}selected{% endif %}>Last name</option><option value="last_sign_in" {% if filter_sort == "last_sign_in" %}selected{% endif %}>Most recent sign-in</option></select></div>
+<div class="col-md-4"><label class="form-label" for="users-note">Note contains</label><input id="users-note" class="form-control" name="note" value="{{ filter_note }}" autocomplete="off"></div></div></details>
     </form>
   </div>
 </div>
 
+<div class="card mb-3"><div class="card-body d-flex align-items-center gap-3 flex-wrap" data-bulk-toolbar data-bulk-total="{{ total_items }}" data-bulk-limit="{{ admin_bulk_limit() }}"><span data-bulk-count>0 selected</span><button type="button" class="btn btn-sm btn-outline-secondary" data-bulk-filtered>Select all filtered ({{ total_items }})</button><button type="button" class="btn btn-sm btn-outline-secondary" data-bulk-clear disabled>Clear selection</button><span class="text-secondary small">Header checkbox selects this page. Batch limit: {{ admin_bulk_limit() }}.</span><button type="button" class="btn btn-outline-danger" data-bulk-action="archive" data-bs-toggle="modal" data-bs-target="#bulk-action-modal" disabled>Archive selected</button><button type="button" class="btn btn-outline-primary" data-bulk-action="add_group" data-bs-toggle="modal" data-bs-target="#bulk-action-modal" disabled>+ Add selected to group</button></div></div>
 <div id="users-results">
 <div class="card">
   <div class="table-responsive">
-    <table class="table table-vcenter card-table">
-      <thead><tr><th>Username</th><th>Name</th><th>Email</th><th>Last sign-in</th><th>Actions</th></tr></thead>
+    <table class="table table-vcenter card-table admin-table">
+      <thead><tr><th><input type="checkbox" class="form-check-input" data-bulk-all aria-label="Select visible users"></th><th>Username</th><th>Name</th><th>Email</th><th>Authentication</th><th>Security</th><th>Last sign-in</th><th>Actions</th></tr></thead>
       <tbody>
       {% for r in rows %}
       <tr>
-        <td>
-          <div>{{ r.username }}</div>
-          <div class="small text-secondary mt-1">User UUID: <code>{{ r.id }}</code></div>
-          <div class="small text-secondary mt-1">auth: {{ r.auth_mode }}</div>
-          {% if r.auth_mode == "local" %}
-          <div class="small mt-1">
-            MFA:
-            {% if r.mfa_status == "active" %}
-            <span class="badge bg-green-lt">TOTP active</span>
-            <span class="text-secondary">{{ r.recovery_codes_remaining }} recovery codes</span>
-            {% else if r.mfa_status == "pending" %}
-            <span class="badge bg-yellow-lt">enrollment pending</span>
-            {% else %}
-            <span class="badge bg-secondary-lt">not enrolled</span>
-            {% endif %}
-          </div>
-          <div class="small mt-1">Passkeys: <span class="badge bg-blue-lt">{{ r.passkey_count }} active</span></div>
-          {% endif %}
-          {% if let Some(ext_id) = r.external_user_id %}
-          <div class="small text-secondary mt-1">
-            external:
-            <code>{{ ext_id }}</code>
-            {% if let Some(ext_type) = r.external_user_id_type %}
-              <span class="ms-1">({{ ext_type }})</span>
-            {% endif %}
-          </div>
-          {% endif %}
-          {% if let Some(login_name) = r.external_login_name %}
-          <div class="small text-secondary">login: <code>{{ login_name }}</code></div>
-          {% endif %}
-          {% if let Some(upn) = r.external_upn %}
-          <div class="small text-secondary">upn: <code>{{ upn }}</code></div>
-          {% endif %}
-          {% if !r.is_active %}
-          <span class="badge bg-red-lt mt-1">inactive</span>
-          {% endif %}
-          {% if let Some(status) = r.federated_approval_status %}
-          <div class="mt-1">
-            {% if status == "approved" %}
-            <span class="badge bg-green-lt">federated approved</span>
-            {% else if status == "pending" %}
-            <span class="badge bg-yellow-lt">federated pending approval</span>
-            {% else if status == "rejected" %}
-            <span class="badge bg-red-lt">federated rejected</span>
-            {% else %}
-            <span class="badge bg-secondary-lt">{{ status }}</span>
-            {% endif %}
-          </div>
-          {% endif %}
-          {% if let Some(provider) = r.federated_provider_slug %}
-          <div class="small text-secondary mt-1">
-            provider: <code>{{ provider }}</code>
-            {% if let Some(provider_type) = r.federated_provider_type %}
-            <span class="ms-1">({{ provider_type }})</span>
-            {% endif %}
-          </div>
-          {% endif %}
-          {% if let Some(subject) = r.federated_subject %}
-          <div class="small text-secondary mt-1">sub: <code>{{ subject }}</code></div>
-          {% endif %}
-          {% if let Some(note) = r.note %}
-          <div class="small text-secondary mt-1">{{ note }}</div>
-          {% endif %}
-        </td>
+        <td><input type="checkbox" class="form-check-input" data-bulk-id="{{ r.id }}" data-bulk-name="{{ r.username }}" aria-label="Select {{ r.username }}"></td>
+        <td><button class="btn btn-link p-0 admin-name" type="button" data-bs-toggle="modal" data-bs-target="#user-details-{{ r.id }}">{{ r.username }}</button>{% if !r.is_active %}<div class="admin-secondary">Inactive</div>{% endif %}</td>
         <td>
           {% if let Some(first_name) = r.first_name %}
             {% if let Some(last_name) = r.last_name %}
@@ -178,6 +88,11 @@
           {% endif %}
         </td>
         <td>{{ r.email }}</td>
+        <td><span class="badge bg-secondary-lt">{{ r.auth_mode }}</span>{% if let Some(status) = r.federated_approval_status %}<div class="admin-secondary">{{ status }}</div>{% endif %}</td>
+        <td><div class="admin-security">{% if r.auth_mode == "local" %}
+          {% if r.mfa_status == "active" %}<span class="badge bg-green-lt">TOTP</span>{% else if r.mfa_status == "pending" %}<span class="badge bg-yellow-lt">MFA pending</span>{% else %}<span class="badge bg-secondary-lt">MFA not enrolled</span>{% endif %}
+          {% if r.passkey_count > 0 %}<span class="badge bg-blue-lt">{{ r.passkey_count }} passkeys</span>{% endif %}
+        {% else %}<span class="text-secondary">Managed upstream</span>{% endif %}</div></td>
         <td class="text-nowrap">
           {% if let Some(last_sign_in_at) = r.last_sign_in_at %}
             {{ last_sign_in_at }}
@@ -186,10 +101,10 @@
           {% endif %}
         </td>
         <td>
-          <div class="d-flex flex-wrap gap-2">
+          <div class="admin-actions">
             <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#user-edit-{{ r.id }}">
               Edit
-            </button>
+            </button><div class="dropdown"><button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false">More</button><div class="dropdown-menu dropdown-menu-end">
             {% if r.auth_mode == "local" && r.mfa_status != "not_enrolled" %}
             <form method="post" action="/admin/ui/users/{{ r.id }}/mfa-reset" data-confirm="Reset MFA for {{ r.username }}? Existing authenticator and recovery codes will be revoked, and all login sessions will be terminated." data-confirm-action="Reset MFA" data-confirm-variant="warning">
               <button class="btn btn-sm btn-outline-warning" type="submit">Reset MFA</button>
@@ -236,10 +151,10 @@
               {% endif %}
             {% endif %}
             {% endif %}
-            <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate" data-confirm="Archive user '{{ r.username }}'? Their username becomes available for a new account. The archived identity and its links are preserved." data-confirm-action="Safe delete">
-              <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
+            <form method="post" action="/admin/ui/users/{{ r.id }}/deactivate" data-confirm="Archive user '{{ r.username }}'? Their username becomes available for a new account. The archived identity and its links are preserved." data-confirm-action="Archive">
+              <button class="btn btn-sm btn-outline-danger" type="submit">Archive</button>
             </form>
-          </div>
+</div></div>          </div>
         </td>
       </tr>
       {% endfor %}
@@ -269,7 +184,7 @@
 {% if deleted_rows.len() > 0 %}
 <div class="card mt-3">
   <div class="card-header">
-    <h3 class="card-title mb-0">Recently deleted users</h3>
+    <h3 class="card-title mb-0">Archived users</h3>
   </div>
   <div class="table-responsive">
     <table class="table table-vcenter card-table">
@@ -701,4 +616,72 @@
 </div>
 
 <script src="/admin/ui/static/users.js"></script>
+{% for r in rows %}
+<div class="modal modal-blur fade" id="user-details-{{ r.id }}" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-lg modal-dialog-scrollable"><div class="modal-content"><div class="modal-header"><h5 class="modal-title">User details: {{ r.username }}</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body">
+          <div>{{ r.username }}</div>
+          <div class="small text-secondary mt-1">User UUID: <code>{{ r.id }}</code></div>
+          <div class="small text-secondary mt-1">auth: {{ r.auth_mode }}</div>
+          {% if r.auth_mode == "local" %}
+          <div class="small mt-1">
+            MFA:
+            {% if r.mfa_status == "active" %}
+            <span class="badge bg-green-lt">TOTP active</span>
+            <span class="text-secondary">{{ r.recovery_codes_remaining }} recovery codes</span>
+            {% else if r.mfa_status == "pending" %}
+            <span class="badge bg-yellow-lt">enrollment pending</span>
+            {% else %}
+            <span class="badge bg-secondary-lt">not enrolled</span>
+            {% endif %}
+          </div>
+          <div class="small mt-1">Passkeys: <span class="badge bg-blue-lt">{{ r.passkey_count }} active</span></div>
+          {% endif %}
+          {% if let Some(ext_id) = r.external_user_id %}
+          <div class="small text-secondary mt-1">
+            external:
+            <code>{{ ext_id }}</code>
+            {% if let Some(ext_type) = r.external_user_id_type %}
+              <span class="ms-1">({{ ext_type }})</span>
+            {% endif %}
+          </div>
+          {% endif %}
+          {% if let Some(login_name) = r.external_login_name %}
+          <div class="small text-secondary">login: <code>{{ login_name }}</code></div>
+          {% endif %}
+          {% if let Some(upn) = r.external_upn %}
+          <div class="small text-secondary">upn: <code>{{ upn }}</code></div>
+          {% endif %}
+          {% if !r.is_active %}
+          <span class="badge bg-red-lt mt-1">inactive</span>
+          {% endif %}
+          {% if let Some(status) = r.federated_approval_status %}
+          <div class="mt-1">
+            {% if status == "approved" %}
+            <span class="badge bg-green-lt">federated approved</span>
+            {% else if status == "pending" %}
+            <span class="badge bg-yellow-lt">federated pending approval</span>
+            {% else if status == "rejected" %}
+            <span class="badge bg-red-lt">federated rejected</span>
+            {% else %}
+            <span class="badge bg-secondary-lt">{{ status }}</span>
+            {% endif %}
+          </div>
+          {% endif %}
+          {% if let Some(provider) = r.federated_provider_slug %}
+          <div class="small text-secondary mt-1">
+            provider: <code>{{ provider }}</code>
+            {% if let Some(provider_type) = r.federated_provider_type %}
+            <span class="ms-1">({{ provider_type }})</span>
+            {% endif %}
+          </div>
+          {% endif %}
+          {% if let Some(subject) = r.federated_subject %}
+          <div class="small text-secondary mt-1">sub: <code>{{ subject }}</code></div>
+          {% endif %}
+          {% if let Some(note) = r.note %}
+          <div class="small text-secondary mt-1">{{ note }}</div>
+          {% endif %}
+        <button type="button" class="btn btn-outline-secondary btn-sm mt-3" data-admin-copy="{{ r.id }}">Copy UUID</button></div><div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button></div></div></div></div>
+{% endfor %}
+
+<div class="modal modal-blur fade" id="bulk-action-modal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><form method="post" action="/admin/ui/users/bulk" class="modal-content" data-bulk-form><div class="modal-header"><h5 class="modal-title" data-bulk-title>Bulk action</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><input type="hidden" name="ids"><input type="hidden" name="action"><p data-bulk-description></p><ul data-bulk-names class="small" style="max-height: 12rem; overflow:auto"></ul><div data-bulk-group hidden><label class="form-label" for="bulk-group">Group</label><select class="form-select" id="bulk-group" name="group_id" required disabled><option value="">Select a group…</option>{% for group in bulk_groups %}<option value="{{ group.id }}">{{ group.name }}{% if group.is_virtual %} (virtual bundle){% endif %}</option>{% endfor %}</select></div></div><div class="modal-footer"><button class="btn btn-link" type="button" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" type="submit" data-bulk-submit>Confirm</button></div></form></div></div>
 {% endblock %}

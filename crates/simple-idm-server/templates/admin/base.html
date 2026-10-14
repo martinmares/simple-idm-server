@@ -82,6 +82,32 @@
       box-shadow: 0 14px 44px rgba(0, 0, 0, 0.46);
       border-color: color-mix(in srgb, var(--tblr-border-color) 72%, transparent);
     }
+    /* Shared admin UI contract: headers, filter baselines, compact lists, modals. */
+    .navbar-brand a, .navbar-dark .nav-link { color:var(--tblr-body-color); }
+    [hidden] { display:none !important; }
+    .admin-header { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; }
+    .admin-filter { display:flex; gap:.75rem; align-items:end; flex-wrap:wrap; }
+    .admin-filter .admin-search { flex:1 1 22rem; }
+    .admin-filter .admin-field { flex:0 1 12rem; }
+    .admin-filter .form-label { margin-bottom:.35rem; }
+    .admin-filter .btn-list { flex-wrap:nowrap; margin-bottom:0; }
+    .admin-filter-help { margin-top:.5rem; font-size:.8rem; color:var(--tblr-secondary); }
+    .admin-table td { padding-top:.65rem; padding-bottom:.65rem; vertical-align:middle; }
+    .admin-table .admin-actions { display:flex; gap:.5rem; flex-wrap:wrap; align-items:center; }
+    .admin-table .admin-actions form { margin:0; }
+    .admin-actions .dropdown-menu .btn { width:100%; text-align:left; border:0; border-radius:0; padding:.5rem 1rem; }
+    .admin-actions .dropdown-menu { min-width:13rem; }
+
+    .admin-table .admin-secondary { font-size:.8rem; color:var(--tblr-secondary); margin-top:.15rem; }
+    .admin-table .admin-name { font-weight:600; }
+    .admin-table .admin-security { display:flex; gap:.35rem; flex-wrap:wrap; max-width:16rem; }
+    .admin-tabs { margin-bottom:1rem; }
+    .admin-tabs .nav-link { padding:.7rem 1.25rem; }
+    .admin-detail-row td { padding:1rem 1.25rem; background:var(--tblr-bg-surface-secondary); }
+    .admin-detail-row[hidden] { display:none; }
+    .admin-id { display:flex; gap:.5rem; align-items:center; overflow-wrap:anywhere; }
+    .modal-dialog-scrollable .modal-body { overscroll-behavior:contain; }
+    @media(max-width:767px) { .admin-filter .admin-field { flex:1 1 10rem; } }
   </style>
   <script>
     (function () {
@@ -168,7 +194,7 @@
           <div class="alert alert-success" role="alert">{{ msg }}</div>
           {% endif %}
           {% if let Some(err) = error %}
-          <div class="alert alert-danger" role="alert">{{ err }}</div>
+          <div class="alert alert-danger" role="alert" data-admin-page-error>{{ err }}</div>
           {% endif %}
           {% block content %}{% endblock %}
         </div>
@@ -387,7 +413,7 @@
 
           e.preventDefault();
           pendingConfirmForm = form;
-          pendingConfirmSubmitter = submitter && submitter.form === form ? submitter : null;
+          pendingConfirmSubmitter = submitter && submitter.form === form && submitter.type === 'submit' ? submitter : null;
 
           if (confirmTitle) confirmTitle.textContent = source.dataset.confirmTitle || 'Confirm action';
           if (confirmSummary) confirmSummary.textContent = source.dataset.confirmSummary || 'This action changes stored data.';
@@ -408,14 +434,192 @@
           pendingConfirmSubmitter = null;
           form.dataset.confirmBypass = '1';
           hideModal(confirmModalEl);
-          if (submitter && typeof form.requestSubmit === 'function') {
-            form.requestSubmit(submitter);
+          if (typeof form.requestSubmit === 'function') {
+            if (submitter) form.requestSubmit(submitter); else form.requestSubmit();
           } else {
             form.submit();
           }
         });
       }
+
+      document.addEventListener('submit', async function(event) {
+        const form = event.target;
+        if (!(form instanceof HTMLFormElement) || event.defaultPrevented ||
+            !form.closest('.modal') || !form.querySelector('.modal-body') ||
+            form.method !== 'post' || !/\/(create|update|members|add)$/.test(new URL(form.action).pathname)) return;
+        event.preventDefault();
+        if (form.dataset.adminSaving === 'true') return;
+        form.dataset.adminSaving = 'true';
+        form.querySelectorAll('[data-admin-form-error], [data-admin-field-error]').forEach(el => el.remove());
+        Array.from(form.elements).forEach(field => {
+          if (!field.dataset?.adminErrorId) return;
+          field.classList.remove('is-invalid'); field.removeAttribute('aria-invalid');
+          const descriptions = (field.getAttribute('aria-describedby') || '').split(/\s+/).filter(id => id && id !== field.dataset.adminErrorId);
+          if (descriptions.length) field.setAttribute('aria-describedby', descriptions.join(' ')); else field.removeAttribute('aria-describedby');
+          delete field.dataset.adminErrorId;
+        });
+        const body = new URLSearchParams(new FormData(form));
+        const submitter = event.submitter;
+        if (submitter?.name) body.append(submitter.name, submitter.value);
+        const buttons = Array.from(form.elements).filter(button => button.type === 'submit' && !button.disabled);
+        buttons.forEach(button => { button.disabled = true; });
+        function showError(message) {
+          const summary = document.createElement('div');
+          summary.className = 'alert alert-danger'; summary.dataset.adminFormError = '';
+          summary.setAttribute('role', 'alert'); summary.tabIndex = -1; summary.textContent = message;
+          form.querySelector('.modal-body').prepend(summary);
+          let firstField;
+          Array.from(form.elements).forEach((field, index) => {
+            if (!field.name || !/^[a-z_]+$/.test(field.name) || field.type === 'hidden' || field.disabled ||
+                !field.matches('input:not([type="checkbox"]):not([type="radio"]), select, textarea')) return;
+            const words = field.name.replaceAll('_', ' ');
+            if (!new RegExp('\\b' + words + '\\b', 'i').test(message.replaceAll('_', ' '))) return;
+            const feedback = document.createElement('div'); feedback.className = 'invalid-feedback';
+            feedback.dataset.adminFieldError = ''; feedback.id = form.closest('.modal').id + '-field-error-' + index;
+            feedback.textContent = message; field.after(feedback);
+            field.classList.add('is-invalid'); field.setAttribute('aria-invalid', 'true');
+            field.dataset.adminErrorId = feedback.id;
+            field.setAttribute('aria-describedby', ((field.getAttribute('aria-describedby') || '') + ' ' + feedback.id).trim());
+            firstField ||= field;
+          });
+          const modal = form.closest('.modal');
+          if (!modal.classList.contains('show') && !form.dataset.confirm) return;
+          const reopen = () => { showModal(modal); (firstField || summary).focus(); };
+          if (confirmModalEl.getAttribute('aria-hidden') !== 'true') {
+            confirmModalEl.addEventListener('hidden.bs.modal', reopen, {once:true});
+          } else reopen();
+        }
+        try {
+          const response = await fetch(form.action, {method:'POST', body, credentials:'same-origin'});
+          if (!response.ok) {
+            showError('Saving failed (HTTP ' + response.status + '). Your entries are preserved.');
+            return;
+          }
+          const html = new DOMParser().parseFromString(await response.text(), 'text/html');
+          const error = html.querySelector('[data-admin-page-error]');
+          if (error) { showError(error.textContent.trim()); return; }
+          window.location.assign(response.url);
+        } catch {
+          showError('The save could not be confirmed. Your entries are preserved; check the list before retrying.');
+        } finally {
+          delete form.dataset.adminSaving;
+          buttons.forEach(button => { button.disabled = false; });
+        }
+      });
     });
   </script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+  // Hash links from existing pickers remain compatible; view= is bookmarkable.
+  const tabs = document.querySelector('[data-admin-tabs]');
+  if (tabs) {
+    tabs.setAttribute("role", "tablist");
+    const names = tabs.dataset.adminTabs.split(',');
+    const fallback = names[0];
+    function selectView(name, updateUrl) {
+      if (!names.includes(name)) name = fallback;
+      names.forEach(id => {
+        const panel = document.getElementById(id);
+        panel.hidden = id !== name; panel.setAttribute('role', 'tabpanel');
+        const link = tabs.querySelector('[data-view="'+id+'"]');
+        link.classList.toggle('active', id === name);
+        link.setAttribute('aria-selected', String(id === name));
+      });
+      if (updateUrl) {
+        const url = new URL(location.href); url.searchParams.set('view', name); url.hash = '';
+        history.replaceState(null, '', url);
+      }
+    }
+    function currentView() { return names.includes(location.hash.slice(1)) ? location.hash.slice(1) : new URLSearchParams(location.search).get('view'); }
+    selectView(currentView(), true);
+    tabs.querySelectorAll('[data-view]').forEach(link => link.addEventListener('click', event => { event.preventDefault(); selectView(link.dataset.view, true); }));
+    window.addEventListener('hashchange', () => selectView(currentView(), true));
+  }
+  const bulkForm = document.querySelector('[data-bulk-form]');
+  if (bulkForm) {
+    const toolbar = document.querySelector('[data-bulk-toolbar]');
+    const limit = Number(toolbar.dataset.bulkLimit);
+    const all = document.querySelector('[data-bulk-all]');
+    const filteredButton = toolbar.querySelector('[data-bulk-filtered]');
+    const clearButton = toolbar.querySelector('[data-bulk-clear]');
+    const boxes = Array.from(document.querySelectorAll('[data-bulk-id]'));
+    const visible = () => boxes.filter(box => !box.closest('tr').hidden);
+    const asItem = box => ({id: box.dataset.bulkId, name: box.dataset.bulkName});
+    let filteredSelection = null, selecting = false;
+    const selected = () => filteredSelection || visible().filter(box => box.checked).map(asItem);
+    function updateSelection() {
+      boxes.filter(box => box.closest('tr').hidden).forEach(box => { box.checked = false; });
+      const count = selected().length;
+      toolbar.querySelector('[data-bulk-count]').textContent = count + (filteredSelection ? ' selected across filtered results' : ' selected');
+      document.querySelectorAll('[data-bulk-action]').forEach(button => { button.disabled = selecting || count === 0 || count > limit; });
+      const total = Number(toolbar.dataset.bulkTotal);
+      filteredButton.disabled = selecting || total === 0 || total > limit;
+      filteredButton.title = total > limit ? 'More than ' + limit + ' results. Select individual pages.' : '';
+      clearButton.disabled = selecting || count === 0;
+      const checked = visible().filter(box => box.checked).length;
+      all.checked = checked > 0 && checked === visible().length;
+      all.indeterminate = checked > 0 && checked < visible().length;
+    }
+    all.addEventListener('change', () => { filteredSelection = null; visible().forEach((box, index) => { box.checked = all.checked && index < limit; }); updateSelection(); });
+    boxes.forEach(box => box.addEventListener('change', () => {
+      if (filteredSelection) {
+        filteredSelection = filteredSelection.filter(item => item.id !== box.dataset.bulkId);
+        if (box.checked) filteredSelection.push(asItem(box));
+      }
+      updateSelection();
+    }));
+    clearButton.addEventListener('click', () => { filteredSelection = null; boxes.forEach(box => { box.checked = false; }); updateSelection(); });
+    filteredButton.addEventListener('click', async () => {
+      if (selecting) return;
+      selecting = true; updateSelection();
+      const enabled = [all, ...boxes].filter(box => !box.disabled);
+      enabled.forEach(box => { box.disabled = true; });
+      toolbar.querySelector('[data-bulk-selection-error]')?.remove();
+      try {
+        const url = new URL(location.href); url.searchParams.set('bulk_selection', 'true'); url.searchParams.set('page', '1');
+        const response = await fetch(url, {credentials:'same-origin'});
+        if (!response.ok) throw new Error('Selection request failed');
+        const html = new DOMParser().parseFromString(await response.text(), 'text/html');
+        const total = Number(html.querySelector('[data-bulk-total]')?.dataset.bulkTotal);
+        const items = Array.from(html.querySelectorAll('[data-bulk-id]')).filter(box => !box.closest('tr').hidden).map(asItem);
+        if (!Number.isInteger(total) || total > limit || items.length !== total) throw new Error('Selection is incomplete');
+        filteredSelection = items; toolbar.dataset.bulkTotal = String(total);
+        filteredButton.textContent = 'Select all filtered (' + total + ')';
+        const ids = new Set(items.map(item => item.id)); visible().forEach(box => { box.checked = ids.has(box.dataset.bulkId); });
+      } catch {
+        const error = document.createElement('div'); error.dataset.bulkSelectionError = ''; error.className = 'text-danger w-100'; error.setAttribute('role','alert');
+        error.textContent = 'Could not select all results. Refresh the list and try again.'; toolbar.append(error);
+      } finally {
+        selecting = false; enabled.forEach(box => { box.disabled = false; }); updateSelection();
+      }
+    });
+    new MutationObserver(updateSelection).observe(document.querySelector('[data-bulk-id]')?.closest('tbody') || document.body, {subtree:true, attributes:true, attributeFilter:['hidden']});
+    document.querySelectorAll('[data-bulk-action]').forEach(button => button.addEventListener('click', () => {
+      const items = selected(), archive = button.dataset.bulkAction === 'archive';
+      const noun = items.length === 1 ? 'object' : 'objects';
+      bulkForm.elements.ids.value = items.map(item => item.id).join(',');
+      bulkForm.elements.action.value = button.dataset.bulkAction;
+      bulkForm.querySelector('[data-bulk-title]').textContent = archive ? 'Archive selected objects' : 'Add selected users to group';
+      bulkForm.querySelector('[data-bulk-description]').textContent = archive ? 'Archive ' + items.length + ' selected ' + noun + '? Existing links are preserved. Archived objects no longer grant access.' : 'Assign a group to ' + items.length + ' selected users. Existing memberships are kept.';
+      bulkForm.querySelector('[data-bulk-names]').replaceChildren(...items.map(item => { const li = document.createElement('li'); li.textContent = item.name; return li; }));
+      const group = bulkForm.querySelector('[data-bulk-group]');
+      if (group) { group.hidden = archive; bulkForm.elements.group_id.disabled = archive; }
+      bulkForm.querySelector('[data-bulk-submit]').classList.toggle('btn-danger', archive);
+      bulkForm.querySelector('[data-bulk-submit]').classList.toggle('btn-primary', !archive);
+      bulkForm.querySelector('[data-bulk-submit]').textContent = archive ? 'Archive ' + items.length + ' ' + noun : 'Assign group';
+    }));
+    bulkForm.addEventListener('submit', () => { bulkForm.querySelector('[data-bulk-submit]').disabled = true; });
+    updateSelection();
+  }
+  document.querySelectorAll('[data-admin-detail]').forEach(button => button.addEventListener('click', () => {
+    const row = document.getElementById(button.dataset.adminDetail); row.hidden = !row.hidden;
+    button.setAttribute('aria-expanded', String(!row.hidden));
+  }));
+  document.querySelectorAll('[data-admin-copy]').forEach(button => button.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(button.dataset.adminCopy); button.textContent = 'Copied'; }
+    catch { button.textContent = button.dataset.adminCopy; button.title = 'Select this UUID and copy it'; }
+  }));
+});
+</script>
 </body>
 </html>

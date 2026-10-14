@@ -1,0 +1,6 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="card"><div class="card-header admin-header"><h3 class="card-title">Bulk action results</h3><a class="btn btn-primary" href="{{ return_path }}">Back to list</a></div>
+<div class="card-body"><p>{{ succeeded }} succeeded · {{ skipped }} skipped · {{ failed }} failed</p><div class="text-secondary">Batch ID: <code>{{ batch_id }}</code></div></div>
+<div class="table-responsive"><table class="table card-table admin-table"><thead><tr><th>Object</th><th>Result</th><th>Details</th></tr></thead><tbody>{% for row in rows %}<tr><td>{{ row.name }}<div class="admin-secondary"><code>{{ row.id }}</code></div></td><td>{{ row.status }}</td><td>{{ row.reason }}</td></tr>{% endfor %}</tbody></table></div></div>
+{% endblock %}

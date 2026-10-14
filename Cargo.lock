@@ -4321,7 +4321,7 @@ checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
 name = "simple-idm-ad-auth"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -4332,7 +4332,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ad-proxy"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4356,7 +4356,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-bastion"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4381,7 +4381,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-common"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "axum",
  "base64 0.23.1",
@@ -4391,7 +4391,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-core"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4444,7 +4444,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ctl"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4470,7 +4470,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ldap-sync"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -4478,7 +4478,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-oauth2-proxy"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4499,7 +4499,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-oidc-metadata-proxy"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "axum",
@@ -4514,7 +4514,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-server"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "argon2",
@@ -4563,7 +4563,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ssh-login"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "axum",
  "clap",
@@ -4591,7 +4591,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-ssh-signer"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "axum",
  "clap",
@@ -4604,7 +4604,7 @@ dependencies = [
 
 [[package]]
 name = "simple-idm-token-proxy"
-version = "0.15.3"
+version = "0.16.3"
 dependencies = [
  "anyhow",
  "axum",

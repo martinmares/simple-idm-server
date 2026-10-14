@@ -33,7 +33,6 @@
   .membership-grid {
     display: grid;
     grid-template-columns: minmax(220px, 300px) minmax(0, 1fr);
-    min-height: 360px;
   }
 
   .membership-picker {
@@ -42,9 +41,8 @@
   }
 
   .membership-list {
-    max-height: 300px;
-    overflow: auto;
     display: grid;
+    align-content: start;
     gap: .35rem;
     margin-top: .75rem;
   }
@@ -145,7 +143,8 @@
 </style>
 
 <div class="membership-shell">
-  <section class="membership-section" id="by-user">
+  <nav class="nav nav-tabs admin-tabs" aria-label="memberships views" data-admin-tabs="by-user,by-group"><a href="#by-user" class="nav-link" role="tab" data-view="by-user">Users</a><a href="#by-group" class="nav-link" role="tab" data-view="by-group">Groups</a></nav>
+<section class="membership-section" id="by-user">
     <div class="membership-section-header">
       <div>
         <h3 class="mb-0">Users</h3>
@@ -159,14 +158,15 @@
       {% endif %}
     </div>
 
+    <div class="p-3 border-bottom membership-picker-controls" data-membership-picker-filter><div class="admin-filter"><div class="admin-search"><label class="form-label" for="membership-user-search">Search users</label><input id="membership-user-search" class="form-control membership-filter" data-filter-target="membership-users-list" data-query-param="user_filter" value="{{ user_filter }}" placeholder="Username, name or email…"></div><div class="admin-field"><label class="form-label" for="membership-user-auth">Authentication</label><select class="form-select" id="membership-user-auth" data-query-param="user_auth" data-filter-field="auth"><option value="all">All methods</option><option value="local">Local password</option><option value="ad">AD/LDAP</option><option value="federated">Federated OIDC</option></select></div><div class="admin-field"><label class="form-label" for="membership-user-status">Status</label><select class="form-select" id="membership-user-status" data-query-param="user_status" data-filter-field="status"><option value="all">All statuses</option><option value="active">Active</option><option value="inactive">Inactive</option></select></div><button class="btn btn-outline-secondary" type="button" data-membership-reset>Reset</button></div><div class="admin-filter-help" data-membership-count></div></div>
     <div class="membership-grid">
       <aside class="membership-picker">
-        <input class="form-control membership-filter" data-filter-target="membership-users-list" data-query-param="user_filter" value="{{ user_filter }}" placeholder="Filter user ...">
+
         <div class="membership-list" id="membership-users-list">
           {% for u in users %}
           <a class="membership-list-item membership-select-link {% if u.selected %}active{% endif %}"
              href="/admin/ui/memberships?user_id={{ u.id }}{% if let Some(g) = selected_group %}&group_id={{ g.id }}{% endif %}#by-user"
-             data-filter-text="{{ u.username }} {{ u.email }} {% if let Some(first) = u.first_name %}{{ first }}{% endif %} {% if let Some(last) = u.last_name %}{{ last }}{% endif %}">
+             data-auth="{{ u.auth_mode }}" data-status="{% if u.is_active %}active{% else %}inactive{% endif %}" data-filter-text="{{ u.username }} {{ u.email }} {% if let Some(first) = u.first_name %}{{ first }}{% endif %} {% if let Some(last) = u.last_name %}{{ last }}{% endif %}">
             <div class="fw-semibold">{{ u.username }}</div>
             <div class="membership-muted">{{ u.email }}</div>
           </a>
@@ -178,7 +178,7 @@
         {% if let Some(u) = selected_user %}
         <div class="membership-detail-head">
           <div>
-            <h3 class="mb-1">{{ u.username }}</h3>
+            <h3 class="mb-1">{{ u.username }}</h3><button type="button" class="btn btn-sm btn-outline-secondary mb-2" data-admin-copy="{{ u.id }}" aria-label="Copy user UUID">Copy UUID</button>
             <div class="membership-muted">
               {{ u.email }}
               {% if !u.is_active %}<span class="badge bg-red-lt ms-2">inactive</span>{% endif %}
@@ -364,14 +364,15 @@
       {% endif %}
     </div>
 
+    <div class="p-3 border-bottom membership-picker-controls" data-membership-picker-filter><div class="admin-filter"><div class="admin-search"><label class="form-label" for="membership-group-search">Search groups</label><input id="membership-group-search" class="form-control membership-filter" data-filter-target="membership-groups-list" data-query-param="group_filter" value="{{ group_filter }}" placeholder="Name or description…"></div><div class="admin-field"><label class="form-label" for="membership-group-type">Type</label><select class="form-select" id="membership-group-type" data-query-param="group_type" data-filter-field="type"><option value="all">All types</option><option value="virtual">Virtual bundle</option><option value="regular">Regular group</option></select></div><button class="btn btn-outline-secondary" type="button" data-membership-reset>Reset</button></div><div class="admin-filter-help" data-membership-count></div></div>
     <div class="membership-grid">
       <aside class="membership-picker">
-        <input class="form-control membership-filter" data-filter-target="membership-groups-list" data-query-param="group_filter" value="{{ group_filter }}" placeholder="Filter group ...">
+
         <div class="membership-list" id="membership-groups-list">
           {% for g in groups %}
           <a class="membership-list-item membership-select-link {% if g.selected %}active{% endif %}"
              href="/admin/ui/memberships?{% if let Some(u) = selected_user %}user_id={{ u.id }}&{% endif %}group_id={{ g.id }}#by-group"
-             data-filter-text="{{ g.name }} {% if let Some(d) = g.description %}{{ d }}{% endif %}">
+             data-type="{% if g.is_virtual %}virtual{% else %}regular{% endif %}" data-filter-text="{{ g.name }} {% if let Some(d) = g.description %}{{ d }}{% endif %}">
             <div class="fw-semibold">
               {{ g.name }}
               {% if g.is_virtual %}<span class="badge bg-azure-lt ms-2">virtual</span>{% endif %}
@@ -386,7 +387,7 @@
         {% if let Some(g) = selected_group %}
         <div class="membership-detail-head">
           <div>
-            <h3 class="mb-1">{{ g.name }}</h3>
+            <h3 class="mb-1">{{ g.name }}</h3><button type="button" class="btn btn-sm btn-outline-secondary mb-2" data-admin-copy="{{ g.id }}" aria-label="Copy group UUID">Copy UUID</button>
             <div class="membership-muted">
               {% if let Some(d) = g.description %}{{ d }}{% else %}No description{% endif %}
               {% if g.is_virtual %}<span class="badge bg-azure-lt ms-2">virtual</span>{% endif %}
@@ -581,23 +582,43 @@
   document.querySelectorAll('.membership-filter').forEach((input) => {
     const target = document.getElementById(input.dataset.filterTarget);
     if (!target) return;
+    const controls = input.closest('[data-membership-picker-filter]');
+    const extras = Array.from(controls?.querySelectorAll('select') || []);
+    const fields = controls ? [input, ...extras] : [];
+    const params = new URLSearchParams(location.search);
+    fields.forEach(field => {
+      if(params.has(field.dataset.queryParam)) field.value = params.get(field.dataset.queryParam);
+      if(field.tagName === 'SELECT' && !field.value) field.value = 'all';
+    });
     const applyFilter = () => {
-      target.querySelectorAll('[data-filter-text]').forEach((item) => {
-        item.hidden = !matchWords(item.dataset.filterText || '', input.value);
+      let count = 0;
+      const items = target.querySelectorAll('[data-filter-text]');
+      items.forEach(item => {
+        item.hidden = !matchWords(item.dataset.filterText || '', input.value) || extras.some(field => field.value !== 'all' && item.dataset[field.dataset.filterField] !== field.value);
+        count += Number(!item.hidden);
       });
+      if (controls) {
+        const selected = target.querySelector('.active');
+        controls.querySelector('[data-membership-count]').textContent = count + ' of ' + items.length + ' results' + (selected?.hidden ? ' · current selection is outside these filters' : '');
+        const url = new URL(location.href);
+        fields.forEach(field => { const key = field.dataset.queryParam, value = field.value.trim(); if(value && value !== 'all') url.searchParams.set(key, value); else url.searchParams.delete(key); });
+        history.replaceState(null, '', url);
+      }
     };
     input.addEventListener('input', applyFilter);
+    extras.forEach(field => field.addEventListener('change', applyFilter));
+    controls?.querySelector('[data-membership-reset]').addEventListener('click', () => { input.value = ''; extras.forEach(field => { field.value = 'all'; }); applyFilter(); });
     applyFilter();
   });
 
   document.querySelectorAll('.membership-select-link').forEach((link) => {
     link.addEventListener('click', () => {
       const url = new URL(link.href, window.location.href);
-      document.querySelectorAll('.membership-filter[data-query-param]').forEach((input) => {
+      document.querySelectorAll('.membership-picker-controls [data-query-param]').forEach((input) => {
         const param = input.dataset.queryParam;
         if (!param) return;
         const value = input.value.trim();
-        if (value) {
+        if (value && value !== 'all') {
           url.searchParams.set(param, value);
         } else {
           url.searchParams.delete(param);

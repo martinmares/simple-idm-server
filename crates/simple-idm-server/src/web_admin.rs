@@ -30,6 +30,9 @@ use tokio::sync::RwLock;
 use url::Url;
 use uuid::Uuid;
 
+mod bulk;
+mod lists;
+
 const ADMIN_SESSION_COOKIE: &str = "sidm_admin_session";
 const ADMIN_SESSION_TTL_SECONDS: i64 = 8 * 60 * 60;
 
@@ -113,6 +116,10 @@ trait AdminTemplateBranding {
 
     fn admin_product_title(&self) -> String {
         admin_product_title()
+    }
+
+    fn admin_bulk_limit(&self) -> usize {
+        bulk::MAX_BATCH
     }
 
     fn admin_security_warning(&self) -> Option<String> {
@@ -457,10 +464,19 @@ struct PageQuery {
     q: Option<String>,
     status: Option<String>,
     note: Option<String>,
+    auth: Option<String>,
+    mfa: Option<String>,
+    passkeys: Option<String>,
+    sort: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+    claim_maps: Option<String>,
     #[serde(default, deserialize_with = "deserialize_opt_string_or_seq")]
     letters: Option<Vec<String>>,
     page: Option<u32>,
+    bulk_selection: Option<bool>,
     client_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "deserialize_optional_uuid")]
     group_id: Option<Uuid>,
 }
 
@@ -1091,6 +1107,7 @@ struct UsersTemplate {
     ad_link: Option<String>,
     federated_link: Option<String>,
     rows: Vec<UserRow>,
+    bulk_groups: Vec<GroupRow>,
     deleted_rows: Vec<UserRow>,
     ad_modal_data: Vec<UserAdMappingModalData>,
     ad_onboarding_tokens: Vec<AdOnboardingTokenView>,
@@ -1098,7 +1115,11 @@ struct UsersTemplate {
     filter_q: String,
     filter_status: String,
     filter_note: String,
-    letter_filters: Vec<LetterFilter>,
+    filter_auth: String,
+    filter_mfa: String,
+    filter_passkeys: String,
+    filter_group: String,
+    filter_sort: String,
     current_page: u32,
     total_pages: u32,
     has_prev: bool,
@@ -1126,12 +1147,6 @@ struct AdOnboardingTokenView {
     status_class: String,
 }
 
-#[derive(Debug, Clone)]
-struct LetterFilter {
-    value: String,
-    selected: bool,
-}
-
 #[derive(Template)]
 #[template(path = "admin/users_import.html")]
 struct UsersImportTemplate {
@@ -1147,6 +1162,9 @@ struct GroupsTemplate {
     message: Option<String>,
     error: Option<String>,
     rows: Vec<GroupView>,
+    visible_ids: Vec<Uuid>,
+    filters: lists::ListFilters,
+    pagination: lists::ListPagination,
     deleted_rows: Vec<GroupRow>,
 }
 
@@ -1203,6 +1221,8 @@ struct ClientsTemplate {
     deleted_rows: Vec<ClientRow>,
     client_patterns: Vec<ClientGroupPatternRow>,
     filter_q: String,
+    filters: lists::ListFilters,
+    pagination: lists::ListPagination,
 }
 
 #[derive(Template)]
@@ -1352,6 +1372,7 @@ pub fn router(state: WebAdminState) -> Router {
             "/admin/ui/users/{user_id}/patterns/{pattern_id}/deactivate",
             post(user_patterns_deactivate),
         )
+        .route("/admin/ui/users/bulk", post(bulk::users_bulk))
         .route("/admin/ui/users/{id}/deactivate", post(users_deactivate))
         .route("/admin/ui/users/{id}/restore", post(users_restore))
         .route(
@@ -1382,6 +1403,7 @@ pub fn router(state: WebAdminState) -> Router {
         .route("/admin/ui/groups/create", post(groups_create))
         .route("/admin/ui/groups/{id}/update", post(groups_update))
         .route("/admin/ui/groups/{id}/members", post(groups_members))
+        .route("/admin/ui/groups/bulk", post(bulk::groups_bulk))
         .route("/admin/ui/groups/{id}/deactivate", post(groups_deactivate))
         .route("/admin/ui/groups/{id}/restore", post(groups_restore))
         .route("/admin/ui/tenants", get(tenants_page))
@@ -1550,235 +1572,12 @@ async fn admin_static_asset(Path(path): Path<String>) -> Response {
 
 const USERS_PAGE_JS: &str = r#"
 document.addEventListener('DOMContentLoaded', function() {
-  const filterForm = document.getElementById('users-filter-form');
-  const FILTER_COOKIE = 'sidm_users_filters';
-
-  function setCookie(name, value, days) {
-    const expires = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toUTCString();
-    document.cookie = `${name}=${encodeURIComponent(value)}; expires=${expires}; path=/; SameSite=Lax`;
-  }
-
-  function getCookie(name) {
-    const raw = document.cookie
-      .split('; ')
-      .find((row) => row.startsWith(`${name}=`));
-    if (!raw) return null;
-    return decodeURIComponent(raw.substring(name.length + 1));
-  }
-
-  function clearCookie(name) {
-    document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/; SameSite=Lax`;
-  }
-
-  function updateLettersHidden() {
-    if (!filterForm) return;
-    const selected = Array.from(filterForm.querySelectorAll('.letter-filter:checked'))
-      .map(el => el.value)
-      .join(',');
-    const hidden = document.getElementById('letters-hidden');
-    if (hidden) hidden.value = selected;
-  }
-  if (filterForm) {
-    const qInput = filterForm.querySelector('input[name="q"]');
-    const statusSelect = filterForm.querySelector('select[name="status"]');
-    const noteInput = filterForm.querySelector('input[name="note"]');
-    let lastFocusName = null;
-    let lastFocusPos = null;
-    let filterRequestSeq = 0;
-    let resultsInteractionSeq = 0;
-
-    document.addEventListener('pointerdown', (e) => {
-      if (e.target instanceof Element && e.target.closest('#users-results')) {
-        resultsInteractionSeq += 1;
-      }
-    }, true);
-
-    function getSelectedLetters() {
-      return Array.from(filterForm.querySelectorAll('.letter-filter:checked')).map(el => el.value);
-    }
-
-    function persistFilters() {
-      const payload = {
-        q: (qInput?.value || '').trim(),
-        status: statusSelect?.value || 'all',
-        note: (noteInput?.value || '').trim(),
-        letters: getSelectedLetters()
-      };
-      setCookie(FILTER_COOKIE, JSON.stringify(payload), 14);
-    }
-
-    function applyPersistedFilters() {
-      const raw = getCookie(FILTER_COOKIE);
-      if (!raw) return false;
-      let saved = null;
-      try {
-        saved = JSON.parse(raw);
-      } catch (_) {
-        return false;
-      }
-      if (!saved || typeof saved !== 'object') return false;
-
-      if (qInput) qInput.value = saved.q || '';
-      if (statusSelect) statusSelect.value = saved.status || 'all';
-      if (noteInput) noteInput.value = saved.note || '';
-
-      const selected = new Set(Array.isArray(saved.letters) ? saved.letters : []);
-      filterForm.querySelectorAll('.letter-filter').forEach((el) => {
-        el.checked = selected.has(el.value);
-      });
-      updateLettersHidden();
-
-      return Boolean(
-        (saved.q && saved.q.trim().length > 0) ||
-        (saved.note && saved.note.trim().length > 0) ||
-        (saved.status && saved.status !== 'all') ||
-        (Array.isArray(saved.letters) && saved.letters.length > 0)
-      );
-    }
-
-    const params = new URLSearchParams(window.location.search);
-    const hasQueryState =
-      params.has('q') || params.has('status') || params.has('note') || params.has('letters');
-    const hasUiMessageState =
-      params.has('message') || params.has('error') || params.has('ad_link') || params.has('federated_link');
-
-    function captureFocusState(el) {
-      if (!el || !el.name) return;
-      lastFocusName = el.name;
-      if (typeof el.selectionStart === 'number') {
-        lastFocusPos = el.selectionStart;
-      } else {
-        lastFocusPos = null;
-      }
-    }
-
-    [qInput, noteInput, statusSelect].forEach((el) => {
-      if (!el) return;
-      el.addEventListener('focus', () => captureFocusState(el));
-      el.addEventListener('click', () => captureFocusState(el));
-      el.addEventListener('input', () => captureFocusState(el));
-      el.addEventListener('keyup', () => captureFocusState(el));
-      el.addEventListener('change', () => captureFocusState(el));
-    });
-
-    async function navigateWithFilters(focusName) {
-      updateLettersHidden();
-      persistFilters();
-      const requestSeq = ++filterRequestSeq;
-      const interactionSeq = resultsInteractionSeq;
-      const p = new URLSearchParams();
-      p.set('q', (qInput?.value || '').trim());
-      p.set('status', statusSelect?.value || 'all');
-      p.set('note', (noteInput?.value || '').trim());
-      p.set('letters', document.getElementById('letters-hidden')?.value || '');
-      if (focusName) p.set('_focus', focusName);
-      if (typeof lastFocusPos === 'number') p.set('_cursor', String(lastFocusPos));
-      const url = `/admin/ui/users?${p.toString()}`;
-      const resultsRoot = document.getElementById('users-results');
-      if (!resultsRoot) {
-        window.location.assign(url);
-        return;
-      }
-      try {
-        resultsRoot.style.opacity = '0.55';
-        const response = await fetch(url, {
-          headers: {
-            'X-Requested-With': 'XMLHttpRequest'
-          }
-        });
-        if (!response.ok) {
-          window.location.assign(url);
-          return;
-        }
-        const html = await response.text();
-        const parsed = new DOMParser().parseFromString(html, 'text/html');
-        const nextResults = parsed.getElementById('users-results');
-        if (!nextResults) {
-          window.location.assign(url);
-          return;
-        }
-        if (requestSeq !== filterRequestSeq || interactionSeq !== resultsInteractionSeq) {
-          return;
-        }
-        resultsRoot.replaceWith(nextResults);
-        history.replaceState({}, '', url);
-        initAdMapForms();
-        initAdTokenControls();
-        applyFocusFromUrlParams(new URL(url, window.location.origin).searchParams);
-      } catch (_) {
-        window.location.assign(url);
-      } finally {
-        const newRoot = document.getElementById('users-results');
-        if (newRoot) newRoot.style.opacity = '';
-      }
-    }
-
-    let shouldAutoApplyPersisted = false;
-    if (!hasQueryState && !hasUiMessageState) {
-      shouldAutoApplyPersisted = applyPersistedFilters();
-    }
-
-    let debounceTimer = null;
-    filterForm.addEventListener('submit', function(e) {
-      e.preventDefault();
-      const active = document.activeElement;
-      if (active && active.name) captureFocusState(active);
-      navigateWithFilters(lastFocusName);
-    });
-    const liveInputs = filterForm.querySelectorAll('input[name=\"q\"], input[name=\"note\"], select[name=\"status\"]');
-    liveInputs.forEach((el) => {
-      el.addEventListener('input', () => {
-        clearTimeout(debounceTimer);
-        debounceTimer = setTimeout(() => {
-          void navigateWithFilters(el.name || lastFocusName);
-        }, 300);
-      });
-      el.addEventListener('change', () => {
-        clearTimeout(debounceTimer);
-        void navigateWithFilters(el.name || lastFocusName);
-      });
-    });
-    filterForm.querySelectorAll('.letter-filter').forEach((el) => {
-      el.addEventListener('change', () => {
-        clearTimeout(debounceTimer);
-        void navigateWithFilters(lastFocusName || 'q');
-      });
-    });
-
-    const resetBtn = document.getElementById('users-filter-reset');
-    if (resetBtn) {
-      resetBtn.addEventListener('click', () => {
-        clearCookie(FILTER_COOKIE);
-        window.location.href = '/admin/ui/users';
-      });
-    }
-
-    function applyFocusFromUrlParams(urlParams) {
-      const focusName = urlParams.get('_focus');
-      const focusPosRaw = urlParams.get('_cursor');
-      if (!focusName) return;
-      const target = filterForm.querySelector(`[name="${focusName}"]`);
-      if (target) {
-        setTimeout(() => {
-          target.focus();
-          if (target.setSelectionRange && typeof target.value === 'string') {
-            const parsed = Number.parseInt(focusPosRaw || '', 10);
-            const pos = Number.isFinite(parsed) ? Math.min(parsed, target.value.length) : target.value.length;
-            target.setSelectionRange(pos, pos);
-          }
-        }, 0);
-      }
-      urlParams.delete('_focus');
-      urlParams.delete('_cursor');
-      const next = urlParams.toString();
-      history.replaceState({}, '', next ? `/admin/ui/users?${next}` : '/admin/ui/users');
-    }
-    applyFocusFromUrlParams(params);
-
-    if (shouldAutoApplyPersisted) {
-      setTimeout(() => { void navigateWithFilters(null); }, 0);
-    }
-  }
+  // Primary list filters submit explicit GET requests; the URL is their state.
+  const reset = document.getElementById('users-filter-reset');
+  reset?.addEventListener('click', () => {
+    document.cookie = 'sidm_users_filters=; Max-Age=0; path=/; SameSite=Lax';
+    window.location.href = '/admin/ui/users?q=&status=all&note=';
+  });
 
   function randomPassword(length) {
     const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%^&*_-+=';
@@ -2608,7 +2407,18 @@ fn users_return_path_from_referer(headers: &HeaderMap) -> String {
         let mut kept = Vec::new();
         for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
             let key = k.as_ref();
-            if matches!(key, "q" | "status" | "note" | "letters" | "page") {
+            if matches!(
+                key,
+                "q" | "status"
+                    | "note"
+                    | "letters"
+                    | "page"
+                    | "auth"
+                    | "mfa"
+                    | "passkeys"
+                    | "group_id"
+                    | "sort"
+            ) {
                 kept.push((k.into_owned(), v.into_owned()));
             }
         }
@@ -2715,7 +2525,17 @@ fn memberships_return_path_from_referer(headers: &HeaderMap, fallback: &str) -> 
         let mut kept = Vec::new();
         for (k, v) in url::form_urlencoded::parse(query.as_bytes()) {
             let key = k.as_ref();
-            if matches!(key, "user_id" | "group_id" | "user_filter" | "group_filter") {
+            if matches!(
+                key,
+                "user_id"
+                    | "group_id"
+                    | "user_filter"
+                    | "group_filter"
+                    | "user_auth"
+                    | "user_status"
+                    | "group_type"
+                    | "view"
+            ) {
                 kept.push((k.into_owned(), v.into_owned()));
             }
         }
@@ -2733,7 +2553,12 @@ fn memberships_return_path_from_referer(headers: &HeaderMap, fallback: &str) -> 
 }
 
 fn q_return_path_from_referer(headers: &HeaderMap, prefix: &str, fallback: &str) -> String {
-    scoped_return_path_from_referer(headers, prefix, fallback, &["q"])
+    scoped_return_path_from_referer(
+        headers,
+        prefix,
+        fallback,
+        &["q", "status", "type", "claim_maps", "page"],
+    )
 }
 
 fn scoped_return_path_from_referer(
@@ -3956,6 +3781,13 @@ async fn federated_onboarding_callback(
     response
 }
 
+fn normalize_filter(value: Option<&str>, choices: &[&str], fallback: &str) -> String {
+    value
+        .filter(|value| choices.contains(value))
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
 async fn users_page(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -3968,8 +3800,29 @@ async fn users_page(
     let filter_q = query.q.unwrap_or_default();
     let filter_note = query.note.unwrap_or_default();
     let filter_status = query.status.unwrap_or_else(|| "all".to_string());
-    let page = query.page.unwrap_or(1).max(1);
-    let per_page: i64 = 25;
+    let filter_auth = normalize_filter(query.auth.as_deref(), &["local", "ad", "federated"], "all");
+    let filter_mfa = normalize_filter(
+        query.mfa.as_deref(),
+        &["active", "pending", "not_enrolled"],
+        "all",
+    );
+    let filter_passkeys = normalize_filter(query.passkeys.as_deref(), &["yes", "no"], "all");
+    let filter_sort = normalize_filter(
+        query.sort.as_deref(),
+        &["username", "name", "last_sign_in"],
+        "username",
+    );
+    let filter_group = query.group_id.map(|id| id.to_string()).unwrap_or_default();
+    let passkeys_filter = match filter_passkeys.as_str() {
+        "yes" => Some(true),
+        "no" => Some(false),
+        _ => None,
+    };
+    let page = if query.bulk_selection == Some(true) {
+        1
+    } else {
+        query.page.unwrap_or(1).max(1)
+    };
     let search_patterns = filter_q
         .split_whitespace()
         .map(|v| v.trim().to_lowercase())
@@ -4051,12 +3904,21 @@ async fn users_page(
              AND (
                cardinality($4::text[]) = 0 OR
                UPPER(LEFT(COALESCE(last_name, ''), 1)) = ANY($4::text[])
-             )"#,
+             )
+             AND ($5 = 'all' OR users.auth_mode = $5)
+             AND ($6 = 'all' OR (users.auth_mode = 'local' AND
+               COALESCE((SELECT ua.status FROM user_authenticators ua WHERE ua.user_id = users.id AND ua.kind = 'totp' AND ua.status IN ('active','pending') ORDER BY CASE ua.status WHEN 'active' THEN 0 ELSE 1 END, ua.updated_at DESC LIMIT 1), 'not_enrolled') = $6))
+             AND ($7::boolean IS NULL OR EXISTS (SELECT 1 FROM user_passkeys up WHERE up.user_id = users.id AND up.revoked_at IS NULL) = $7)
+             AND ($8::uuid IS NULL OR EXISTS (SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id WHERE ug.user_id = users.id AND ug.group_id = $8 AND g.deleted_at IS NULL))"#,
     )
     .bind(&search_patterns)
     .bind(active_filter)
     .bind(filter_note.trim())
     .bind(&selected_letters)
+    .bind(&filter_auth)
+    .bind(&filter_mfa)
+    .bind(passkeys_filter)
+    .bind(query.group_id)
     .fetch_one(&state.db_pool)
     .await
     {
@@ -4067,6 +3929,10 @@ async fn users_page(
         }
     };
 
+    let per_page = match lists::page_size(total_items, query.bulk_selection) {
+        Ok(size) => size,
+        Err(response) => return response,
+    };
     let total_pages = ((total_items + per_page - 1) / per_page).max(1) as u32;
     let page = page.min(total_pages);
     let offset = ((page - 1) as i64) * per_page;
@@ -4161,13 +4027,26 @@ async fn users_page(
                cardinality($4::text[]) = 0 OR
                UPPER(LEFT(COALESCE(users.last_name, ''), 1)) = ANY($4::text[])
              )
-           ORDER BY users.username ASC
-           LIMIT $5 OFFSET $6"#,
+
+             AND ($5 = 'all' OR users.auth_mode = $5)
+             AND ($6 = 'all' OR (users.auth_mode = 'local' AND
+               COALESCE((SELECT ua.status FROM user_authenticators ua WHERE ua.user_id = users.id AND ua.kind = 'totp' AND ua.status IN ('active','pending') ORDER BY CASE ua.status WHEN 'active' THEN 0 ELSE 1 END, ua.updated_at DESC LIMIT 1), 'not_enrolled') = $6))
+             AND ($7::boolean IS NULL OR EXISTS (SELECT 1 FROM user_passkeys up WHERE up.user_id = users.id AND up.revoked_at IS NULL) = $7)
+             AND ($8::uuid IS NULL OR EXISTS (SELECT 1 FROM user_groups ug JOIN groups g ON g.id = ug.group_id WHERE ug.user_id = users.id AND ug.group_id = $8 AND g.deleted_at IS NULL))
+           ORDER BY CASE WHEN $9 = 'last_sign_in' THEN users.last_sign_in_at END DESC NULLS LAST,
+                    CASE WHEN $9 = 'name' THEN lower(concat_ws(' ', users.last_name, users.first_name)) END ASC,
+                    lower(users.username) ASC, users.id ASC
+           LIMIT $10 OFFSET $11"#,
     )
     .bind(&search_patterns)
     .bind(active_filter)
     .bind(filter_note.trim())
     .bind(&selected_letters)
+    .bind(&filter_auth)
+    .bind(&filter_mfa)
+    .bind(passkeys_filter)
+    .bind(query.group_id)
+    .bind(&filter_sort)
     .bind(per_page)
     .bind(offset)
     .fetch_all(&state.db_pool)
@@ -4179,23 +4058,22 @@ async fn users_page(
         }
     };
 
-    let letter_filters = ('A'..='Z')
-        .map(|ch| {
-            let v = ch.to_string();
-            LetterFilter {
-                selected: selected_letters.contains(&v),
-                value: v,
-            }
-        })
-        .collect::<Vec<_>>();
-
     let letters_csv = selected_letters.join(",");
     let common_qs = format!(
-        "q={}&status={}&note={}",
+        "q={}&status={}&note={}&auth={}&mfa={}&passkeys={}&sort={}",
         urlencoding::encode(filter_q.trim()),
         urlencoding::encode(&filter_status),
-        urlencoding::encode(filter_note.trim())
+        urlencoding::encode(filter_note.trim()),
+        filter_auth,
+        filter_mfa,
+        filter_passkeys,
+        filter_sort
     );
+    let common_qs = if let Some(group_id) = query.group_id {
+        format!("{common_qs}&group_id={group_id}")
+    } else {
+        common_qs
+    };
     let prev_page = page.saturating_sub(1).max(1);
     let next_page = (page + 1).min(total_pages.max(1));
     let prev_page_url = if letters_csv.is_empty() {
@@ -4501,6 +4379,15 @@ async fn users_page(
     .await
     .unwrap_or_default();
 
+    let bulk_groups = match sqlx::query_as::<_, GroupRow>("SELECT id, tenant_id, name, description, is_virtual FROM groups WHERE tenant_id = $1 AND deleted_at IS NULL ORDER BY name")
+        .bind(default_tenant_id()).fetch_all(&state.db_pool).await {
+        Ok(rows) => rows,
+        Err(error) => {
+            tracing::warn!(%error, "Could not load user bulk group choices");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Could not load groups. Please try again.").into_response();
+        },
+    };
+
     render_template(UsersTemplate {
         sections: nav_items(AdminSection::Users),
         message: query.message,
@@ -4509,13 +4396,18 @@ async fn users_page(
         federated_link: query.federated_link,
         rows,
         deleted_rows,
+        bulk_groups,
         ad_modal_data,
         ad_onboarding_tokens,
         identity_providers,
         filter_q,
         filter_status,
         filter_note,
-        letter_filters,
+        filter_auth,
+        filter_mfa,
+        filter_passkeys,
+        filter_group,
+        filter_sort,
         current_page: page,
         total_pages,
         has_prev: page > 1,
@@ -5289,9 +5181,7 @@ async fn users_deactivate(
     .await;
 
     match result {
-        Ok(_) => {
-            redirect_with(&return_path, "message", "User deactivated (safe delete)").into_response()
-        }
+        Ok(_) => redirect_with(&return_path, "message", "User archived").into_response(),
         Err(e) => {
             redirect_with(&return_path, "error", &format!("Deactivate failed: {e}")).into_response()
         }
@@ -6009,6 +5899,72 @@ async fn groups_page(
         return redir.into_response();
     }
 
+    let filters = lists::ListFilters::groups(&query);
+    let mut count_sql = sqlx::QueryBuilder::new("SELECT count(*) FROM groups");
+    filters.group_predicates(&mut count_sql);
+    let total = match count_sql
+        .build_query_scalar::<i64>()
+        .fetch_one(&state.db_pool)
+        .await
+    {
+        Ok(total) => total,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not count groups: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let page_size = match lists::page_size(total, query.bulk_selection) {
+        Ok(size) => size,
+        Err(response) => return response,
+    };
+    let requested_page = if query.bulk_selection == Some(true) {
+        Some(1)
+    } else {
+        query.page
+    };
+    let pagination = lists::ListPagination::with_page_size(
+        total,
+        requested_page,
+        "/admin/ui/groups",
+        &filters,
+        page_size,
+    );
+    let mut page_sql =
+        sqlx::QueryBuilder::new("SELECT id, tenant_id, name, description, is_virtual FROM groups");
+    filters.group_predicates(&mut page_sql);
+    page_sql
+        .push(" ORDER BY lower(name), id LIMIT ")
+        .push_bind(page_size)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset());
+    let page_rows = match page_sql
+        .build_query_as::<GroupRow>()
+        .fetch_all(&state.db_pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not load groups: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let visible_ids = if filters.status == "archived" {
+        Vec::new()
+    } else {
+        page_rows.iter().map(|row| row.id).collect()
+    };
+    let deleted_rows = if filters.status == "archived" {
+        page_rows
+    } else {
+        Vec::new()
+    };
+    // Keep graph metadata and editors for related nodes outside the displayed page.
     let rows = match sqlx::query_as::<_, GroupRow>(
         r#"SELECT id, tenant_id, name, description, is_virtual FROM groups WHERE deleted_at IS NULL ORDER BY name ASC"#,
     )
@@ -6077,18 +6033,14 @@ async fn groups_page(
             }
         }
     }
-    let deleted_rows = sqlx::query_as::<_, GroupRow>(
-        r#"SELECT id, tenant_id, name, description, is_virtual FROM groups WHERE deleted_at IS NOT NULL ORDER BY updated_at DESC, name ASC LIMIT 25"#,
-    )
-    .fetch_all(&state.db_pool)
-    .await
-    .unwrap_or_default();
-
     render_template(GroupsTemplate {
         sections: nav_items(AdminSection::Groups),
         message: query.message,
         error: query.error,
         rows,
+        visible_ids,
+        filters,
+        pagination,
         deleted_rows,
     })
 }
@@ -6126,6 +6078,7 @@ async fn groups_update(
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
+    let return_path = q_return_path_from_referer(&headers, "/admin/ui/groups", "/admin/ui/groups");
 
     let result =
         sqlx::query(r#"UPDATE groups SET name=$2, description=$3, is_virtual=$4 WHERE id=$1"#)
@@ -6137,12 +6090,13 @@ async fn groups_update(
             .await;
 
     match result {
-        Ok(_) => redirect_with("/admin/ui/groups", "message", "Group updated").into_response(),
+        Ok(_) => redirect_with(&return_path, "message", "Group updated").into_response(),
         Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("23514") => {
-            redirect_with("/admin/ui/groups", "error", error.message()).into_response()
+            redirect_with(&return_path, "error", error.message()).into_response()
         }
-        Err(e) => redirect_with("/admin/ui/groups", "error", &format!("Update failed: {e}"))
-            .into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Update failed: {e}")).into_response()
+        }
     }
 }
 
@@ -6155,6 +6109,7 @@ async fn groups_members(
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
+    let return_path = q_return_path_from_referer(&headers, "/admin/ui/groups", "/admin/ui/groups");
     let members: Result<Vec<_>, _> = fields
         .iter()
         .filter(|(key, _)| key == "member_id")
@@ -6163,8 +6118,7 @@ async fn groups_members(
     let members = match members {
         Ok(members) => members,
         Err(_) => {
-            return redirect_with("/admin/ui/groups", "error", "Invalid member group ID")
-                .into_response();
+            return redirect_with(&return_path, "error", "Invalid member group ID").into_response();
         }
     };
     match simple_idm_core::db::groups::set_members(&state.db_pool, id, &members).await {
@@ -6179,15 +6133,13 @@ async fn groups_members(
             )
             .await;
             redirect_with(
-                "/admin/ui/groups",
+                &return_path,
                 "message",
                 "Group members saved. Other bundles were not changed.",
             )
             .into_response()
         }
-        Err(error) => {
-            redirect_with("/admin/ui/groups", "error", &error.to_string()).into_response()
-        }
+        Err(error) => redirect_with(&return_path, "error", &error.to_string()).into_response(),
     }
 }
 
@@ -6199,6 +6151,7 @@ async fn groups_deactivate(
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
+    let return_path = q_return_path_from_referer(&headers, "/admin/ui/groups", "/admin/ui/groups");
 
     let result =
         sqlx::query(r#"UPDATE groups SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1"#)
@@ -6207,18 +6160,10 @@ async fn groups_deactivate(
             .await;
 
     match result {
-        Ok(_) => redirect_with(
-            "/admin/ui/groups",
-            "message",
-            "Group deactivated (safe delete)",
-        )
-        .into_response(),
-        Err(e) => redirect_with(
-            "/admin/ui/groups",
-            "error",
-            &format!("Deactivate failed: {e}"),
-        )
-        .into_response(),
+        Ok(_) => redirect_with(&return_path, "message", "Group archived").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Deactivate failed: {e}")).into_response()
+        }
     }
 }
 
@@ -6230,6 +6175,7 @@ async fn groups_restore(
     if let Err(redir) = require_admin_token(&state, &headers).await {
         return redir.into_response();
     }
+    let return_path = q_return_path_from_referer(&headers, "/admin/ui/groups", "/admin/ui/groups");
 
     let result = sqlx::query(
         r#"UPDATE groups SET deleted_at = NULL, updated_at = NOW() WHERE id = $1 AND deleted_at IS NOT NULL"#,
@@ -6240,11 +6186,12 @@ async fn groups_restore(
 
     match result {
         Ok(done) if done.rows_affected() > 0 => {
-            redirect_with("/admin/ui/groups", "message", "Group restored").into_response()
+            redirect_with(&return_path, "message", "Group restored").into_response()
         }
-        Ok(_) => redirect_with("/admin/ui/groups", "error", "Group is not deleted").into_response(),
-        Err(e) => redirect_with("/admin/ui/groups", "error", &format!("Restore failed: {e}"))
-            .into_response(),
+        Ok(_) => redirect_with(&return_path, "error", "Group is not deleted").into_response(),
+        Err(e) => {
+            redirect_with(&return_path, "error", &format!("Restore failed: {e}")).into_response()
+        }
     }
 }
 
@@ -7338,12 +7285,9 @@ async fn identity_providers_deactivate(
     .await;
 
     match result {
-        Ok(_) => redirect_with(
-            &return_path,
-            "message",
-            "Identity provider deactivated (safe delete)",
-        )
-        .into_response(),
+        Ok(_) => {
+            redirect_with(&return_path, "message", "Identity provider archived").into_response()
+        }
         Err(e) => {
             redirect_with(&return_path, "error", &format!("Deactivate failed: {e}")).into_response()
         }
@@ -7868,45 +7812,53 @@ async fn clients_page(
         return redir.into_response();
     }
 
-    let filter_q = query.q.unwrap_or_default();
-    let search_patterns = filter_q
-        .split_whitespace()
-        .map(|term| format!("%{}%", term.to_lowercase()))
-        .collect::<Vec<_>>();
-
-    let rows = match sqlx::query_as::<_, ClientRow>(
-        r#"SELECT id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public,
-                  groups_claim_mode, include_claim_maps, ignore_virtual_groups
-           FROM oauth_clients
-           WHERE deleted_at IS NULL
-             AND (
-               cardinality($1::text[]) = 0 OR
-               lower(concat_ws(' ', client_id, name, scope, array_to_string(redirect_uris, ' '), array_to_string(grant_types, ' '), groups_claim_mode)) LIKE ALL($1::text[])
-             )
-           ORDER BY name ASC"#,
-    )
-    .bind(&search_patterns)
-    .fetch_all(&state.db_pool)
-    .await
+    let filters = lists::ListFilters::clients(&query);
+    let filter_q = filters.q.clone();
+    let mut count_sql = sqlx::QueryBuilder::new("SELECT count(*) FROM oauth_clients");
+    filters.client_predicates(&mut count_sql);
+    let total = match count_sql
+        .build_query_scalar::<i64>()
+        .fetch_one(&state.db_pool)
+        .await
     {
-        Ok(v) => v,
-        Err(e) => {
-            return redirect_with("/admin/ui/clients", "error", &format!("DB error: {e}"))
+        Ok(total) => total,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not count clients: {error}"),
+            )
                 .into_response();
         }
     };
-
-    let deleted_rows = sqlx::query_as::<_, ClientRow>(
-        r#"SELECT id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public,
-                  groups_claim_mode, include_claim_maps, ignore_virtual_groups
-           FROM oauth_clients
-           WHERE deleted_at IS NOT NULL
-           ORDER BY deleted_at DESC
-           LIMIT 50"#,
-    )
-    .fetch_all(&state.db_pool)
-    .await
-    .unwrap_or_default();
+    let pagination = lists::ListPagination::new(total, query.page, "/admin/ui/clients", &filters);
+    let mut page_sql = sqlx::QueryBuilder::new(
+        "SELECT id, client_id, name, redirect_uris, grant_types, scope, is_active, is_public, groups_claim_mode, include_claim_maps, ignore_virtual_groups FROM oauth_clients",
+    );
+    filters.client_predicates(&mut page_sql);
+    page_sql
+        .push(" ORDER BY lower(name), id LIMIT ")
+        .push_bind(lists::PAGE_SIZE)
+        .push(" OFFSET ")
+        .push_bind(pagination.offset());
+    let page_rows = match page_sql
+        .build_query_as::<ClientRow>()
+        .fetch_all(&state.db_pool)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(error) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Could not load clients: {error}"),
+            )
+                .into_response();
+        }
+    };
+    let (rows, deleted_rows) = if filters.status == "archived" {
+        (Vec::new(), page_rows)
+    } else {
+        (page_rows, Vec::new())
+    };
 
     let client_ids = rows.iter().map(|r| r.id).collect::<Vec<_>>();
     let client_patterns = if client_ids.is_empty() {
@@ -7935,6 +7887,8 @@ async fn clients_page(
         deleted_rows,
         client_patterns,
         filter_q,
+        filters,
+        pagination,
     })
 }
 
@@ -8303,8 +8257,7 @@ async fn clients_deactivate(
     .await;
 
     match result {
-        Ok(_) => redirect_with(&return_path, "message", "Client deactivated (safe delete)")
-            .into_response(),
+        Ok(_) => redirect_with(&return_path, "message", "Client archived").into_response(),
         Err(e) => {
             redirect_with(&return_path, "error", &format!("Deactivate failed: {e}")).into_response()
         }
@@ -8513,6 +8466,16 @@ async fn group_claims_redirect() -> impl IntoResponse {
     Redirect::to("/admin/ui/claims#by-group")
 }
 
+const CLAIMS_RETURN_KEYS: &[&str] = &[
+    "client_id",
+    "group_id",
+    "view",
+    "by-client-filter",
+    "by-group-filter",
+    "by-client-rules",
+    "by-group-rules",
+];
+
 async fn client_claims_create(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -8529,7 +8492,7 @@ async fn client_claims_create(
                 &headers,
                 "/admin/ui/claims",
                 "/admin/ui/claims",
-                &["client_id", "group_id"],
+                CLAIMS_RETURN_KEYS,
             );
             return redirect_with(&return_path, "error", "Invalid client_id").into_response();
         }
@@ -8554,7 +8517,7 @@ async fn client_claims_create(
             &headers,
             "/admin/ui/claims",
             "/admin/ui/claims",
-            &["client_id", "group_id"],
+            CLAIMS_RETURN_KEYS,
         )
     } else {
         scoped_return_path_from_referer(
@@ -8600,11 +8563,7 @@ async fn claim_maps_update(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let (prefix, fallback, keys): (&str, &str, &[&str]) = if referer.contains("/admin/ui/claims") {
-        (
-            "/admin/ui/claims",
-            "/admin/ui/claims",
-            &["client_id", "group_id"],
-        )
+        ("/admin/ui/claims", "/admin/ui/claims", CLAIMS_RETURN_KEYS)
     } else if referer.contains("/admin/ui/group-claims") {
         (
             "/admin/ui/group-claims",
@@ -8664,11 +8623,7 @@ async fn claim_maps_deactivate(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let (prefix, fallback, keys): (&str, &str, &[&str]) = if referer.contains("/admin/ui/claims") {
-        (
-            "/admin/ui/claims",
-            "/admin/ui/claims",
-            &["client_id", "group_id"],
-        )
+        ("/admin/ui/claims", "/admin/ui/claims", CLAIMS_RETURN_KEYS)
     } else if referer.contains("/admin/ui/group-claims") {
         (
             "/admin/ui/group-claims",
@@ -8711,7 +8666,7 @@ async fn claim_maps_restore(
         &headers,
         "/admin/ui/claims",
         "/admin/ui/claims",
-        &["client_id", "group_id"],
+        CLAIMS_RETURN_KEYS,
     );
     let result = sqlx::query(
         r#"
@@ -8753,7 +8708,7 @@ async fn claim_patterns_create(
         &headers,
         "/admin/ui/claims",
         "/admin/ui/claims",
-        &["client_id", "group_id"],
+        CLAIMS_RETURN_KEYS,
     );
     if form.pattern.trim().is_empty() {
         return redirect_with(&return_path, "error", "Pattern is required").into_response();
@@ -8796,7 +8751,7 @@ async fn claim_patterns_update(
         &headers,
         "/admin/ui/claims",
         "/admin/ui/claims",
-        &["client_id", "group_id"],
+        CLAIMS_RETURN_KEYS,
     );
     if form.pattern.trim().is_empty() {
         return redirect_with(&return_path, "error", "Pattern is required").into_response();
@@ -8842,7 +8797,7 @@ async fn claim_patterns_deactivate(
         &headers,
         "/admin/ui/claims",
         "/admin/ui/claims",
-        &["client_id", "group_id"],
+        CLAIMS_RETURN_KEYS,
     );
 
     match sqlx::query(
@@ -8953,3 +8908,11 @@ mod tests {
         assert_eq!(form.auth_provider_id, None);
     }
 }
+
+#[cfg(test)]
+#[path = "web_admin/ui_fixture.rs"]
+mod ui_fixture;
+
+#[cfg(test)]
+#[path = "web_admin/ui_database_tests.rs"]
+mod ui_database_tests;

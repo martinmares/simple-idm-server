@@ -9,7 +9,7 @@
           <div class="text-secondary small mt-1">Single-default tenant model with managed email domain allowlist.</div>
         </div>
         {% if tenants.len() > 0 %}
-        <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-domain-modal">
+        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#create-domain-modal">
           <i class="ti ti-plus me-1"></i>Add domain
         </button>
         {% endif %}
@@ -126,8 +126,8 @@
                   <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#edit-domain-{{ d.id }}">
                     Edit
                   </button>
-                  <form method="post" action="/admin/ui/tenant-domains/{{ d.id }}/deactivate" data-confirm="Safe delete domain '{{ d.domain }}'?" data-confirm-action="Safe delete">
-                    <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
+                  <form method="post" action="/admin/ui/tenant-domains/{{ d.id }}/deactivate" data-confirm="Archive domain '{{ d.domain }}'?" data-confirm-action="Archive">
+                    <button class="btn btn-sm btn-outline-danger" type="submit">Archive</button>
                   </form>
                 </div>
               </td>
@@ -145,7 +145,7 @@
     {% if deleted_domains.len() > 0 %}
     <div class="card mt-3">
       <div class="card-header">
-        <h3 class="card-title mb-0">Recently deleted domains</h3>
+        <h3 class="card-title mb-0">Archived domains</h3>
       </div>
       <div class="table-responsive">
         <table class="table table-vcenter card-table">
@@ -189,7 +189,7 @@
           <div class="mb-3">
             <label class="form-label" for="tenant-uuid-{{ t.id }}">Tenant UUID</label>
             <input id="tenant-uuid-{{ t.id }}" class="form-control font-monospace" value="{{ t.id }}" readonly>
-            <div class="form-text">Immutable tenant ID for service configuration. Select and copy this value.</div>
+            <button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-admin-copy="{{ t.id }}">Copy UUID</button><div class="form-text">Immutable tenant ID for service configuration.</div>
           </div>
           <div class="mb-3">
             <label class="form-label">Slug</label>
@@ -333,7 +333,7 @@
         <div class="modal-body">
           <div class="mb-3">
             <label class="form-label" for="domain-uuid-{{ d.id }}">Domain UUID</label>
-            <input id="domain-uuid-{{ d.id }}" class="form-control font-monospace" value="{{ d.id }}" readonly>
+            <input id="domain-uuid-{{ d.id }}" class="form-control font-monospace" value="{{ d.id }}" readonly><button type="button" class="btn btn-sm btn-outline-secondary mt-2" data-admin-copy="{{ d.id }}">Copy UUID</button>
           </div>
           <div class="mb-3">
             <label class="form-label">Domain</label>

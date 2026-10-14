@@ -1,31 +1,29 @@
 {% extends "admin/base.html" %}
 {% block content %}
+<nav class="nav nav-tabs admin-tabs" aria-label="claims views" data-admin-tabs="by-client,by-group"><a href="#by-client" class="nav-link" role="tab" data-view="by-client">By client</a><a href="#by-group" class="nav-link" role="tab" data-view="by-group">Group usage</a></nav>
+
 <div class="row g-3">
   <div class="col-12" id="by-client">
     <div class="card">
-      <div class="card-header d-flex align-items-center justify-content-between">
+      <div class="card-header admin-header">
         <div>
           <h3 class="card-title mb-0">Claim rules by client</h3>
           <div class="text-secondary small mt-1">Select a client, then manage claim rules. A rule can apply to every user or only to users in one group.</div>
         </div>
         {% if let Some(client) = selected_client %}
-        <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-client-claim">
+        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#create-client-claim">
           <i class="ti ti-plus me-1"></i>Add claim rule
         </button>
         {% endif %}
       </div>
       <div class="card-body">
+<div class="admin-filter mb-2"><div class="admin-search"><label class="form-label" for="claim-clients-search">Search clients</label><input id="claim-clients-search" class="form-control claim-side-filter" placeholder="Filter clients…" autocomplete="off"></div><div class="admin-field"><label class="form-label" for="claim-clients-rules">Claim rules</label><select class="form-select claim-side-rules" id="claim-clients-rules"><option value="all">All</option><option value="with">Has rules</option><option value="without">No rules</option></select></div><button class="btn btn-outline-secondary claim-side-reset" type="button">Reset</button></div><div class="admin-filter-help mb-3" data-claim-count></div>
         <div class="row g-3">
           <div class="col-md-4 col-lg-3">
-            <div class="input-group mb-2">
-              <input class="form-control claim-side-filter" placeholder="Filter clients..." autocomplete="off">
-              <button class="btn btn-outline-secondary claim-side-reset" type="button" title="Reset filter">
-                <i class="ti ti-x"></i>
-              </button>
-            </div>
+
             <div class="list-group list-group-flush border rounded overflow-auto" style="max-height: 48vh;">
               {% for r in client_rows %}
-              <a class="list-group-item list-group-item-action claim-side-item {% if r.selected %}active{% endif %}" href="/admin/ui/claims?client_id={{ r.id }}{% if let Some(group) = selected_group %}{% if let Some(group_id) = group.id %}&group_id={{ group_id }}{% endif %}{% endif %}#by-client">
+              <a data-rules-count="{{ r.claims_count }}" class="list-group-item list-group-item-action claim-side-item {% if r.selected %}active{% endif %}" href="/admin/ui/claims?client_id={{ r.id }}{% if let Some(group) = selected_group %}{% if let Some(group_id) = group.id %}&group_id={{ group_id }}{% endif %}{% endif %}#by-client">
                 <div class="d-flex justify-content-between gap-2">
                   <span>{{ r.name }}</span>
                   <span class="badge {% if r.selected %}bg-white text-primary{% else %}bg-blue-lt{% endif %}">{{ r.claims_count }}</span>
@@ -38,7 +36,7 @@
             {% if let Some(client) = selected_client %}
             <div class="d-flex align-items-center justify-content-between mb-2">
               <div>
-                <h4 class="mb-0">{{ client.name }}</h4>
+                <h4 class="mb-0">{{ client.name }}</h4><button type="button" class="btn btn-sm btn-outline-secondary my-2" data-admin-copy="{{ client.id }}" aria-label="Copy client UUID">Copy UUID</button>
                 <div class="text-secondary small">{{ selected_client_claim_maps.len() }} claim rules</div>
               </div>
             </div>
@@ -96,30 +94,26 @@
 
   <div class="col-12" id="by-group">
     <div class="card">
-      <div class="card-header d-flex align-items-center justify-content-between">
+      <div class="card-header admin-header">
         <div>
           <h3 class="card-title mb-0">Group usage</h3>
           <div class="text-secondary small mt-1">Secondary view: select a group and inspect client claim rules that use it as a condition.</div>
         </div>
         {% if let Some(group) = selected_group %}
-        <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-group-claim">
+        <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#create-group-claim">
           <i class="ti ti-plus me-1"></i>Add client claim rule for group
         </button>
         {% endif %}
       </div>
       <div class="card-body">
+<div class="admin-filter mb-2"><div class="admin-search"><label class="form-label" for="claim-groups-search">Search groups</label><input id="claim-groups-search" class="form-control claim-side-filter" placeholder="Filter groups…" autocomplete="off"></div><div class="admin-field"><label class="form-label" for="claim-groups-rules">Claim rules</label><select class="form-select claim-side-rules" id="claim-groups-rules"><option value="all">All</option><option value="with">Has rules</option><option value="without">No rules</option></select></div><button class="btn btn-outline-secondary claim-side-reset" type="button">Reset</button></div><div class="admin-filter-help mb-3" data-claim-count></div>
         <div class="row g-3">
           <div class="col-md-4 col-lg-3">
-            <div class="input-group mb-2">
-              <input class="form-control claim-side-filter" placeholder="Filter groups..." autocomplete="off">
-              <button class="btn btn-outline-secondary claim-side-reset" type="button" title="Reset filter">
-                <i class="ti ti-x"></i>
-              </button>
-            </div>
+
             <div class="list-group list-group-flush border rounded overflow-auto" style="max-height: 48vh;">
               {% for r in group_rows %}
               {% if let Some(id) = r.id %}
-              <a class="list-group-item list-group-item-action claim-side-item {% if r.selected %}active{% endif %}" href="/admin/ui/claims?{% if let Some(client) = selected_client %}client_id={{ client.id }}&{% endif %}group_id={{ id }}#by-group">
+              <a data-rules-count="{{ r.claims_count }}" class="list-group-item list-group-item-action claim-side-item {% if r.selected %}active{% endif %}" href="/admin/ui/claims?{% if let Some(client) = selected_client %}client_id={{ client.id }}&{% endif %}group_id={{ id }}#by-group">
                 <div class="d-flex justify-content-between gap-2">
                   <span>{{ r.name }}</span>
                   <span class="badge {% if r.selected %}bg-white text-primary{% else %}bg-blue-lt{% endif %}">{{ r.claims_count }}</span>
@@ -133,7 +127,7 @@
             {% if let Some(group) = selected_group %}
             <div class="d-flex align-items-center justify-content-between mb-2">
               <div>
-                <h4 class="mb-0">{{ group.name }}</h4>
+                <h4 class="mb-0">{{ group.name }}</h4>{% if let Some(id) = group.id %}<button type="button" class="btn btn-sm btn-outline-secondary my-2" data-admin-copy="{{ id }}" aria-label="Copy group UUID">Copy UUID</button>{% endif %}
                 <div class="text-secondary small">{{ selected_group_claim_maps.len() }} claim rules</div>
               </div>
             </div>
@@ -193,7 +187,7 @@
 {% if deleted_claim_maps.len() > 0 %}
 <div class="card mt-3">
   <div class="card-header">
-    <h3 class="card-title mb-0">Recently deleted claim rules</h3>
+    <h3 class="card-title mb-0">Archived claim rules</h3>
   </div>
   <div class="table-responsive">
     <table class="table table-vcenter card-table">
@@ -572,26 +566,41 @@
 {% endfor %}
 
 <script>
-document.addEventListener('input', (event) => {
-  const input = event.target.closest('.claim-side-filter');
-  if (!input) return;
-  const terms = input.value.toLowerCase().split(/\s+/).map((v) => v.trim()).filter(Boolean);
-  const listRoot = input.closest('.col-md-4, .col-lg-3') || input.parentElement;
-  listRoot.querySelectorAll('.claim-side-item').forEach((item) => {
-    const text = item.textContent.toLowerCase();
-    item.style.display = terms.every((term) => text.includes(term)) ? '' : 'none';
-  });
+document.querySelectorAll('.claim-side-filter').forEach(input => {
+  const view = input.closest('[id=by-client], [id=by-group]');
+  const root = input.closest('.card-body');
+  const rules = root.querySelector('.claim-side-rules');
+  const params = new URLSearchParams(location.search);
+  input.value = params.get(view.id + '-filter') || '';
+  rules.value = params.get(view.id + '-rules') || 'all';
+  if (!rules.value) rules.value = 'all';
+  function apply() {
+    const terms = input.value.toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    const items = root.querySelectorAll('.claim-side-item'); let count = 0;
+    items.forEach(item => {
+      const hasRules = Number(item.dataset.rulesCount) > 0;
+      item.hidden = !terms.every(term => item.textContent.toLocaleLowerCase().includes(term)) || (rules.value === 'with' && !hasRules) || (rules.value === 'without' && hasRules);
+      count += Number(!item.hidden);
+    });
+    const selected = root.querySelector('.claim-side-item.active');
+    root.querySelector('[data-claim-count]').textContent = count + ' of ' + items.length + ' results' + (selected?.hidden ? ' · current selection is outside these filters' : '');
+    const url = new URL(location.href);
+    if(input.value.trim()) url.searchParams.set(view.id + '-filter', input.value.trim()); else url.searchParams.delete(view.id + '-filter');
+    if(rules.value !== 'all') url.searchParams.set(view.id + '-rules', rules.value); else url.searchParams.delete(view.id + '-rules');
+    history.replaceState(null, '', url);
+  }
+  input.addEventListener('input', apply); rules.addEventListener('change', apply);
+  root.querySelector('.claim-side-reset').addEventListener('click', () => { input.value = ''; rules.value = 'all'; apply(); input.focus(); });
+  apply();
 });
-
-document.addEventListener('click', (event) => {
-  const button = event.target.closest('.claim-side-reset');
-  if (!button) return;
-  const root = button.closest('.col-md-4, .col-lg-3') || button.parentElement;
-  const input = root.querySelector('.claim-side-filter');
-  if (!input) return;
-  input.value = '';
-  input.dispatchEvent(new Event('input', { bubbles: true }));
-  input.focus();
+document.addEventListener('click', event => {
+  const link = event.target.closest('.claim-side-item'); if(!link) return;
+  const url = new URL(link.href, location.origin);
+  const current = new URLSearchParams(location.search);
+  ['by-client-filter', 'by-group-filter', 'by-client-rules', 'by-group-rules'].forEach(key => {
+    if(current.has(key)) url.searchParams.set(key, current.get(key)); else url.searchParams.delete(key);
+  });
+  link.href = url;
 });
 
 function addClaimArrayItem(editor, value) {
@@ -618,6 +627,7 @@ function syncClaimValueForm(form) {
   if (!hidden || !singleEditor || !arrayEditor) return;
 
   const isArray = kind === 'array';
+  if (singleInput) { singleInput.required = !isArray; singleInput.setCustomValidity(''); }
   singleEditor.classList.toggle('d-none', isArray);
   arrayEditor.classList.toggle('d-none', !isArray);
 
@@ -674,7 +684,9 @@ document.addEventListener('submit', (event) => {
   const hidden = form.querySelector('.claim-value-hidden');
   if (!hidden.value.trim()) {
     event.preventDefault();
-    alert('Claim value is required.');
+    const input = form.querySelector('.claim-single-input');
+    input.setCustomValidity('Claim value is required.');
+    input.reportValidity();
   }
 });
 </script>

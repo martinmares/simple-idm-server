@@ -1,0 +1,7 @@
+<div class="d-flex align-items-center justify-content-between gap-2 my-3">
+  <div class="text-secondary small">{{ pagination.total }} results · page {{ pagination.page }} / {{ pagination.pages }}</div>
+  <nav class="btn-list" aria-label="Results pages">
+    {% if pagination.page > 1 %}<a class="btn btn-outline-secondary btn-sm" href="{{ pagination.prev }}">Previous</a>{% else %}<button class="btn btn-outline-secondary btn-sm" disabled>Previous</button>{% endif %}
+    {% if pagination.page < pagination.pages %}<a class="btn btn-outline-secondary btn-sm" href="{{ pagination.next }}">Next</a>{% else %}<button class="btn btn-outline-secondary btn-sm" disabled>Next</button>{% endif %}
+  </nav>
+</div>

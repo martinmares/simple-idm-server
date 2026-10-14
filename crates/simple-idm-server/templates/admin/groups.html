@@ -1,35 +1,12 @@
 {% extends "admin/base.html" %}
 {% block content %}
-<div class="card mb-3">
-  <div class="card-header"><h3 class="card-title">Create group</h3></div>
-  <div class="card-body">
-    <form method="post" action="/admin/ui/groups/create" class="row g-2">
-      <div class="col-md-3"><input class="form-control" name="name" placeholder="name" required></div>
-      <div class="col-md-6"><input class="form-control" name="description" placeholder="description"></div>
-      <div class="col-md-2 form-check mt-2"><input class="form-check-input" name="is_virtual" id="create-group-virtual" type="checkbox"> <label class="form-check-label" for="create-group-virtual">Virtual bundle</label></div>
-      <div class="col-md-1"><button class="btn btn-primary w-100" type="submit">Create</button></div>
-    </form>
-  </div>
-</div>
+<div class="card mb-3"><div class="card-header admin-header"><div><h3 class="card-title mb-0">Groups</h3><div class="admin-filter-help">Regular groups and virtual permission bundles.</div></div><button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#create-group-modal"><i class="ti ti-plus me-1"></i>Create group</button></div><div class="card-body"><form class="admin-filter" method="get" action="/admin/ui/groups"><div class="admin-search"><label class="form-label" for="groups-search">Search</label><input id="groups-search" class="form-control" name="q" value="{{ filters.q }}" placeholder="Name or description…"></div><div class="admin-field"><label class="form-label" for="groups-type">Type</label><select id="groups-type" class="form-select" name="type"><option value="all">All types</option><option value="regular" {% if filters.kind == "regular" %}selected{% endif %}>Regular group</option><option value="virtual" {% if filters.kind == "virtual" %}selected{% endif %}>Virtual bundle</option></select></div><div class="admin-field"><label class="form-label" for="groups-status">State</label><select class="form-select" id="groups-status" name="status"><option value="current" {% if filters.status == "current" %}selected{% endif %}>Current</option><option value="archived" {% if filters.status == "archived" %}selected{% endif %}>Archived</option></select></div><div class="btn-list"><button class="btn btn-primary">Apply</button><a href="/admin/ui/groups?q=&type=all" class="btn btn-outline-secondary">Reset</a></div></form><div class="admin-filter-help">{{ pagination.total }} results matching the filters</div></div></div>
 
-<div class="card mb-3">
-  <div class="card-header"><h3 class="card-title">Groups and bundles</h3></div>
-  <div class="card-body">
-    <p class="text-secondary">Virtual groups bundle permissions from their member groups. The same group can belong to several bundles. Bundles can contain regular groups and other bundles. Membership flows only to descendants. Virtual names are never published in groups, but can grant custom claims.</p>
-    <div class="d-flex flex-column gap-3">
-    {% for r in rows %}
-      <div class="border rounded p-3 group-card" id="group-{{ r.id }}" data-group-id="{{ r.id }}" data-group-name="{{ r.name }}" data-virtual="{{ r.is_virtual }}">
-        <div class="d-flex flex-wrap align-items-center justify-content-between gap-2">
-          <div><strong>{{ r.name }}</strong> <span class="badge {% if r.is_virtual %}bg-azure-lt{% else %}bg-secondary-lt{% endif %}">{% if r.is_virtual %}virtual bundle{% else %}regular group{% endif %}</span>
-            <div class="small text-secondary mt-1">Group UUID: <code>{{ r.id }}</code></div>
-            {% if let Some(d) = r.description %}<div class="text-secondary small mt-1">{{ d }}</div>{% endif %}
-          </div>
-          <div class="d-flex gap-2">
-            {% if r.is_virtual || !r.members.is_empty() || !r.archived_members.is_empty() %}<button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#group-members-{{ r.id }}">{% if r.is_virtual %}Members{% else %}Repair legacy members{% endif %} ({{ r.members.len() }})</button>{% endif %}
-            <button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#group-edit-{{ r.id }}">Edit</button>
-            <form method="post" action="/admin/ui/groups/{{ r.id }}/deactivate" data-confirm="Safe delete group '{{ r.name }}'?" data-confirm-action="Safe delete"><button class="btn btn-sm btn-outline-danger" type="submit">Delete</button></form>
-          </div>
-        </div>
+<div class="card mb-3" {% if filters.status == "archived" %}hidden{% endif %}><div class="card-body d-flex align-items-center gap-3 flex-wrap" data-bulk-toolbar data-bulk-total="{{ pagination.total }}" data-bulk-limit="{{ admin_bulk_limit() }}"><span data-bulk-count>0 selected</span><button type="button" class="btn btn-sm btn-outline-secondary" data-bulk-filtered>Select all filtered ({{ pagination.total }})</button><button type="button" class="btn btn-sm btn-outline-secondary" data-bulk-clear disabled>Clear selection</button><span class="text-secondary small">Header checkbox selects this page. Batch limit: {{ admin_bulk_limit() }}.</span><button type="button" class="btn btn-outline-danger" data-bulk-action="archive" data-bs-toggle="modal" data-bs-target="#bulk-action-modal" disabled>Archive selected</button></div></div>
+<div class="card mb-3" {% if filters.status == "archived" %}hidden{% endif %}><div class="table-responsive"><table class="table table-vcenter card-table admin-table"><thead><tr><th><input type="checkbox" class="form-check-input" data-bulk-all aria-label="Select visible groups"></th><th>Name</th><th>Type</th><th>Contents</th><th>Claim mappings</th><th>Actions</th></tr></thead><tbody>
+{% for r in rows %}
+<tr id="group-{{ r.id }}" {% if !visible_ids.contains(r.id) %}hidden{% endif %} data-admin-search-row="{{ r.name }} {% if let Some(d) = r.description %}{{ d }}{% endif %}" data-type="{% if r.is_virtual %}virtual{% else %}regular{% endif %}" data-detail-id="group-detail-{{ r.id }}"><td><input type="checkbox" class="form-check-input" data-bulk-id="{{ r.id }}" data-bulk-name="{{ r.name }}" aria-label="Select {{ r.name }}"></td><td><div class="admin-name">{{ r.name }}</div>{% if let Some(d) = r.description %}<div class="admin-secondary">{{ d }}</div>{% endif %}</td><td><span class="badge {% if r.is_virtual %}bg-azure-lt{% else %}bg-secondary-lt{% endif %}">{% if r.is_virtual %}Virtual bundle{% else %}Regular group{% endif %}</span></td><td>{% if r.is_virtual %}{{ r.members.len() }} member groups{% else %}{{ r.included_in.len() }} bundles{% endif %}</td><td>{{ r.claim_maps.len() }}</td><td><div class="admin-actions"><button type="button" class="btn btn-sm btn-outline-secondary" data-admin-detail="group-detail-{{ r.id }}" aria-expanded="false">Details</button>{% if r.is_virtual || !r.members.is_empty() || !r.archived_members.is_empty() %}<button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#group-members-{{ r.id }}">Members</button>{% endif %}<button class="btn btn-sm btn-outline-primary" type="button" data-bs-toggle="modal" data-bs-target="#group-edit-{{ r.id }}">Edit</button><form method="post" action="/admin/ui/groups/{{ r.id }}/deactivate" data-confirm="Archive group '{{ r.name }}'?" data-confirm-action="Archive"><button class="btn btn-sm btn-outline-danger">Archive</button></form></div></td></tr>
+<tr class="admin-detail-row" id="group-detail-{{ r.id }}" hidden><td colspan="6"><div class="group-card" data-group-id="{{ r.id }}" data-group-name="{{ r.name }}" data-virtual="{{ r.is_virtual }}"><div class="admin-id small text-secondary">UUID: <code>{{ r.id }}</code><button type="button" class="btn btn-sm btn-outline-secondary" data-admin-copy="{{ r.id }}">Copy</button></div>
         {% if !r.is_virtual && (!r.members.is_empty() || !r.archived_members.is_empty()) %}<div class="alert alert-warning mt-2">Legacy regular group with members. Existing inheritance is preserved. Remove member references or explicitly convert it to a virtual bundle; conversion removes its name from groups.</div>{% endif %}
         {% if r.is_virtual || !r.members.is_empty() || !r.archived_members.is_empty() %}
         <div class="group-edges d-none">{% for member in r.members %}<span data-child-id="{{ member.id }}"></span>{% endfor %}</div>
@@ -48,18 +25,17 @@
           <div class="text-secondary">Pattern matches shown for this group alone; effective membership may match additional rules.</div>
         </div>{% endif %}
         {% if !r.included_in.is_empty() %}<div class="mt-2 small text-secondary">Included in:
-          {% for parent in r.included_in %}<a href="#group-{{ parent.id }}" class="badge bg-secondary-lt me-1">{{ parent.name }}</a>{% endfor %}
+          {% for parent in r.included_in %}<a href="#group-{{ parent.id }}" data-bs-toggle="modal" data-bs-target="#group-edit-{{ parent.id }}" class="badge bg-secondary-lt me-1">{{ parent.name }}</a>{% endfor %}
         </div>{% endif %}
-      </div>
-    {% endfor %}
-    </div>
-  </div>
-</div>
+</div></td></tr>
+{% endfor %}
+{% if visible_ids.is_empty() %}<tr><td colspan="6" class="text-secondary">No groups found.</td></tr>{% endif %}
+</tbody></table></div></div>
 
-{% if deleted_rows.len() > 0 %}
-<div class="card">
+{% if filters.status == "archived" %}
+<div class="card" data-admin-archived-section>
   <div class="card-header">
-    <h3 class="card-title mb-0">Recently deleted groups</h3>
+    <h3 class="card-title mb-0">Archived groups</h3>
   </div>
   <div class="table-responsive">
     <table class="table table-vcenter card-table">
@@ -73,7 +49,7 @@
       </thead>
       <tbody>
         {% for r in deleted_rows %}
-        <tr>
+        <tr data-admin-search-row="{{ r.name }} {% if let Some(d) = r.description %}{{ d }}{% endif %}" data-type="{% if r.is_virtual %}virtual{% else %}regular{% endif %}">
           <td>{{ r.name }}</td>
           <td>{% if let Some(d) = r.description %}{{ d }}{% endif %}</td>
           <td>{% if r.is_virtual %}<span class="badge bg-azure-lt">virtual</span>{% else %}<span class="badge bg-secondary-lt">regular</span>{% endif %}</td>
@@ -84,12 +60,14 @@
           </td>
         </tr>
         {% endfor %}
+        {% if deleted_rows.is_empty() %}<tr><td colspan="4" class="text-secondary">No archived groups match these filters.</td></tr>{% endif %}
       </tbody>
     </table>
   </div>
 </div>
 {% endif %}
 
+{% include "admin/pagination.html" %}
 {% for r in rows %}
 <div class="modal modal-blur fade" id="group-edit-{{ r.id }}" tabindex="-1" role="dialog" aria-hidden="true">
   <div class="modal-dialog modal-dialog-centered" role="document">
@@ -176,6 +154,13 @@ document.querySelectorAll('.group-edit-form').forEach(form => {
   form.addEventListener('submit', updateConfirmation);
 });
 // Render references, never copies: each node links to the group's single editor.
+// Links from Memberships can target a group outside the current result page.
+function openLinkedGroup() {
+  if (!location.hash.startsWith('#group-') || document.querySelector('.modal.show')) return;
+  document.getElementById(location.hash.slice(1))?.querySelector('button[data-bs-target^="#group-edit-"]')?.click();
+}
+document.addEventListener('DOMContentLoaded', () => setTimeout(openLinkedGroup, 0));
+window.addEventListener('hashchange', openLinkedGroup);
 const groupCards = new Map(Array.from(document.querySelectorAll('.group-card')).map(card => [card.dataset.groupId, card]));
 function groupBranch(id, ancestors) {
   const card = groupCards.get(id);
@@ -183,6 +168,8 @@ function groupBranch(id, ancestors) {
   const li = document.createElement('li');
   const link = document.createElement('a');
   link.href = '#group-' + id;
+  link.setAttribute('data-bs-toggle', 'modal');
+  link.setAttribute('data-bs-target', '#group-edit-' + id);
   link.textContent = card.dataset.groupName;
   link.title = 'Group UUID: ' + id;
   const badge = document.createElement('span');
@@ -225,4 +212,20 @@ document.querySelectorAll('.group-members-filter').forEach(input => {
   });
 });
 </script>
+<div class="modal modal-blur fade" id="create-group-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+    <form class="modal-content" method="post" action="/admin/ui/groups/create">
+      <div class="modal-header"><h5 class="modal-title">Create group</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body"><div class="row g-3">
+      <div class="col-md-3"><label class="form-label">Name</label><input class="form-control" name="name" aria-label="Name" placeholder="Name" required></div>
+      <div class="col-md-6"><label class="form-label">Description</label><input class="form-control" name="description" aria-label="Description" placeholder="Description"></div>
+      <div class="col-md-2 form-check mt-2"><input class="form-check-input" name="is_virtual" id="create-group-virtual" type="checkbox"> <label class="form-check-label" for="create-group-virtual">Virtual bundle</label></div>
+
+</div></div>
+      <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary">Create group</button></div>
+    </form>
+  </div>
+</div>
+
+<div class="modal modal-blur fade" id="bulk-action-modal" tabindex="-1" aria-hidden="true"><div class="modal-dialog modal-dialog-centered"><form method="post" action="/admin/ui/groups/bulk" class="modal-content" data-bulk-form><div class="modal-header"><h5 class="modal-title" data-bulk-title>Bulk action</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div><div class="modal-body"><input type="hidden" name="ids"><input type="hidden" name="action"><p data-bulk-description></p><ul data-bulk-names class="small" style="max-height: 12rem; overflow:auto"></ul></div><div class="modal-footer"><button class="btn btn-link" type="button" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" type="submit" data-bulk-submit>Confirm</button></div></form></div></div>
 {% endblock %}

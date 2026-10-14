@@ -1,29 +1,17 @@
 {% extends "admin/base.html" %}
 {% block content %}
 <div class="card mb-3">
-  <div class="card-header d-flex align-items-center justify-content-between">
+  <div class="card-header admin-header">
     <div>
       <h3 class="card-title mb-0">Identity providers</h3>
       <div class="text-secondary small mt-1">Configure upstream OIDC providers for federated login and invitation-based linking.</div>
     </div>
-    <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#create-idp-modal">
+    <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#create-idp-modal">
       <i class="ti ti-plus me-1"></i>Create provider
     </button>
   </div>
   <div class="card-body border-top">
-    <form method="get" action="/admin/ui/identity-providers" class="row g-2 align-items-end">
-      <div class="col-md-8">
-        <label class="form-label">Filter</label>
-        <input class="form-control" name="q" value="{{ filter_q }}" placeholder="slug, type, issuer, client, AD host, domain..." autocomplete="off">
-        <div class="form-text">Use multiple words in any order, for example <code>google example</code>.</div>
-      </div>
-      <div class="col-md-4">
-        <div class="btn-list">
-          <button class="btn btn-primary" type="submit">Apply</button>
-          <a class="btn btn-outline-secondary" href="/admin/ui/identity-providers">Reset filters</a>
-        </div>
-      </div>
-    </form>
+    <form method="get" action="/admin/ui/identity-providers" class="admin-filter"><div class="admin-search"><label class="form-label" for="identity_providers-search">Search</label><input id="identity_providers-search" class="form-control" name="q" value="{{ filter_q }}" placeholder="Slug, type, issuer, client, AD host, domain…" autocomplete="off"></div><div class="btn-list"><button class="btn btn-primary">Apply</button><a class="btn btn-outline-secondary" href="/admin/ui/identity-providers?q=">Reset</a></div></form><div class="admin-filter-help">Use multiple words, for example <code>google example</code>.</div>
   </div>
 </div>
 
@@ -99,8 +87,8 @@
               <button type="button" class="btn btn-sm btn-outline-primary" data-bs-toggle="modal" data-bs-target="#edit-idp-{{ r.id }}">
                 Edit
               </button>
-              <form method="post" action="/admin/ui/identity-providers/{{ r.id }}/deactivate" data-confirm="Safe delete identity provider '{{ r.slug }}'?" data-confirm-action="Safe delete">
-                <button class="btn btn-sm btn-outline-danger" type="submit">Safe delete</button>
+              <form method="post" action="/admin/ui/identity-providers/{{ r.id }}/deactivate" data-confirm="Archive identity provider '{{ r.slug }}'?" data-confirm-action="Archive">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Archive</button>
               </form>
             </div>
           </td>
@@ -125,7 +113,7 @@
 {% if deleted_rows.len() > 0 %}
 <div class="card mt-3">
   <div class="card-header">
-    <h3 class="card-title mb-0">Recently deleted identity providers</h3>
+    <h3 class="card-title mb-0">Archived identity providers</h3>
   </div>
   <div class="table-responsive">
     <table class="table table-vcenter card-table">
@@ -314,7 +302,7 @@
   <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
     <div class="modal-content">
       <div class="modal-header">
-        <h5 class="modal-title">Edit provider: {{ r.slug }}</h5>
+        <h5 class="modal-title">Edit provider: {{ r.slug }}</h5><button type="button" class="btn btn-sm btn-outline-secondary ms-auto me-2" data-admin-copy="{{ r.id }}">Copy UUID</button>
         <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
       </div>
       <form method="post" action="/admin/ui/identity-providers/{{ r.id }}/update" autocomplete="off">

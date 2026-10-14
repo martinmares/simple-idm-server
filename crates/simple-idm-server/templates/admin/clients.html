@@ -1,123 +1,22 @@
 {% extends "admin/base.html" %}
 {% block content %}
 <div class="card mb-3">
-  <div class="card-header d-flex align-items-center justify-content-between">
+  <div class="card-header admin-header">
     <div>
       <h3 class="card-title mb-0">Clients</h3>
       <div class="text-secondary small mt-1">OAuth2/OIDC clients and runtime group/claim settings.</div>
     </div>
-    <button type="button" class="btn btn-primary btn-sm" data-bs-toggle="collapse" data-bs-target="#create-client-panel">
+    <button type="button" class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#create-client-modal">
       <i class="ti ti-plus me-1"></i>Create client
     </button>
   </div>
   <div class="card-body border-bottom">
-    <form method="get" action="/admin/ui/clients" class="row g-2 align-items-end">
-      <div class="col-md-8">
-        <label class="form-label">Filter</label>
-        <input class="form-control" name="q" value="{{ filter_q }}" placeholder="client_id, name, scope, grant, redirect URI..." autocomplete="off">
-        <div class="form-text">Use multiple words in any order, for example <code>proxy groups</code>.</div>
-      </div>
-      <div class="col-md-4">
-        <div class="btn-list">
-          <button class="btn btn-primary" type="submit">Apply</button>
-          <a class="btn btn-outline-secondary" href="/admin/ui/clients">Reset filters</a>
-        </div>
-      </div>
-    </form>
-  </div>
-  <div class="card-body collapse" id="create-client-panel">
-    <h4 class="mb-3">Create client</h4>
-    <form method="post" action="/admin/ui/clients/create" class="row g-2">
-      <div class="col-md-3"><input class="form-control" name="client_id" placeholder="client_id" required></div>
-      <div class="col-md-3"><input class="form-control" name="name" placeholder="name" required></div>
-      <div class="col-md-3"><input class="form-control" name="redirect_uris" placeholder="uri1, uri2"></div>
-      <div class="col-md-3"><input class="form-control" name="client_secret" type="password" placeholder="secret for confidential clients" autocomplete="new-password"></div>
-      <div class="col-md-12">
-        <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. Public clients may use a wildcard port for loopback callback URLs.</div>
-      </div>
-      <div class="col-md-6">
-        <label class="form-label">Grant types</label>
-        <div class="d-flex flex-wrap gap-2">
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_authorization_code" value="on" checked><span class="form-check-label">authorization_code</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_refresh_token" value="on" checked><span class="form-check-label">refresh_token</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_client_credentials" value="on"><span class="form-check-label">client_credentials</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_device_code" value="on"><span class="form-check-label">device_code</span></label>
-        </div>
-      </div>
-      <div class="col-md-4">
-        <label class="form-label">Standard scopes</label>
-        <div class="d-flex flex-wrap gap-2">
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" checked><span class="form-check-label">openid</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_profile" value="on" checked><span class="form-check-label">profile</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_email" value="on" checked><span class="form-check-label">email</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_groups" value="on" checked><span class="form-check-label">groups</span></label>
-          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_offline_access" value="on"><span class="form-check-label">offline_access</span></label>
-        </div>
-        <label class="form-label mt-2">Additional scopes</label>
-        <input class="form-control" name="additional_scopes" value="" placeholder="bastion:connect admin:*">
-        <div class="form-text">Space-separated additional scopes. Duplicates are removed when saving.</div>
-      </div>
-      <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_public" type="checkbox" checked><label class="form-check-label">public</label></div>
-      <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked><label class="form-check-label">active</label></div>
-      <div class="col-md-3">
-        <label class="form-label">Groups claim mode</label>
-        <select class="form-select" name="groups_claim_mode">
-          <option value="effective" selected>effective</option>
-          <option value="direct">direct</option>
-          <option value="none">none</option>
-        </select>
-      </div>
-      <div class="col-md-3 d-flex align-items-end">
-        <label class="form-check form-switch m-0">
-          <input class="form-check-input" name="include_claim_maps" type="checkbox" checked>
-          <span class="form-check-label">include claim maps</span>
-        </label>
-      </div>
-      <div class="col-md-12 text-secondary small">Virtual bundles are never published in groups. They remain available to claim mapping.</div>
-      <div class="col-md-12"><button class="btn btn-primary" type="submit">Create</button></div>
-    </form>
+    <form method="get" action="/admin/ui/clients" class="admin-filter"><div class="admin-search"><label class="form-label" for="clients-search">Search</label><input id="clients-search" class="form-control" name="q" value="{{ filter_q }}" placeholder="client_id, name, scope, grant, redirect URI…" autocomplete="off"></div><div class="admin-field"><label class="form-label" for="clients-type">Type</label><select class="form-select" id="clients-type" name="type"><option value="all">All types</option><option value="public" {% if filters.kind == "public" %}selected{% endif %}>Public</option><option value="confidential" {% if filters.kind == "confidential" %}selected{% endif %}>Confidential</option></select></div><div class="admin-field"><label class="form-label" for="clients-status">Status</label><select class="form-select" id="clients-status" name="status"><option value="all">Current (all statuses)</option><option value="active" {% if filters.status == "active" %}selected{% endif %}>Active</option><option value="inactive" {% if filters.status == "inactive" %}selected{% endif %}>Inactive</option><option value="archived" {% if filters.status == "archived" %}selected{% endif %}>Archived</option></select></div><div class="btn-list"><button class="btn btn-primary">Apply</button><a class="btn btn-outline-secondary" href="/admin/ui/clients?q=">Reset</a></div><details class="w-100" {% if filters.claim_maps != "all" %}open{% endif %}><summary class="text-secondary">More filters</summary><label class="form-label mt-2" for="clients-claim-maps">Claim maps</label><select class="form-select" name="claim_maps" id="clients-claim-maps"><option value="all">Enabled or disabled</option><option value="yes" {% if filters.claim_maps == "yes" %}selected{% endif %}>Enabled</option><option value="no" {% if filters.claim_maps == "no" %}selected{% endif %}>Disabled</option></select></details></form><div class="admin-filter-help">Use multiple words, for example <code>proxy groups</code>.</div>
   </div>
 </div>
 
-<div class="row row-cards">
-  {% for r in rows %}
-  <div class="col-12 col-lg-6">
-    <div class="card mb-3">
-      <div class="card-header">
-        <h3 class="card-title">{{ r.name }}</h3>
-        <div class="card-actions">
-          <span class="badge {% if r.is_active %}bg-green-lt{% else %}bg-red-lt{% endif %} me-1">
-            {% if r.is_active %}active{% else %}inactive{% endif %}
-          </span>
-          <span class="badge {% if r.is_public %}bg-blue-lt{% else %}bg-orange-lt{% endif %}">
-            {% if r.is_public %}public{% else %}confidential{% endif %}
-          </span>
-        </div>
-      </div>
-      <div class="card-body">
-        <div class="mb-2"><span class="text-muted">client_id:</span> <code>{{ r.client_id }}</code></div>
-        <div class="mb-2"><span class="text-muted">Client UUID:</span> <code>{{ r.id }}</code></div>
-        <div class="mb-2"><span class="text-muted">redirect_uris:</span> {{ r.redirect_uris | join(", ") }}</div>
-        <div class="mb-2"><span class="text-muted">grant_types:</span> {{ r.grant_types | join(", ") }}</div>
-        <div class="mb-2"><span class="text-muted">scope:</span> {{ r.scope }}</div>
-        <div class="mb-3">
-          <span class="text-muted">groups:</span>
-          <span class="badge bg-blue-lt">{{ r.groups_claim_mode }}</span>
-          {% if r.include_claim_maps %}<span class="badge bg-green-lt">claim maps</span>{% else %}<span class="badge bg-secondary-lt">no claim maps</span>{% endif %}
-          <span class="badge bg-secondary-lt">physical groups only</span>{% if !r.ignore_virtual_groups %}<span class="badge bg-yellow-lt" title="Legacy setting is ignored. Check application rules that used virtual group names.">legacy export setting</span>{% endif %}
-        </div>
-        <div class="d-flex gap-2">
-          <button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#client-edit-{{ r.id }}">
-            Edit
-          </button>
-          <form method="post" action="/admin/ui/clients/{{ r.id }}/deactivate" data-confirm="Safe delete client '{{ r.client_id }}'?" data-confirm-action="Safe delete">
-            <button class="btn btn-outline-danger btn-sm" type="submit">Safe delete</button>
-          </form>
-        </div>
-      </div>
-    </div>
-  </div>
-
+<div class="card" {% if filters.status == "archived" %}hidden{% endif %}><div class="table-responsive"><table class="table table-vcenter card-table admin-table"><thead><tr><th>Client</th><th>Type</th><th>Status</th><th>Groups</th><th>Claim maps</th><th>Actions</th></tr></thead><tbody>{% for r in rows %}<tr><td><div class="admin-name">{{ r.name }}</div><div class="admin-secondary"><code>{{ r.client_id }}</code></div></td><td><span class="badge {% if r.is_public %}bg-blue-lt{% else %}bg-orange-lt{% endif %}">{% if r.is_public %}Public{% else %}Confidential{% endif %}</span></td><td><span class="badge {% if r.is_active %}bg-green-lt{% else %}bg-secondary-lt{% endif %}">{% if r.is_active %}Active{% else %}Inactive{% endif %}</span></td><td>{{ r.groups_claim_mode }}</td><td>{% if r.include_claim_maps %}Enabled{% else %}Disabled{% endif %}</td><td><div class="admin-actions"><button type="button" class="btn btn-outline-primary btn-sm" data-bs-toggle="modal" data-bs-target="#client-edit-{{ r.id }}">Edit</button><form method="post" action="/admin/ui/clients/{{ r.id }}/deactivate" data-confirm="Archive client '{{ r.client_id }}'?" data-confirm-action="Archive"><button class="btn btn-outline-danger btn-sm">Archive</button></form></div></td></tr>{% endfor %}{% if rows.is_empty() %}<tr><td colspan="6" class="text-secondary">No clients found. Adjust or reset the filter.</td></tr>{% endif %}</tbody></table></div></div>
+{% for r in rows %}
   <div class="modal modal-blur fade" id="client-edit-{{ r.id }}" tabindex="-1" role="dialog" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-centered" role="document">
       <div class="modal-content">
@@ -131,7 +30,7 @@
               <div class="col-md-12">
                 <label class="form-label" for="client-uuid-{{ r.id }}">Client UUID</label>
                 <input id="client-uuid-{{ r.id }}" class="form-control font-monospace" value="{{ r.id }}" readonly>
-                <div class="form-text">Internal record ID. Use client_id for OAuth login and audience configuration.</div>
+                <div class="form-text">Internal record ID. Use client_id for OAuth login and audience configuration.</div><button type="button" class="btn btn-outline-secondary btn-sm mt-2" data-admin-copy="{{ r.id }}">Copy UUID</button>{% if !r.ignore_virtual_groups %}<div class="form-text">Legacy virtual-group export setting is ignored: virtual names are always suppressed.</div>{% endif %}
               </div>
               <div class="col-md-6">
                 <label class="form-label">client_id</label>
@@ -266,22 +165,12 @@
       </div>
     </div>
   </div>
-  {% endfor %}
-  {% if rows.len() == 0 %}
-  <div class="col-12">
-    <div class="empty">
-      <div class="empty-icon"><i class="ti ti-search"></i></div>
-      <p class="empty-title">No clients found</p>
-      <p class="empty-subtitle text-secondary">Adjust or reset the filter.</p>
-    </div>
-  </div>
-  {% endif %}
-</div>
+{% endfor %}
 
-{% if deleted_rows.len() > 0 %}
+{% if filters.status == "archived" %}
 <div class="card mt-3">
   <div class="card-header">
-    <h3 class="card-title mb-0">Recently deleted clients</h3>
+    <h3 class="card-title mb-0">Archived clients</h3>
   </div>
   <div class="table-responsive">
     <table class="table table-vcenter card-table">
@@ -310,9 +199,68 @@
           </td>
         </tr>
         {% endfor %}
+        {% if deleted_rows.is_empty() %}<tr><td colspan="4" class="text-secondary">No archived clients match these filters.</td></tr>{% endif %}
       </tbody>
     </table>
   </div>
 </div>
 {% endif %}
+{% include "admin/pagination.html" %}
+<div class="modal modal-blur fade" id="create-client-modal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-xl modal-dialog-centered modal-dialog-scrollable">
+    <form class="modal-content" method="post" action="/admin/ui/clients/create">
+      <div class="modal-header"><h5 class="modal-title">Create client</h5><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+      <div class="modal-body"><div class="row g-3">
+      <div class="col-md-3"><label class="form-label" for="create-client-client_id">Client ID</label><input id="create-client-client_id" class="form-control" name="client_id" placeholder="client_id" required></div>
+      <div class="col-md-3"><label class="form-label" for="create-client-name">Name</label><input id="create-client-name" class="form-control" name="name" placeholder="name" required></div>
+      <div class="col-md-3"><label class="form-label" for="create-client-redirect_uris">Redirect URIs</label><input id="create-client-redirect_uris" class="form-control" name="redirect_uris" placeholder="uri1, uri2"></div>
+      <div class="col-md-3"><label class="form-label" for="create-client-client_secret">Client secret</label><input id="create-client-client_secret" class="form-control" name="client_secret" type="password" placeholder="secret for confidential clients" autocomplete="new-password"></div>
+      <div class="col-md-12">
+        <div class="form-text">Example: https://app.example.com/callback, http://localhost:3000/callback. Public clients may use a wildcard port for loopback callback URLs.</div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">Grant types</label>
+        <div class="d-flex flex-wrap gap-2">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_authorization_code" value="on" checked><span class="form-check-label">authorization_code</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_refresh_token" value="on" checked><span class="form-check-label">refresh_token</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_client_credentials" value="on"><span class="form-check-label">client_credentials</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="grant_device_code" value="on"><span class="form-check-label">device_code</span></label>
+        </div>
+      </div>
+      <div class="col-md-4">
+        <label class="form-label">Standard scopes</label>
+        <div class="d-flex flex-wrap gap-2">
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_openid" value="on" checked><span class="form-check-label">openid</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_profile" value="on" checked><span class="form-check-label">profile</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_email" value="on" checked><span class="form-check-label">email</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_groups" value="on" checked><span class="form-check-label">groups</span></label>
+          <label class="form-check"><input class="form-check-input" type="checkbox" name="scope_offline_access" value="on"><span class="form-check-label">offline_access</span></label>
+        </div>
+        <label class="form-label mt-2">Additional scopes</label>
+        <input class="form-control" name="additional_scopes" value="" placeholder="bastion:connect admin:*">
+        <div class="form-text">Space-separated additional scopes. Duplicates are removed when saving.</div>
+      </div>
+      <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_public" type="checkbox" checked><label class="form-check-label">public</label></div>
+      <div class="col-md-1 form-check mt-2"><input class="form-check-input" name="is_active" type="checkbox" checked><label class="form-check-label">active</label></div>
+      <div class="col-md-3">
+        <label class="form-label">Groups claim mode</label>
+        <select class="form-select" name="groups_claim_mode">
+          <option value="effective" selected>effective</option>
+          <option value="direct">direct</option>
+          <option value="none">none</option>
+        </select>
+      </div>
+      <div class="col-md-3 d-flex align-items-end">
+        <label class="form-check form-switch m-0">
+          <input class="form-check-input" name="include_claim_maps" type="checkbox" checked>
+          <span class="form-check-label">include claim maps</span>
+        </label>
+      </div>
+      <div class="col-md-12 text-secondary small">Virtual bundles are never published in groups. They remain available to claim mapping.</div>
+
+</div></div>
+      <div class="modal-footer"><button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button><button type="submit" class="btn btn-primary">Create client</button></div>
+    </form>
+  </div>
+</div>
 {% endblock %}
