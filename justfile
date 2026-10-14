@@ -63,6 +63,10 @@ release-version version:
 check-version:
     bash scripts/release.sh check
 
+# Same check script and audit tool version as GitHub CI.
+ci-check:
+    bash scripts/ci-check.sh
+
 # Run database integration tests locally in an isolated Compose project.
 test-postgres:
     bash scripts/test-postgres.sh

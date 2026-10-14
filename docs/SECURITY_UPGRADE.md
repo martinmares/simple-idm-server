@@ -111,11 +111,20 @@ UUID default tenantu zůstává na výslovné přání uživatele beze změny.
 
 ## Ověření u vývojáře
 
+Před pushem/vydáním spusť `just ci-check`. GitHub CI používá tentýž
+`scripts/ci-check.sh` (verze, testy release/audit politiky, fmt, workspace se
+všemi targets a RustSec audit). Skript vyžaduje cargo-audit 0.22.2 a Python
+3.11+; na macOS vybírá dostupný novější Python stejně jako release.sh.
+Databázové integrační testy zůstávají zvlášť, stejně jako dosud.
+
+Kontrola 2026-10-14 odhalila čtyři nové advisory pro `rustls 0.23.45`:
+RUSTSEC-2026-0346, 0347, 0348 a 0349. Cargo.lock byl aktualizován na opravený
+`rustls 0.23.46`. Pro tyto nálezy se nepřidává žádná výjimka; stávající
+konkrétní výjimka rsa 0.9.10 / RUSTSEC-2023-0071 zůstává beze změny.
+
 ```bash
-SQLX_OFFLINE=true cargo check --locked --workspace --all-targets
-SQLX_OFFLINE=true cargo test --locked --workspace --all-targets
+just ci-check
 bash scripts/test-postgres.sh
-python3 scripts/audit-dependencies.py
 ```
 
 PostgreSQL testy běží pouze lokálně přes oddělený Docker Compose projekt,

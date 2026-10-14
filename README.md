@@ -839,12 +839,19 @@ SQLX_OFFLINE=true cargo build --workspace
 When upgrading to the security fixes, review [deployment changes](docs/SECURITY_UPGRADE.md)
 and the [security audit](docs/security_best_practices_report.md).
 
-Run checks:
+Before pushing or releasing, run the same check script as GitHub CI:
 
 ```bash
-SQLX_OFFLINE=true cargo check --locked --workspace --all-targets
-SQLX_OFFLINE=true cargo test --locked --workspace
+just ci-check
+# Or: bash scripts/ci-check.sh
 ```
+
+Install the pinned audit tool first: `cargo install cargo-audit --locked --version 0.22.2`.
+The script checks shared versions, release/audit policy tests, formatting, the whole
+workspace with all targets, and dependencies against the current RustSec database.
+It uses the repository's Rust toolchain and SQLx offline metadata, and stops on
+failure. GitHub runs this same script on Linux; platform-specific tests still follow
+the local host OS. New advisories can appear after a successful local check.
 
 PostgreSQL integration tests run **locally on the developer's machine**, using
 Docker Compose. CI runs the checks above with committed SQLx offline metadata;

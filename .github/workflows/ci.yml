@@ -23,15 +23,7 @@ jobs:
           components: rustfmt
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends pkg-config libssl-dev cmake perl make jq
-      - name: Check shared version
-        run: python3 scripts/release.py check
-      - name: Test release scripts
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      - name: Test workspace
-        run: cargo test --locked --workspace --all-targets
       - name: Install dependency audit tool
         run: cargo install cargo-audit --locked --version 0.22.2
-      - name: Audit dependencies with reviewed exceptions
-        run: python3 scripts/audit-dependencies.py
+      - name: Run shared CI checks
+        run: bash scripts/ci-check.sh

@@ -724,12 +724,20 @@ SQLX_OFFLINE=true cargo build --workspace
 Při nasazení bezpečnostních oprav projdi [změny nasazení](docs/SECURITY_UPGRADE.md)
 a [bezpečnostní audit](docs/security_best_practices_report.md).
 
-Kontrola:
+Před pushem nebo vydáním spusť stejný kontrolní skript jako GitHub CI:
 
 ```bash
-SQLX_OFFLINE=true cargo check --locked --workspace --all-targets
-SQLX_OFFLINE=true cargo test --locked --workspace
+just ci-check
+# Nebo: bash scripts/ci-check.sh
 ```
+
+Nejdřív nainstaluj stejnou verzi auditního nástroje:
+`cargo install cargo-audit --locked --version 0.22.2`.
+Skript kontroluje verze, testy release/audit politiky, formátování, celý workspace
+se všemi targets a závislosti proti aktuální databázi RustSec. Používá Rust toolchain
+repozitáře a SQLx offline metadata; při chybě skončí. GitHub spouští stejný skript
+na Linuxu, lokálně se platformové testy řídí tvým OS. Nový bezpečnostní nález může
+přibýt i po úspěšné lokální kontrole.
 
 PostgreSQL integrační testy se spouštějí **lokálně u vývojáře** pomocí Docker
 Compose. CI používá uložená SQLx offline metadata a nepotřebuje přístup k externí
