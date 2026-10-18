@@ -710,7 +710,6 @@ impl EffectiveMembershipRow {
 }
 
 struct GroupChoice {
-    archived: bool,
     id: Uuid,
     name: String,
     is_virtual: bool,
@@ -2295,24 +2294,16 @@ fn build_group_views(
                 })
                 .cloned()
                 .collect();
-            let mut choices: Vec<_> = rows
+            let choices: Vec<_> = rows
                 .iter()
                 .filter(|candidate| candidate.id != row.id && candidate.tenant_id == row.tenant_id)
                 .map(|candidate| GroupChoice {
-                    archived: false,
                     id: candidate.id,
                     name: candidate.name.clone(),
                     is_virtual: candidate.is_virtual,
                     selected: members.iter().any(|member| member.id == candidate.id),
                 })
                 .collect();
-            choices.extend(archived_members.iter().map(|member| GroupChoice {
-                id: member.id,
-                name: member.name.clone(),
-                is_virtual: member.is_virtual,
-                selected: true,
-                archived: true,
-            }));
             GroupView {
                 id: row.id,
                 tenant_id: row.tenant_id,
@@ -6022,6 +6013,24 @@ async fn groups_update(
     }
 }
 
+fn selected_group_members(fields: &[(String, String)]) -> Result<Vec<Uuid>, uuid::Error> {
+    let removed: Result<Vec<_>, _> = fields
+        .iter()
+        .filter(|(key, _)| key == "remove_archived_member_id")
+        .map(|(_, value)| Uuid::parse_str(value))
+        .collect();
+    let removed = removed?;
+    let members: Result<Vec<_>, _> = fields
+        .iter()
+        .filter(|(key, _)| key == "member_id")
+        .map(|(_, value)| Uuid::parse_str(value))
+        .collect();
+    Ok(members?
+        .into_iter()
+        .filter(|id| !removed.contains(id))
+        .collect())
+}
+
 async fn groups_members(
     State(state): State<WebAdminState>,
     headers: HeaderMap,
@@ -6036,12 +6045,7 @@ async fn groups_members(
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let return_path = q_return_path_from_referer(&headers, "/admin/ui/groups", "/admin/ui/groups");
-    let members: Result<Vec<_>, _> = fields
-        .iter()
-        .filter(|(key, _)| key == "member_id")
-        .map(|(_, value)| Uuid::parse_str(value))
-        .collect();
-    let members = match members {
+    let members = match selected_group_members(&fields) {
         Ok(members) => members,
         Err(_) => {
             return redirect_with(&return_path, "error", "Invalid member group ID").into_response();
@@ -8755,6 +8759,58 @@ async fn claim_patterns_deactivate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn archived_group_references_are_not_available_group_choices() {
+        let parent = GroupRow {
+            id: Uuid::new_v4(),
+            tenant_id: Uuid::new_v4(),
+            name: "bundle".into(),
+            description: None,
+            is_virtual: true,
+        };
+        let active = GroupRow {
+            id: Uuid::new_v4(),
+            name: "active".into(),
+            is_virtual: false,
+            ..parent.clone()
+        };
+        let archived = GroupRow {
+            id: Uuid::new_v4(),
+            name: "archived".into(),
+            is_virtual: false,
+            ..parent.clone()
+        };
+        let rows = build_group_views(
+            &[parent.clone(), active.clone()],
+            &[(parent.id, active.id), (parent.id, archived.id)],
+            std::slice::from_ref(&archived),
+        );
+        let view = &rows[0];
+        assert_eq!(view.choices.len(), 1);
+        assert_eq!(view.choices[0].id, active.id);
+        assert!(view.choices[0].selected);
+        assert_eq!(view.archived_members.len(), 1);
+        assert_eq!(view.archived_members[0].id, archived.id);
+    }
+
+    #[test]
+    fn archived_references_require_an_explicit_removal() {
+        let active = Uuid::new_v4();
+        let archived = Uuid::new_v4();
+        let mut fields = vec![
+            ("member_id".into(), active.to_string()),
+            ("member_id".into(), archived.to_string()),
+        ];
+        assert_eq!(
+            selected_group_members(&fields).unwrap(),
+            vec![active, archived]
+        );
+        fields.push(("remove_archived_member_id".into(), archived.to_string()));
+        assert_eq!(selected_group_members(&fields).unwrap(), vec![active]);
+        fields.push(("remove_archived_member_id".into(), "invalid-id".into()));
+        assert!(selected_group_members(&fields).is_err());
+    }
 
     #[test]
     fn client_scope_form_preserves_custom_scopes_and_removes_duplicates() {

@@ -124,7 +124,6 @@ fn pages(query: &PageQuery) -> HashMap<String, String> {
                     archived_members: vec![archived.clone()],
                     included_in: vec![],
                     choices: vec![GroupChoice {
-                        archived: false,
                         id: leaf.id,
                         name: leaf.name.clone(),
                         is_virtual: false,
@@ -345,6 +344,23 @@ fn pages(query: &PageQuery) -> HashMap<String, String> {
         .unwrap(),
     );
     pages
+}
+
+#[test]
+fn archived_references_render_only_as_preserved_or_removable_links() {
+    let query: PageQuery = serde_urlencoded::from_str("").unwrap();
+    let rendered = pages(&query);
+    let html = &rendered["groups"];
+    let archived = Uuid::from_u128(4);
+    assert!(html.contains(&format!(
+        "type=\"hidden\" name=\"member_id\" value=\"{archived}\""
+    )));
+    assert!(html.contains(&format!(
+        "type=\"checkbox\" name=\"remove_archived_member_id\" value=\"{archived}\""
+    )));
+    assert!(!html.contains(&format!(
+        "type=\"checkbox\" name=\"member_id\" value=\"{archived}\""
+    )));
 }
 
 #[tokio::test]

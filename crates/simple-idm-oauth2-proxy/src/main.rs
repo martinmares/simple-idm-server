@@ -662,11 +662,7 @@ fn is_hop_by_hop_header(name: &HeaderName) -> bool {
 
 fn is_auth_header(name: &HeaderName) -> bool {
     let name = name.as_str().to_ascii_lowercase();
-    name == "x-auth-user"
-        || name == "x-auth-subject"
-        || name == "x-auth-email"
-        || name == "x-auth-groups"
-        || name == "x-auth-token"
+    name.starts_with("x-auth-") || name == "x-simple-service-token"
 }
 
 fn is_websocket_request(req: &Request) -> bool {
@@ -754,10 +750,16 @@ mod security_tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-app-roles", "untrusted".parse().unwrap());
         headers.insert("x-auth-user", "untrusted".parse().unwrap());
+        headers.insert("x-auth-role", "Admin".parse().unwrap());
+        headers.insert("x-auth-future-claim", "untrusted".parse().unwrap());
+        headers.insert("x-simple-service-token", "local-only".parse().unwrap());
         headers.insert("accept", "text/plain".parse().unwrap());
         let clean = sanitize_upstream_headers(&config, &headers);
         assert!(!clean.contains_key("x-app-roles"));
         assert!(!clean.contains_key("x-auth-user"));
+        assert!(!clean.contains_key("x-auth-role"));
+        assert!(!clean.contains_key("x-auth-future-claim"));
+        assert!(!clean.contains_key("x-simple-service-token"));
         assert!(clean.contains_key("accept"));
     }
 }

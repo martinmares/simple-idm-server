@@ -236,6 +236,11 @@ disabled for UI users or reserved for non-browser/API flows.
 The upstream application may trust these headers only when it is reachable
 exclusively through the trusted proxy boundary.
 
+The built-in reverse proxy strips all client-supplied `X-Auth-*` headers and
+`X-Simple-Service-Token` before forwarding. The latter is reserved for direct,
+controlled loopback callers of applications such as Runtime Catalog; a public
+request must not carry that local credential through the proxy boundary.
+
 The public edge must strip client-supplied `X-Auth-*` headers before forwarding
 the request.
 
