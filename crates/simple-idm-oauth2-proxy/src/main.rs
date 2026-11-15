@@ -113,7 +113,12 @@ async fn main() -> Result<()> {
 
     let app = app
         .with_state(state)
-        .layer(tower_http::trace::TraceLayer::new_for_http());
+        .layer(tower_http::trace::TraceLayer::new_for_http().make_span_with(
+            |request: &Request| {
+                // Both proxy and upstream OIDC callbacks carry one-time codes.
+                tracing::info_span!("http_request", method = %request.method(), path = request.uri().path())
+            },
+        ));
 
     let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
     tracing::info!("Listening on {}", config.listen_addr);
@@ -172,8 +177,10 @@ async fn handle_reverse_proxy(
 
     match forward_http_request(state, session.as_ref(), req).await {
         Ok(response) => response,
-        Err(err) => {
-            tracing::error!("reverse proxy request failed: {:?}", err);
+        Err(_) => {
+            // reqwest errors may contain the complete upstream URL with query
+            // credentials. The surrounding span already identifies the safe path.
+            tracing::error!("reverse proxy request failed");
             (StatusCode::BAD_GATEWAY, "upstream request failed").into_response()
         }
     }
@@ -541,6 +548,13 @@ fn inject_auth_headers(config: &Config, session: &Session, headers: &mut HeaderM
             err
         ),
     }
+    // Insert last: even a custom groups-header name cannot replace the binding.
+    // The sanitizer removes client-supplied X-Auth-* headers before this point.
+    insert_auth_header(
+        headers,
+        HeaderName::from_static("x-auth-session"),
+        &session.binding_id(),
+    );
 }
 
 fn insert_auth_header(headers: &mut HeaderMap, name: HeaderName, value: &str) {
@@ -751,6 +765,7 @@ mod security_tests {
         headers.insert("x-app-roles", "untrusted".parse().unwrap());
         headers.insert("x-auth-user", "untrusted".parse().unwrap());
         headers.insert("x-auth-role", "Admin".parse().unwrap());
+        headers.insert("x-auth-session", "forged-binding".parse().unwrap());
         headers.insert("x-auth-future-claim", "untrusted".parse().unwrap());
         headers.insert("x-simple-service-token", "local-only".parse().unwrap());
         headers.insert("accept", "text/plain".parse().unwrap());
@@ -758,8 +773,44 @@ mod security_tests {
         assert!(!clean.contains_key("x-app-roles"));
         assert!(!clean.contains_key("x-auth-user"));
         assert!(!clean.contains_key("x-auth-role"));
+        assert!(!clean.contains_key("x-auth-session"));
         assert!(!clean.contains_key("x-auth-future-claim"));
         assert!(!clean.contains_key("x-simple-service-token"));
         assert!(clean.contains_key("accept"));
+    }
+
+    #[test]
+    fn session_binding_is_not_a_credential_and_changes_on_new_login() {
+        let mut session: Session = serde_json::from_value(serde_json::json!({
+            "session_id": "synthetic-random-session-one",
+            "subject": "alice", "username": "alice", "email": null,
+            "groups": ["reader"], "issued_at": "2026-10-18T10:00:00Z",
+            "expires_at": "2026-10-18T10:05:00Z", "refresh_token": "synthetic-refresh"
+        }))
+        .unwrap();
+        let config = Config::default();
+        let first = build_auth_headers(&config, &session);
+        let binding = first["x-auth-session"].to_str().unwrap();
+        assert_eq!(binding.len(), 43);
+        assert_ne!(binding, session.session_id);
+        assert!(!binding.contains("synthetic"));
+        session.expires_at = "2026-10-18T10:10:00Z".parse().unwrap();
+        assert_eq!(
+            build_auth_headers(&config, &session)["x-auth-session"],
+            binding
+        );
+        session.session_id = "synthetic-random-session-two".into();
+        assert_ne!(
+            build_auth_headers(&config, &session)["x-auth-session"],
+            binding
+        );
+        let collision = Config {
+            groups_header_name: "X-Auth-Session".into(),
+            ..config
+        };
+        assert_eq!(
+            build_auth_headers(&collision, &session)["x-auth-session"],
+            session.binding_id()
+        );
     }
 }

@@ -120,7 +120,23 @@ fn oidc_footer(label: &str) -> String {
     )
 }
 
-pub fn mfa_challenge_page(error: Option<&str>) -> String {
+fn account_security_link(tenant: &str, passkeys_enabled: bool) -> String {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("return_to", "/account/security")
+        .append_pair("tenant", if tenant.is_empty() { "default" } else { tenant })
+        .finish();
+    let label = if passkeys_enabled {
+        "Account security · Add passkey"
+    } else {
+        "Account security"
+    };
+    format!(
+        r#"<div class="text-center mt-4"><a href="/account/login?{}">{label}</a><div class="form-hint mt-1">Sign in to manage your authentication methods.</div></div>"#,
+        escape_html(&query)
+    )
+}
+
+pub fn mfa_challenge_page(error: Option<&str>, tenant: &str, passkeys_enabled: bool) -> String {
     let error_html = error.map(|err| alert("danger", err)).unwrap_or_default();
     let body = format!(
         r#"{error_html}
@@ -131,8 +147,10 @@ pub fn mfa_challenge_page(error: Option<&str>) -> String {
     <div class="form-hint">Enter the current code from your authenticator app. A one-time recovery code also works.</div>
   </div>
   <button type="submit" class="btn btn-primary w-100">Verify</button>
-</form>"#,
+</form>
+{account_security}"#,
         error_html = error_html,
+        account_security = account_security_link(tenant, passkeys_enabled),
     );
 
     render_page(
@@ -329,6 +347,7 @@ pub fn login_page_with_providers(
   <button type="submit" class="btn btn-primary w-100">Sign in with password</button>
 </form>
 {passkey_html}
+{account_security}
 {passkey_script}"#,
         error_html = error_html,
         client = escape_html(client_id),
@@ -342,6 +361,7 @@ pub fn login_page_with_providers(
         code_challenge = escape_html(code_challenge),
         code_challenge_method = escape_html(code_challenge_method),
         passkey_html = passkey_html,
+        account_security = account_security_link(tenant, passkeys_enabled),
         username_passkey_error = username_passkey_error,
         passkey_script = passkey_script,
         placeholder = escape_html(&user_placeholder()),
@@ -540,6 +560,38 @@ mod tests {
         );
         assert!(!html.contains("name=\"mfa_code\""));
         assert!(!html.contains("placeholder=\"********\""));
+        assert!(html.contains("/account/login?return_to=%2Faccount%2Fsecurity&amp;tenant=default"));
+    }
+
+    #[test]
+    fn account_settings_link_keeps_tenant_and_has_a_fixed_local_destination() {
+        let tenant = "tenant&return_to=https://evil.example/<script>";
+        let params = HashMap::from([
+            ("tenant".into(), tenant.into()),
+            ("passkeys_enabled".into(), "true".into()),
+        ]);
+        for html in [
+            login_page(&params, None),
+            mfa_challenge_page(None, tenant, true),
+        ] {
+            assert!(html.contains("Account security · Add passkey"));
+            let href = html
+                .split("href=\"/account/login?")
+                .nth(1)
+                .unwrap()
+                .split('"')
+                .next()
+                .unwrap()
+                .replace("&amp;", "&");
+            let query: HashMap<String, String> = url::form_urlencoded::parse(href.as_bytes())
+                .into_owned()
+                .collect();
+            assert_eq!(query.len(), 2);
+            assert_eq!(query["tenant"], tenant);
+            assert_eq!(query["return_to"], "/account/security");
+            assert!(!html.contains("href=\"https://evil.example"));
+        }
+        assert!(!mfa_challenge_page(None, "default", false).contains("Add passkey"));
     }
 
     #[test]

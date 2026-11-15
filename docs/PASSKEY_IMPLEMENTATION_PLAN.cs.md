@@ -384,6 +384,19 @@ První verze je hotová, pokud:
 9. restart nebo více instancí serveru nerozbije rozpracovanou ceremony;
 10. současné federované a AD login flow zůstane beze změny.
 
+## Dostupnost nastavení účtu — 18. 10. 2026
+
+Login i MFA challenge nyní obsahují odkaz do zabezpečení účtu. Při zapnutém
+WebAuthn je označený „Account security · Add passkey“, jinak „Account security“.
+Odkaz spouští samostatné přihlášení pro nastavení účtu, zachovává původní tenant
+a má pevný lokální cíl `/account/security`; neskládá jej z OAuth redirect URI.
+Registrace dál vyžaduje existující plně ověřenou čerstvou session a povolenou
+passkey politiku. Odkaz nenahrazuje dokončení MFA a nepovoluje registraci před
+ověřením účtu. Je to běžný přechod ve stejné kartě, nikoli souběžný MFA flow.
+
+Pět testů OAuth šablon prošlo, včetně zachování a escapování tenantu a pevného
+cíle. Úprava je ve zdrojácích; vlastník ji nasadí později.
+
 ## Referenční materiály
 
 - W3C Web Authentication Level 3: <https://www.w3.org/TR/webauthn/>

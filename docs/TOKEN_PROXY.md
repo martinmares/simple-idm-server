@@ -1,5 +1,13 @@
 # simple-idm-token-proxy
 
+The standalone Go successor is **simple-token-proxy** (separate project).
+This Rust implementation remains functional during the transition. Existing
+images, commands and environment settings are not silently migrated. The Go
+version uses SIMPLE_TOKEN_PROXY_* and explicit header mappings; remove obsolete
+release-source switches when adopting it. See the new project's README for
+serve/fetch migration and safety boundaries. No immediate removal of this crate.
+
+
 `simple-idm-token-proxy` provides two explicit modes:
 
 - `serve` runs a localhost reverse proxy for workloads that need to call a

@@ -5,7 +5,7 @@ use axum::{
 use clap::Parser;
 use simple_idm_core::{
     admin, auth, config, db, group_patterns, jwks, oauth2, oidc, onboarding_cleanup,
-    password_reset, security_headers, soft_delete_cleanup,
+    password_reset, security_headers, soft_delete_cleanup, workload_identity,
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -492,6 +492,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .finish()
         .expect("Failed to build token endpoint rate limiter");
 
+    let governor_token = Arc::new(governor_token);
+
+    // Explicit opt-in: workload trust is separate from human OAuth clients and sessions.
+    let workload_routes = match std::env::var("WORKLOAD_IDENTITY_CONFIG_FILE") {
+        Ok(path) => {
+            let document = std::fs::read(path)?;
+            let trust: workload_identity::Config = serde_json::from_slice(&document)?;
+            let state = Arc::new(
+                workload_identity::WorkloadIdentity::new(trust, jwt_service.clone())
+                    .map_err(anyhow::Error::msg)?,
+            );
+            tracing::info!("Kubernetes workload token exchange enabled");
+            Router::new()
+                .route(
+                    "/oauth2/workload/token",
+                    post(workload_identity::handle_exchange),
+                )
+                .layer(axum::extract::DefaultBodyLimit::max(48 * 1024))
+                .layer(GovernorLayer::new(governor_token.clone()))
+                .layer(middleware::map_response(workload_identity::no_store))
+                .with_state(state)
+        }
+        Err(std::env::VarError::NotPresent) => Router::new(),
+        Err(error) => return Err(error.into()),
+    };
+
     // Token endpoint s přísnějším rate limitingem
     let token_routes = Router::new()
         .route("/oauth2/token", post(oauth2::handle_token))
@@ -590,6 +616,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(oauth_state)
         // Merge token route s přísnějším rate limitingem
         .merge(token_routes)
+        .merge(workload_routes)
         // Merge well-known routes
         .merge(jwks_routes)
         .merge(discovery_routes)

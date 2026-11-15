@@ -1,14 +1,20 @@
 # Simple IDM
 
 All 13 crates share one version through `version.workspace = true`.
-Use `just release-version 0.12.2` for the next release; see the
+Use `just release-version <version>` for the next release; see the
 [release guide](docs/RELEASING.md) for GitHub and GitLab pipelines.
 
 For Linux installation with a dedicated service user, linger, and a systemd
 user unit, see the [step-by-step Linux bootstrap guide (Czech)](docs/LINUX_SYSTEMD_BOOTSTRAP.cs.md).
 
+Optional Kubernetes workload identity exchange for Config Server is documented in
+[Workload identity](docs/WORKLOAD_IDENTITY.md). It is disabled until explicitly configured.
+
 For a read-only Google Workspace user export and a preview-first CLI import,
 see the [Directory export/import guide (Czech)](docs/GOOGLE_WORKSPACE_EXPORT.cs.md).
+
+Planned OpenID Connect certification (not yet obtained) is tracked in the
+[certification plan (Czech)](docs/OPENID_CERTIFICATION_PLAN.cs.md).
 
 Simple IDM is a Rust-based OAuth2/OIDC identity stack for small and medium environments that need:
 

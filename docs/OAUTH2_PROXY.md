@@ -256,6 +256,16 @@ X-Auth-Groups: app:role:admin,app:tenant:o2
 `X-Auth-Subject` is the stable OIDC `sub` claim and should be preferred for audit
 and durable identity. `X-Auth-User` is display/login oriented and may change.
 
+`X-Auth-Session` is a domain-separated SHA-256 digest of the random proxy session
+ID, encoded as 43-character unpadded base64url. It distinguishes separate logins
+of the same person and stays stable during token refresh. It is a correlation
+identifier, **not** a session cookie, bearer token or authentication mechanism.
+Use it only together with verified identity behind the sanitizing proxy and a
+private upstream. All incoming `X-Auth-*` headers, including this one, are removed
+before forwarding; the proxy inserts its own binding last. Do not configure the
+groups header to use this reserved name. Other proxy implementations must define
+an equivalent verified login-binding contract before applications depend on it.
+
 `X-Auth-Groups` is CSV by default. Base64url-encoded JSON array output is
 available through `groups_header_format = "jsonb64"`.
 
@@ -275,6 +285,7 @@ groups_header_format = "csv"
 The proxy always emits:
 
 - `X-Auth-Subject`
+- `X-Auth-Session`
 - `X-Auth-User`
 - `X-Auth-Groups`
 

@@ -1843,7 +1843,11 @@ async fn render_mfa_transaction_page(
     error: Option<&str>,
 ) -> Result<String, String> {
     if transaction.stage != "enroll" {
-        return Ok(templates::mfa_challenge_page(error));
+        return Ok(templates::mfa_challenge_page(
+            error,
+            &transaction.tenant_id.to_string(),
+            state.passkeys.is_some(),
+        ));
     }
     let user = sqlx::query_as::<_, User>(
         "SELECT * FROM users WHERE id = $1 AND tenant_id = $2 AND is_active = true AND deleted_at IS NULL",

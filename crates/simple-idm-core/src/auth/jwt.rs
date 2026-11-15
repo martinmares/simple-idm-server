@@ -108,6 +108,47 @@ impl JwtService {
         })
     }
 
+    /// A workload credential cannot acquire human/admin groups or a caller-selected audience.
+    pub fn create_workload_token(
+        &self,
+        subject: String,
+        groups: Vec<String>,
+        subject_expires_at: i64,
+    ) -> Result<(String, i64), JwtError> {
+        let now = Utc::now().timestamp();
+        let expires_at = subject_expires_at.min(now + 300);
+        if expires_at <= now
+            || !subject.starts_with("workload:")
+            || groups.len() != 3
+            || !groups[0].starts_with("simple-config:tenant:")
+            || groups[1] != "simple-config:env:default"
+            || !groups[2].starts_with("simple-config:app:")
+        {
+            return Err(JwtError::InvalidToken);
+        }
+        let claims = Claims {
+            sub: subject,
+            iss: self.issuer.clone(),
+            aud: vec!["simple-config-server".into()],
+            exp: expires_at,
+            iat: now,
+            nonce: None,
+            scope: Some("config:read".into()),
+            email: None,
+            preferred_username: None,
+            groups,
+            amr: vec!["workload".into()],
+            acr: None,
+            custom_claims: HashMap::new(),
+        };
+        let mut header = Header::new(Algorithm::RS256);
+        header.typ = Some("at+jwt".into());
+        header.kid = Some(self.key_id.clone());
+        encode(&header, &claims, &self.encoding_key)
+            .map(|token| (token, expires_at - now))
+            .map_err(|_| JwtError::EncodeError("workload token signing failed".into()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn create_access_token(
         &self,

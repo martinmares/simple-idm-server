@@ -22,6 +22,16 @@ pub struct Session {
 }
 
 impl Session {
+    /// Correlation identifier for trusted upstreams, never a session credential.
+    /// Stable across refresh, different after a new login; must not be accepted
+    /// as authentication without the proxy's verified identity headers.
+    pub fn binding_id(&self) -> String {
+        use sha2::{Digest, Sha256};
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(
+            format!("simple-idm-oauth2-proxy:session:v1:{}", self.session_id).as_bytes(),
+        ))
+    }
+
     pub fn absolute_expired(&self, maximum_age: i64) -> bool {
         Utc::now() >= self.issued_at + Duration::seconds(maximum_age)
     }
@@ -427,6 +437,12 @@ mod tests {
                 refresh_token: None,
             };
             let updated = store.refresh_session(&id, &refresh, &config).await.unwrap();
+            assert_eq!(updated.binding_id(), initial.binding_id());
+            let new_login = store.create_session(&token, &config).await;
+            assert_ne!(
+                store.get(&new_login).await.unwrap().binding_id(),
+                initial.binding_id()
+            );
             assert_eq!(updated.username, "new");
             assert!(updated.groups.is_empty());
             assert_eq!(updated.issued_at.timestamp(), initial.issued_at.timestamp());
