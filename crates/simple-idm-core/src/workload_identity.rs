@@ -614,10 +614,11 @@ mod tests {
 
     #[tokio::test]
     async fn verifies_es256_cluster_identity_and_rejects_algorithm_confusion() {
-        use p256::elliptic_curve::sec1::ToEncodedPoint;
+        use p256::elliptic_curve::{Generate, sec1::ToSec1Point};
+        use p256::pkcs8::EncodePrivateKey as _;
         let (state, url, _dir, task, _) = fixture().await;
-        let private = p256::SecretKey::random(&mut rsa::rand_core::OsRng);
-        let point = private.public_key().to_encoded_point(false);
+        let private = p256::SecretKey::generate_from_rng(&mut rand::rng());
+        let point = private.public_key().to_sec1_point(false);
         let keys: JwkSet = serde_json::from_value(json!({"keys":[{
             "kty":"EC","kid":"cluster-ec","alg":"ES256","use":"sig","crv":"P-256",
             "x":URL_SAFE_NO_PAD.encode(point.x().unwrap()),

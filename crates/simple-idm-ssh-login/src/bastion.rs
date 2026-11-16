@@ -845,7 +845,9 @@ async fn terminal_session(base: &Url, token: &str, host: &str, login: &str) -> R
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(std::ffi::OsStr::from_bytes(&name[..end]))?;
-    let input = AsyncFd::new(tty)?;
+    // SAFETY: AsyncFd owns this File; its descriptor is never closed or replaced
+    // while registered, and get_ref() is only used to read from it.
+    let input = unsafe { AsyncFd::register(tty) }?;
     let mut buffer = [0u8; 8192];
     let mut size = (cols, rows);
     let mut resize = tokio::time::interval(Duration::from_millis(100));

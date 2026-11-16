@@ -16,8 +16,13 @@ members = [
 ]
 resolver = "2"
 
+[workspace.dependencies]
+# SQLx 0.9.0 caps libsqlite3-sys below the SQLite security fix in 0.39.
+# Use the upstream fix until it is included in a crates.io release.
+sqlx = { version = "0.9", git = "https://github.com/transact-rs/sqlx", rev = "10462fa4414c6c7f1ed1d39bb31678e3b726878c" }
+
 [workspace.package]
-version = "0.17.1"
+version = "0.17.2"
 license = "MIT"
 
 [profile.release]

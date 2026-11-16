@@ -122,6 +122,32 @@ RUSTSEC-2026-0346, 0347, 0348 a 0349. Cargo.lock byl aktualizován na opravený
 `rustls 0.23.46`. Pro tyto nálezy se nepřidává žádná výjimka; stávající
 konkrétní výjimka rsa 0.9.10 / RUSTSEC-2023-0071 zůstává beze změny.
 
+Kontrola 2026-11-16 odhalila další nálezy. Aktualizace závislostí řeší:
+
+- `crypto-bigint 0.7.11` a `ctutils 0.4.8` (RUSTSEC-2026-0387 a 0385).
+  `openidconnect 4.1.0` přechází na opravené kryptografické závislosti;
+  testovací `p256` je aktualizováno na 0.14, aby v lockfile nezůstala stará
+  větev `crypto-bigint 0.5`.
+- `libsqlite3-sys 0.39.1` s SQLite 3.54.1 (RUSTSEC-2026-0459).
+  Vydané SQLx 0.9.0 tuto verzi ještě nepovoluje. Sdílená workspace závislost
+  proto dočasně používá upstream revizi
+  [`10462fa4`](https://github.com/transact-rs/sqlx/commit/10462fa4414c6c7f1ed1d39bb31678e3b726878c),
+  která omezení uvolňuje. Po vydání opraveného SQLx vrátit závislost na crates.io.
+- `rustls-webpki 0.103.17`, `webpki-root-certs 1.0.12` a `webpki-roots 1.0.12`
+  (RUSTSEC-2026-0382, 0383 a 0381).
+- `rustix 1.1.6` a `tokio 1.54.1` (RUSTSEC-2026-0486 a 0386).
+  SSH login přechází z deprecated `AsyncFd::new` na `AsyncFd::register`;
+  registrovaný deskriptor vlastní `File` a po dobu registrace se nemění.
+- Neudržované `basic-toml` (RUSTSEC-2026-0374) bylo odstraněno vypnutím
+  nepoužívaného feature `config` v Askama. Projekt nepoužívá `askama.toml`;
+  ostatní původní výchozí features zůstávají zapnuté.
+
+Pro tyto nálezy se nepřidávají výjimky do auditu.
+`just ci-check` po aktualizaci prošel včetně auditu. Dodatečný běh
+`scripts/test-postgres.sh` ověřil všech 12 PostgreSQL testů; celý skript
+skončil chybou u samostatného Go/SCS E2E testu, protože nebyly nastavené
+cesty `SIMPLE_TOKEN_PROXY_E2E_BIN` a `SIMPLE_CONFIG_SERVER_E2E_BIN`.
+
 ```bash
 just ci-check
 bash scripts/test-postgres.sh

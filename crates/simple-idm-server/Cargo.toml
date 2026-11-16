@@ -17,7 +17,7 @@ tower-http = { version = "0.7", features = ["trace", "cors"] }
 tower_governor = "0.8"
 
 # Database
-sqlx = { version = "0.9", features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "sqlite", "uuid", "chrono", "migrate"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "tls-rustls-aws-lc-rs", "postgres", "sqlite", "uuid", "chrono", "migrate"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -73,5 +73,5 @@ open = "5.4"
 simple-idm-common = { path = "../simple-idm-common" }
 simple-idm-ad-auth = { path = "../simple-idm-ad-auth" }
 simple-idm-core = { path = "../simple-idm-core" }
-askama = "0.16"
+askama = { version = "0.16", default-features = false, features = ["derive", "std", "urlencode"] }
 csv = "1.4"
